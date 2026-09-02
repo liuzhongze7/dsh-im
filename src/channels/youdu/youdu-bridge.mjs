@@ -16,6 +16,9 @@ import {
 import {
   promptContentForInboundMessage,
 } from '../shared/semantic/reply-reference.mjs';
+import {
+  deliverOutboundArtifacts,
+} from '../shared/semantic/artifact-delivery.mjs';
 import { t } from '../shared/i18n.mjs';
 import { parseInboundMessage } from './inbound.mjs';
 
@@ -166,7 +169,7 @@ export class YouduBridge {
       const content = hasImages
         ? await promptContentForInboundMessage(promptMessage, { signal: this.#signal })
         : (message.text || placeholderForMedia(message.media));
-      const { answer } = await askInWorkspaceSession({
+      const { answer, artifacts = [] } = await askInWorkspaceSession({
         harness: this.#harness,
         state: this.#state,
         key,
@@ -183,6 +186,7 @@ export class YouduBridge {
       });
       this.#signal?.throwIfAborted();
       await this.#bot.sendReply(target, answer ?? '');
+      await this.#deliverArtifacts(target, message.messageId, artifacts);
       this.#status.messagesReplied += 1;
       this.#status.lastReplyAt = new Date().toISOString();
       this.#status.lastError = null;
@@ -202,6 +206,33 @@ export class YouduBridge {
       this.#logger.error?.(`[dsh-im:youdu] failed to process an inbound message [${failure.referenceId}]:`, error);
       await this.#bot.sendReply(target, messageFailureText(failure)).catch(() => undefined);
     }
+  }
+
+  /** 把 Harness 产出的结果文件通过有度媒体接口回传。 */
+  async #deliverArtifacts(target, replyTo, artifacts = []) {
+    if (!artifacts.length) return null;
+    if (typeof this.#bot?.deliverArtifact !== 'function') return null;
+    const delivery = await deliverOutboundArtifacts({
+      artifacts,
+      deliveryId: replyTo,
+      aggregatePresentation: 'youdu-files',
+      alwaysMerge: true,
+      channelKey: 'youdu',
+      signal: this.#signal,
+      sendImage: (file) => this.#bot.deliverArtifact(target, file, 'image'),
+      sendFile: (file) => this.#bot.deliverArtifact(target, file, 'file'),
+      onFailure: (artifact, error) => setLastMessageFailure(this.#status, error, {
+        userMessage: t('结果文件「{name}」已生成，但暂时未能通过有度发送，请稍后重试。', {
+          name: artifact?.fileName ?? '结果文件',
+        }),
+      }),
+      sendFailureNotice: (_artifact, _error, failure) => this.#bot.sendReply(
+        target,
+        messageFailureText(failure),
+      ),
+      logger: this.#logger,
+    });
+    return delivery;
   }
 }
 
