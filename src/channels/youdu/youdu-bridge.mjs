@@ -59,6 +59,7 @@ export class YouduBridge {
   #status;
   #logger;
   #replyTimeoutMs;
+  #ownerUserId;
   #signal;
   #queues = new Map();
 
@@ -69,6 +70,7 @@ export class YouduBridge {
     status = createYouduBridgeStatus(),
     logger = console,
     replyTimeoutMs = 600_000,
+    ownerUserId = '*',
     signal,
   }) {
     if (!bot || typeof bot.sendReply !== 'function') throw new TypeError('Youdu bot client is required');
@@ -79,6 +81,7 @@ export class YouduBridge {
     this.#status = status;
     this.#logger = logger;
     this.#replyTimeoutMs = replyTimeoutMs;
+    this.#ownerUserId = ownerUserId ?? '*';
     this.#signal = signal;
   }
 
@@ -104,6 +107,10 @@ export class YouduBridge {
     if (!message.messageId || !message.senderId || this.#state.hasSeen(message.messageId)) {
       return Promise.resolve();
     }
+    if (message.kind === 'direct' && !this.#isSenderAllowed(message.senderId)) {
+      this.#status.messagesRejected += 1;
+      return Promise.resolve();
+    }
     const key = conversationKey(message);
     const previous = this.#queues.get(key) ?? Promise.resolve();
     const current = previous
@@ -118,6 +125,12 @@ export class YouduBridge {
 
   async waitForIdle() {
     await Promise.allSettled([...this.#queues.values()]);
+  }
+
+  /** 私聊访问控制：ownerUserId 为 '*'（默认）时放开；否则只允许配置的 owner。 */
+  #isSenderAllowed(senderId) {
+    if (this.#ownerUserId === '*' || !this.#ownerUserId) return true;
+    return senderId === this.#ownerUserId;
   }
 
   async #process(message, key) {

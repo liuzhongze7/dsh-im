@@ -141,6 +141,7 @@ export class YouduRuntime {
       status: this.#status,
       logger: this.#logger,
       replyTimeoutMs: this.#replyTimeoutMs,
+      ownerUserId: this.#config.ownerUserId,
       signal: controller.signal,
     });
     this.#bridge = bridge;
