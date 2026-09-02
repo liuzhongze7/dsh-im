@@ -3,6 +3,19 @@ import {
   setLastMessageFailure,
   messageFailureText,
 } from '../shared/message-failure.mjs';
+import {
+  prefetchInboundFiles,
+  hasInboundFiles,
+  inboundFileUserMessage,
+} from '../shared/inbound-file.mjs';
+import {
+  hasInboundImages,
+  imagePromptUserMessage,
+  imagePromptDiagnostic,
+} from '../shared/image-prompt.mjs';
+import {
+  promptContentForInboundMessage,
+} from '../shared/semantic/reply-reference.mjs';
 import { t } from '../shared/i18n.mjs';
 import { parseInboundMessage } from './inbound.mjs';
 
@@ -140,9 +153,19 @@ export class YouduBridge {
         await this.#bot.sendReply(target, t('目前支持文字、图片和文件消息。'));
         return;
       }
+      if (typeof this.#bot?.downloadMedia !== 'function') {
+        message.media = [];
+      }
 
-      const snapshot = { channel: 'youdu', senderId: message.senderId };
-      const content = message.text || placeholderForMedia(message.media);
+      const promptMessage = prefetchInboundFiles(
+        buildPromptMessage(message, this.#bot),
+        { signal: this.#signal },
+      );
+      const hasImages = hasInboundImages(promptMessage);
+      const hasFiles = hasInboundFiles(promptMessage);
+      const content = hasImages
+        ? await promptContentForInboundMessage(promptMessage, { signal: this.#signal })
+        : (message.text || placeholderForMedia(message.media));
       const { answer } = await askInWorkspaceSession({
         harness: this.#harness,
         state: this.#state,
@@ -155,6 +178,7 @@ export class YouduBridge {
           timeoutMs: this.#replyTimeoutMs,
           signal: this.#signal,
           control: { owner: this, key },
+          files: hasFiles ? promptMessage.files : undefined,
         },
       });
       this.#signal?.throwIfAborted();
@@ -169,7 +193,12 @@ export class YouduBridge {
         return;
       }
       this.#status.lastError = error?.message ?? String(error);
-      const failure = setLastMessageFailure(this.#status, error);
+      const userMessage = inboundFileUserMessage(error)
+        ?? imagePromptUserMessage(error);
+      const failure = setLastMessageFailure(this.#status, error, {
+        userMessage,
+        reason: imagePromptDiagnostic(error)?.reason,
+      });
       this.#logger.error?.(`[dsh-im:youdu] failed to process an inbound message [${failure.referenceId}]:`, error);
       await this.#bot.sendReply(target, messageFailureText(failure)).catch(() => undefined);
     }
@@ -182,6 +211,27 @@ function placeholderForMedia(media) {
   const label = first.kind === 'image' ? '图片' : '文件';
   const name = first.name ? ` ${first.name}` : '';
   return `[${label}${name}]`;
+}
+
+/** 把有度入站媒体转成 dsh-im 认可的 images/files（带 load 下载函数）。 */
+function buildPromptMessage(message, bot) {
+  const images = [];
+  const files = [];
+  for (const media of message.media ?? []) {
+    const source = {
+      name: media.name ?? (media.kind === 'image' ? 'image' : 'file'),
+      ...(media.contentType ? { mediaType: media.contentType } : {}),
+      ...(media.size !== undefined ? { size: media.size } : {}),
+      load: ({ signal, maxBytes } = {}) => bot.downloadMedia(media, { signal, maxBytes }),
+    };
+    if (media.kind === 'image') images.push(source);
+    else files.push(source);
+  }
+  return {
+    content: message.text,
+    ...(images.length ? { images } : {}),
+    ...(files.length ? { files } : {}),
+  };
 }
 
 function helpText() {
