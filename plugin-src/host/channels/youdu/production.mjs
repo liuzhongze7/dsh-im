@@ -20,6 +20,7 @@ function pluginPaths(config) {
 }
 
 export async function createProductionController(ctx, config = {}, internals = {}) {
+  console.log('[dsh-im-youdu] createProductionController: DSH_HOME=', process.env.DSH_HOME, 'config.dataDir=', config.dataDir);
   if (!ctx?.credentials) throw new TypeError('dsh-im Youdu requires ctx.credentials');
   const connection = harnessConnection(ctx, config);
 

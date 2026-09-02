@@ -70,6 +70,7 @@ export class YouduController {
   }
 
   async attachBot({ botId, secret, wsHost, ownerUserId }) {
+    console.log('[dsh-im-youdu] attachBot called: botId=', botId, 'wsHost=', wsHost);
     if (this.#closed) throw new Error('Youdu controller is closed');
     const sourceBotId = cleanString(botId);
     const normalizedSecret = cleanString(secret);
@@ -91,18 +92,23 @@ export class YouduController {
         connectedAt: new Date().toISOString(),
       };
       await this.#credentials.set(identity.secretRef, normalizedSecret);
+      console.log('[dsh-im-youdu] secret stored at', identity.secretRef);
       try {
         await this.#configStore.save(config);
+        console.log('[dsh-im-youdu] config saved');
       } catch (error) {
         await this.#restoreCredential(identity.secretRef, previousSecret);
         throw error;
       }
       try {
+        console.log('[dsh-im-youdu] starting runtime');
         await this.#startRuntime(config, normalizedSecret);
         this.#errors.delete(identity.botId);
+        console.log('[dsh-im-youdu] runtime started, ready=', this.#runtimes.get(identity.botId)?.status?.ready);
       } catch (error) {
         this.#errors.set(identity.botId, safeError('connection-failed', t('有度机器人已接入，消息连接暂未就绪。')));
         this.#logger.warn?.(`[dsh-im:youdu] bot ${identity.botId} credential connection failed:`, error);
+        console.log('[dsh-im-youdu] startRuntime failed:', error?.message);
       }
       this.#touch();
     });

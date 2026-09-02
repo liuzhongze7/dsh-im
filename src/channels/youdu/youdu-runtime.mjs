@@ -154,6 +154,7 @@ export class YouduRuntime {
     });
 
     socket.on('authenticated', () => {
+      console.log('[dsh-im-youdu] socket authenticated (botId=', this.#config.botId, ')');
       const now = Date.now();
       this.#status.ready = true;
       this.#status.youduConnectionState = 'connected';
@@ -163,6 +164,7 @@ export class YouduRuntime {
       readyResolve();
     });
     socket.on('message', (frame) => {
+      console.log('[dsh-im-youdu] inbound frame', frame.cmd);
       const task = bridge.accept(frame);
       if (!task) return;
       void task.catch((error) => {
@@ -171,6 +173,7 @@ export class YouduRuntime {
       });
     });
     socket.on('error', (error) => {
+      console.log('[dsh-im-youdu] socket ERROR:', error?.message);
       if (!this.#status.ready) readyReject(error);
       else {
         this.#status.lastError = error?.message ?? String(error);
@@ -178,10 +181,12 @@ export class YouduRuntime {
       }
     });
     socket.on('disconnected', (reason) => {
+      console.log('[dsh-im-youdu] socket disconnected:', reason);
       this.#status.youduConnectionState = 'offline';
       this.#status.lastError = reason || null;
     });
 
+    console.log('[dsh-im-youdu] connecting to wss://' + wsHost + '/cgi/bot/wss');
     socket.connect();
 
     let timer;
