@@ -1,5 +1,9 @@
 import { YouduSocket } from './protocol.mjs';
 import { normalizeWsHost, DOWNLOAD_MEDIA_URL, HTTP_SCHEME } from './const.mjs';
+import {
+  uploadYouduMedia,
+  buildMediaMessageBody,
+} from './media.mjs';
 import { t } from '../shared/i18n.mjs';
 import {
   createYouduBridgeStatus,
@@ -97,7 +101,7 @@ export class YouduRuntime {
     };
     const socket = this.#createSocket({
       wsHost,
-      botId: this.#config.botId,
+      botId: this.#config.sourceBotId,
       secret: this.#secret,
       logger,
     });

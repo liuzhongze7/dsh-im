@@ -41,12 +41,16 @@ function normalizeBot(value) {
   if (!value || typeof value !== 'object') return null;
   const botId = safeBotId(value.botId);
   const secretRef = safeSecretRef(value.secretRef);
+  const sourceBotId = cleanString(value.sourceBotId);
   const wsHost = cleanString(value.wsHost);
   const ownerUserId = cleanString(value.ownerUserId);
-  if (!botId || !secretRef || !wsHost) return null;
+  if (!botId || !secretRef || !sourceBotId || !wsHost) return null;
+  const derived = deriveYouduBotIdentity(sourceBotId);
+  if (derived.botId !== botId || derived.secretRef !== secretRef) return null;
   return Object.freeze({
     botId,
     secretRef,
+    sourceBotId,
     wsHost,
     ownerUserId: ownerUserId ?? '*',
     createdAt: cleanString(value.createdAt) ?? new Date().toISOString(),

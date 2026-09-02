@@ -48,6 +48,10 @@ function validCredential(value, maxLength) {
   return typeof value === 'string' && value.trim().length > 0 && value.length <= maxLength;
 }
 
+function validSourceBotId(value) {
+  return typeof value === 'string' && value.trim().length > 0 && value.length <= 128;
+}
+
 function validWsHost(value) {
   return typeof value === 'string' && value.trim().length > 0 && value.length <= 256;
 }
@@ -65,8 +69,10 @@ export function createYouduRpcHandler(controller, options = {}) {
       if (endpoint === YOUDU_ENDPOINTS.status) {
         value = await publicStatus(controller.status(), cachedEncode);
       } else if (endpoint === YOUDU_ENDPOINTS.attachBot) {
-        if (!validCredential(payload?.secret, 512) || !validWsHost(payload?.wsHost)) {
-          throw new TypeError('Youdu bot secret and WebSocket host are required');
+        if (!validSourceBotId(payload?.botId)
+          || !validCredential(payload?.secret, 512)
+          || !validWsHost(payload?.wsHost)) {
+          throw new TypeError('Youdu bot id, secret and WebSocket host are required');
         }
         value = await publicStatus(await controller.attachBot({
           botId: payload?.botId,

@@ -71,17 +71,19 @@ export class YouduController {
 
   async attachBot({ botId, secret, wsHost, ownerUserId }) {
     if (this.#closed) throw new Error('Youdu controller is closed');
+    const sourceBotId = cleanString(botId);
     const normalizedSecret = cleanString(secret);
     const normalizedHost = cleanString(wsHost);
-    if (!normalizedSecret || !normalizedHost) {
-      throw new TypeError('Youdu bot secret and WebSocket host are required');
+    if (!sourceBotId || !normalizedSecret || !normalizedHost) {
+      throw new TypeError('Youdu bot id, secret and WebSocket host are required');
     }
-    const identity = deriveYouduBotIdentity(normalizedHost);
+    const identity = deriveYouduBotIdentity(sourceBotId);
     await this.#withBotTransition(identity.botId, async () => {
       if (this.#closed) throw new Error('Youdu controller is closed');
       const previousSecret = await this.#credentials.resolve(identity.secretRef).catch(() => undefined);
       const config = {
         botId: identity.botId,
+        sourceBotId,
         secretRef: identity.secretRef,
         wsHost: normalizedHost,
         ownerUserId: cleanString(ownerUserId) ?? '*',
