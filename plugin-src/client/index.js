@@ -12,6 +12,7 @@ import {
   WecomLogoGlyph,
   WeixinLogoGlyph,
   WhatsappLogoGlyph,
+  YouduLogoGlyph,
 } from './channel-logos.js';
 import { DINGTALK_RPC_CHANNEL } from './channels/dingtalk/api.js';
 import { DingtalkSettingsTab } from './channels/dingtalk/index.js';
@@ -42,6 +43,8 @@ import { installWeixinStyles } from './channels/weixin/styles.js';
 import { WHATSAPP_RPC_CHANNEL } from './channels/whatsapp/api.js';
 import { WhatsappSettingsTab } from './channels/whatsapp/index.js';
 import { installWhatsappStyles } from './channels/whatsapp/styles.js';
+import { YouduSettingsTab } from './channels/youdu/index.js';
+import { YOUDU_RPC_CHANNEL } from './channels/youdu/api.js';
 import { en, h, IM_LOCALE_NAMESPACE, setImTranslator, zh } from './i18n.js';
 import { BotSettingsContext } from './channel-card-meta.js';
 import {
@@ -80,6 +83,7 @@ const CHANNELS = Object.freeze([
   { id: 'telegram', label: 'Telegram' },
   { id: 'discord', label: 'Discord' },
   { id: 'whatsapp', label: 'WhatsApp' },
+  { id: 'youdu', label: '有度' },
   { id: 'office', label: 'AI Office', note: '（实验功能）' },
 ]);
 
@@ -126,6 +130,11 @@ function WhatsappLogo() {
     h(WhatsappLogoGlyph));
 }
 
+function YouduLogo() {
+  return h('span', { className: 'dim-logo dim-logoYoudu', 'aria-hidden': 'true' },
+    h(YouduLogoGlyph));
+}
+
 function OfficeLogo() {
   return h('span', { className: 'dim-logo dim-logoOffice', 'aria-hidden': 'true' },
     h(OfficeLogoGlyph));
@@ -141,6 +150,7 @@ function ChannelLogo({ channel }) {
   if (channel === 'telegram') return h(TelegramLogo);
   if (channel === 'discord') return h(DiscordLogo);
   if (channel === 'whatsapp') return h(WhatsappLogo);
+  if (channel === 'youdu') return h(YouduLogo);
   return h(OfficeLogo);
 }
 
@@ -170,6 +180,7 @@ export function IMSettingsTab({
   wecomRpcCall,
   weixinRpcCall,
   whatsappRpcCall,
+  youduRpcCall,
   officeRpcCall,
   updateRpcCall,
   deliveryRpcCall,
@@ -199,6 +210,7 @@ export function IMSettingsTab({
     wecomRpcCall,
     weixinRpcCall,
     whatsappRpcCall,
+    youduRpcCall,
     officeRpcCall,
     updateRpcCall,
     deliveryRpcCall,
@@ -220,6 +232,7 @@ export function IMSettingsTab({
     wecomRpcCall,
     weixinRpcCall,
     whatsappRpcCall,
+    youduRpcCall,
   ]);
   const botSettingsContext = React.useMemo(() => Object.freeze({
     openBotSettings: setDeliverySettings,
@@ -315,6 +328,8 @@ export function IMSettingsTab({
                         ? h(DiscordSettingsTab, { rpcCall: rpcCalls.discordRpcCall })
                         : active.id === 'whatsapp'
                           ? h(WhatsappSettingsTab, { rpcCall: rpcCalls.whatsappRpcCall })
+                          : active.id === 'youdu'
+                            ? h(YouduSettingsTab, { rpcCall: rpcCalls.youduRpcCall })
                           : h(OfficeSettingsTab, { rpcCall: rpcCalls.officeRpcCall }))),
     ),
   ));
@@ -362,6 +377,8 @@ export function apply(ctx) {
     ctx.connection.rpc.call(DISCORD_RPC_CHANNEL, endpoint, payload, signal);
   const whatsappRpcCall = (endpoint, payload, signal) =>
     ctx.connection.rpc.call(WHATSAPP_RPC_CHANNEL, endpoint, payload, signal);
+  const youduRpcCall = (endpoint, payload, signal) =>
+    ctx.connection.rpc.call(YOUDU_RPC_CHANNEL, endpoint, payload, signal);
   const slackRpcCall = (endpoint, payload, signal) =>
     ctx.connection.rpc.call(SLACK_RPC_CHANNEL, endpoint, payload, signal);
   const officeRpcCall = (endpoint, payload, signal) =>
@@ -392,6 +409,7 @@ export function apply(ctx) {
       wecomRpcCall,
       weixinRpcCall,
       whatsappRpcCall,
+      youduRpcCall,
       officeRpcCall,
       updateRpcCall,
       deliveryRpcCall,
