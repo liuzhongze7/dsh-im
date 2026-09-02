@@ -20,7 +20,10 @@ function pluginPaths(config) {
 }
 
 export async function createProductionController(ctx, config = {}, internals = {}) {
-  console.log('[dsh-im-youdu] createProductionController: DSH_HOME=', process.env.DSH_HOME, 'config.dataDir=', config.dataDir);
+  let log;
+  try { log = typeof ctx.logger === 'function' ? ctx.logger('dsh-im:youdu') : (ctx.logger ?? console); }
+  catch { log = console; }
+  log.info('[dsh-im-youdu] createProductionController entered; DSH_HOME=', process.env.DSH_HOME, 'dataDir=', config.dataDir);
   if (!ctx?.credentials) throw new TypeError('dsh-im Youdu requires ctx.credentials');
   const connection = harnessConnection(ctx, config);
 
@@ -30,8 +33,9 @@ export async function createProductionController(ctx, config = {}, internals = {
   const Controller = internals.Controller ?? YouduController;
   const Runtime = internals.Runtime ?? YouduRuntime;
   const createSupervisor = internals.createConnectionSupervisor ?? createConnectionSupervisor;
-  const logger = typeof ctx.logger === 'function' ? ctx.logger('dsh-im:youdu') : (ctx.logger ?? console);
+  const logger = log;
   const paths = pluginPaths(config);
+  log.info('[dsh-im-youdu] config path=', paths.config);
   const configStore = await new ConfigStore(paths.config).load();
   const defaultWorkspace = resolve(config.workspace ?? process.cwd());
   const harness = new Harness({
@@ -40,6 +44,7 @@ export async function createProductionController(ctx, config = {}, internals = {
     autostart: false,
     dshBin: config.dshBin ?? 'dsh',
   });
+  log.info('[dsh-im-youdu] harness created');
   const stateStores = new Map();
   const statePath = (botId) => resolve(paths.bots, botId, 'state.json');
   const stateFor = async (botId) => {

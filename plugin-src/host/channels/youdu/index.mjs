@@ -5,20 +5,22 @@ export const name = 'dsh-im-youdu-host';
 export const inject = ['connection', 'credentials', 'typertGateway'];
 
 export async function apply(ctx, config = {}) {
-  console.log('[dsh-im-youdu] apply() called');
+  let log = console;
+  try { if (typeof ctx?.logger === 'function') log = ctx.logger('dsh-im:youdu'); } catch { log = console; }
+  log.info('[dsh-im-youdu] apply() called');
   if (config?.controller) {
-    console.log('[dsh-im-youdu] apply() -> installYouduRpc (controller provided)');
+    log.info('[dsh-im-youdu] apply() -> installYouduRpc (controller provided)');
     return installYouduRpc(ctx, config.controller, config.rpcOptions, config.rpcAuthority);
   }
   const production = await createProductionController(ctx, config, config.internals);
-  console.log('[dsh-im-youdu] production controller created');
+  log.info('[dsh-im-youdu] production controller created');
   const disposeRpc = installYouduRpc(
     ctx,
     production.controller,
     config.rpcOptions,
     config.rpcAuthority,
   );
-  console.log('[dsh-im-youdu] /youdu RPC installed');
+  log.info('[dsh-im-youdu] /youdu RPC installed');
   ctx.effect(() => async () => {
     await production.close();
   }, 'dsh-im: close Youdu bot connections');
