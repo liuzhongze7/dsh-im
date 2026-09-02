@@ -61,9 +61,8 @@ export function createYouduRpcHandler(controller, options = {}) {
     throw new TypeError('Youdu RPC requires a controller');
   }
   const cachedEncode = options?.cachedEncode ?? ((value) => value);
-  return async (state, payload, context) => {
-    const signal = context?.signal ?? payload?.signal ?? options?.signal;
-    const endpoint = state?.endpoint ?? payload?.endpoint;
+  return async (endpoint, payload, signal) => {
+    const activeSignal = signal ?? payload?.signal ?? options?.signal;
     try {
       let value;
       if (endpoint === YOUDU_ENDPOINTS.status) {
@@ -93,11 +92,11 @@ export function createYouduRpcHandler(controller, options = {}) {
       } else {
         throw new Error(`Unknown Youdu RPC endpoint: ${endpoint}`);
       }
-      return signal?.aborted
+      return activeSignal?.aborted
         ? { ok: false, error: { code: 'cancelled', message: 'The request was cancelled.' } }
         : { ok: true, value };
     } catch (error) {
-      return signal?.aborted
+      return activeSignal?.aborted
         ? { ok: false, error: { code: 'cancelled', message: 'The request was cancelled.' } }
         : { ok: false, error: { code: 'youdu-operation-failed', message: error?.message ?? '有度操作失败，请稍后重试。' } };
     }
