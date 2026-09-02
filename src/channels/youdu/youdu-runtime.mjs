@@ -100,7 +100,7 @@ export class YouduRuntime {
       error: (...args) => this.#logger.error?.(...args),
     };
     const socket = this.#createSocket({
-      wsHost,
+      wsUrl: wsHost,
       botId: this.#config.sourceBotId,
       secret: this.#secret,
       logger,

@@ -138,7 +138,7 @@ export class YouduSocket extends EventEmitter {
 
   constructor(options) {
     super();
-    const wsUrl = String(options?.wsUrl ?? '').trim();
+    const wsUrl = String(options?.wsUrl ?? options?.wsHost ?? '').trim();
     if (!wsUrl) throw new TypeError('Youdu WebSocket URL is required');
     this.#options = {
       heartbeatIntervalMs: WS_HEARTBEAT_DEFAULT,
