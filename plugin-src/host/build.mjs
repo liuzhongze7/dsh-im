@@ -16,6 +16,7 @@ const externalRuntimePackages = [
   'dingtalk-stream',
   'qrcode',
   'undici',
+  'ws',
 ];
 const external = externalRuntimePackages.flatMap((name) => [name, `${name}/*`]);
 
