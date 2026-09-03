@@ -19,7 +19,7 @@ import { createConnectionSupervisor } from './connection-supervisor.mjs';
 import { harnessConnection } from '../../harness-connection.mjs';
 
 /** 从设置存储读取访问策略；未配置时：owner='*'（未配置）→ 命令开放，配置了具体 owner → 仅该 owner 可执行命令。 */
-function createYouduAccessPolicy(settingsStore, botId, botConfig, groupResponseMode = 'all') {
+function createYouduAccessPolicy(settingsStore, botId, botConfig, groupResponseMode = 'mention') {
   const ownerUserId = typeof botConfig.ownerUserId === 'string' ? botConfig.ownerUserId.trim() : '';
   const ownerReal = Boolean(ownerUserId && ownerUserId !== '*');
   const ownerUsers = ownerReal ? [{ id: ownerUserId, canExecuteCommands: true }] : [];
@@ -122,7 +122,7 @@ export async function createProductionController(ctx, config = {}, internals = {
         connectTimeoutMs: config.connectTimeoutMs ?? 20_000,
         botId: botConfig.sourceBotId ?? botConfig.botId ?? botId,
         contextEnhancement: createYouduContextEnhancement(settingsStore, botId),
-        accessPolicy: createYouduAccessPolicy(settingsStore, botId, botConfig, config.groupResponseMode ?? 'all'),
+        accessPolicy: createYouduAccessPolicy(settingsStore, botId, botConfig, config.groupResponseMode ?? 'mention'),
         logger: {
           error: (...args) => logger.error?.(`[${botId}]`, ...args),
           warn: (...args) => logger.warn?.(`[${botId}]`, ...args),
