@@ -175,6 +175,7 @@ export class YouduRuntime {
 
     socket.on('authenticated', () => {
       this.#logger.info?.('[dsh-im-youdu] socket authenticated (botId=', this.#config.botId, ')');
+      bridge.setGid?.(socket.getGid?.() ?? '');
       const now = Date.now();
       this.#status.ready = true;
       this.#status.youduConnectionState = 'connected';

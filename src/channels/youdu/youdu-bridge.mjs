@@ -140,6 +140,7 @@ export class YouduBridge {
   #replyTimeoutMs;
   #ownerUserId;
   #botId;
+  #gid = '';
   #contextEnhancement;
   #accessPolicy;
   #groupResponseMode;
@@ -368,18 +369,23 @@ export class YouduBridge {
   }
 
   /** 群聊 @ 判定（G3）：mention 模式仅 atUser 命中机器人身份时寻址；all 模式全部响应。 */
+  setGid(value) {
+    this.#gid = clean(value) ?? '';
+  }
+
   #isAddressedGroupMessage(message) {
     if (message.kind !== 'group') return true;
     if (this.#groupResponseMode === 'all') return true;
     this.#logger.info?.('[dsh-im-youdu] group @ check', JSON.stringify({
       atUserIds: message.atUserIds,
       botId: this.#botId,
+      gid: this.#gid,
       ownerUserId: this.#ownerUserId,
       mode: this.#groupResponseMode,
       senderId: message.senderId,
       text: (message.text ?? '').slice(0, 40),
     }));
-    const identities = [this.#botId, this.#ownerUserId]
+    const identities = [this.#botId, this.#ownerUserId, this.#gid]
       .map((value) => clean(value))
       .filter(Boolean);
     return message.atUserIds.some((id) => identities.includes(id)
