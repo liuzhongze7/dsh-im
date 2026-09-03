@@ -164,7 +164,7 @@ export class YouduBridge {
     botId = '',
     contextEnhancement,
     accessPolicy,
-    groupResponseMode = 'mention',
+    groupResponseMode = 'all',
     signal,
   }) {
     if (!bot || typeof bot.sendReply !== 'function') throw new TypeError('Youdu bot client is required');
