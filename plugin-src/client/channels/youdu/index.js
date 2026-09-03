@@ -377,7 +377,7 @@ export function YouduSettingsTab({ rpcCall }) {
             field('服务器地址', {
               value: wsHost,
               onChange: (e) => setWsHost(e.target.value),
-              placeholder: 'internal.cindacode.com',
+              placeholder: 'push.example.com',
               maxLength: 256,
             }),
             field('机器人 botId', {
