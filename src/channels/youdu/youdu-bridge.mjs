@@ -376,15 +376,6 @@ export class YouduBridge {
   #isAddressedGroupMessage(message) {
     if (message.kind !== 'group') return true;
     if (this.#groupResponseMode === 'all') return true;
-    this.#logger.info?.('[dsh-im-youdu] group @ check', JSON.stringify({
-      atUserIds: message.atUserIds,
-      botId: this.#botId,
-      gid: this.#gid,
-      ownerUserId: this.#ownerUserId,
-      mode: this.#groupResponseMode,
-      senderId: message.senderId,
-      text: (message.text ?? '').slice(0, 40),
-    }));
     const identities = [this.#botId, this.#ownerUserId, this.#gid]
       .map((value) => clean(value))
       .filter(Boolean);
