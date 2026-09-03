@@ -15,7 +15,7 @@ import { SOCKET_OPEN, } from "./types.js";
  * 统一合并了原 @youdu/openclaw-youdu 的 `WSClient` + `WsConnectionManager`（单类），
  * 是 dsh-im `protocol.mjs` 与插件 `sdk/ws-*.ts` 的运行时无关共享实现。
  *
- * 契约要点（详见 @youdu/youdu-protocol 不变契约）：
+ * 契约要点：
  * - 长连接地址 `wss://<host>:7443/cgi/bot/wss`
  * - 首次认证帧 `subscribe`（body: { botId, secret }），重连认证帧 `reconnect`（body: { token }）
  * - 心跳为 WebSocket 控制帧 ping/pong
