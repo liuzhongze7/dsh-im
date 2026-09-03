@@ -1,9 +1,10 @@
-import { YouduSocket } from './protocol.mjs';
-import { normalizeWsHost, DOWNLOAD_MEDIA_URL, HTTP_SCHEME } from './const.mjs';
 import {
-  uploadYouduMedia,
   buildMediaMessageBody,
-} from './media.mjs';
+  downloadMedia as youduDownloadMedia,
+  normalizeWsHost,
+  uploadMedia as youduUploadMedia,
+  YouduSocket,
+} from '@youdu/youdu-protocol';
 import { t } from '../shared/i18n.mjs';
 import {
   createYouduBridgeStatus,
@@ -128,25 +129,19 @@ export class YouduRuntime {
         },
         downloadMedia: async (attachment, { signal, maxBytes } = {}) => {
           const host = normalizeWsHost(this.#config.wsHost);
-          const url = `${HTTP_SCHEME}${host}${DOWNLOAD_MEDIA_URL}`
-            + `?kind=${encodeURIComponent(attachment.kind)}`
-            + `&mediaId=${encodeURIComponent(attachment.mediaId)}`;
-          const response = await fetch(url, {
-            headers: { 'x-token': socket.getToken() },
+          const { buffer } = await youduDownloadMedia({
+            host,
+            token: socket.getToken(),
+            kind: attachment.kind,
+            mediaId: attachment.mediaId ?? '',
+            maxBytes,
             signal,
           });
-          if (!response?.ok) {
-            throw new Error(`Youdu media download failed with HTTP ${response?.status ?? 'unknown'}`);
-          }
-          const buffer = Buffer.from(await response.arrayBuffer());
-          if (Number.isFinite(maxBytes) && buffer.length > maxBytes) {
-            throw new Error('Youdu media exceeds the allowed size');
-          }
           return buffer;
         },
         deliverArtifact: async (target, file, kind) => {
           const host = normalizeWsHost(this.#config.wsHost);
-          const media = await uploadYouduMedia({
+          const media = await youduUploadMedia({
             host,
             token: socket.getToken(),
             fileName: file?.fileName,

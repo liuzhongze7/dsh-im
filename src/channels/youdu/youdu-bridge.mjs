@@ -61,7 +61,7 @@ import {
 } from '../shared/inbound-access.mjs';
 import { isSharedLocalCommand } from '../shared/command-permission.mjs';
 import { t } from '../shared/i18n.mjs';
-import { parseInboundMessage } from './inbound.mjs';
+import { prepareMessageBody } from '@youdu/youdu-protocol';
 
 function interactionResolvedText() {
   return t('这个问题已在其他客户端处理，无需再次回答。');
@@ -193,7 +193,9 @@ export class YouduBridge {
   /** 处理一条入站消息帧；返回 Promise（入队串行，防止并发写会话）。 */
   accept(frame) {
     if (this.#signal?.aborted) return Promise.resolve();
-    const { text, media, msgType } = parseInboundMessage(frame.body ?? {});
+    const body = frame.body ?? {};
+    const { text, media } = prepareMessageBody(body);
+    const msgType = body?.msgType ?? undefined;
     const message = {
       messageId: clean(frame.body?.msgId) ?? clean(frame.headers?.reqId),
       chatId: clean(frame.body?.chatId),
