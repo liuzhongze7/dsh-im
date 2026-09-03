@@ -99,6 +99,15 @@ function clean(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
+/** 剥掉有度群聊 @ 提及包装（形如 `@oc86aed...(显示名)`），只留真正正文。 */
+const YOUDU_MENTION_RE = /@[^\s(]+(?:\([^)]*\))?/g;
+function cleanMentions(text) {
+  return String(text ?? '')
+    .replace(YOUDU_MENTION_RE, '')
+    .replace(/[ \t]{2,}/gu, ' ')
+    .trim();
+}
+
 /** 会话路由 key：私聊用 senderId，群聊用 chatId。 */
 function conversationKey(message) {
   return message.kind === 'group' ? `group:${message.chatId}` : `direct:${message.senderId}`;
@@ -204,7 +213,7 @@ export class YouduBridge {
       senderId: clean(frame.body?.from?.userId) ?? clean(frame.body?.from?.userid) ?? '',
       senderName: clean(frame.body?.from?.name) ?? '',
       kind: (frame.body?.chatType === 'group' || frame.body?.chatType === 'groupChat') ? 'group' : 'direct',
-      text,
+      text: cleanMentions(text),
       media,
       msgType: msgType ?? undefined,
       atUserIds: extractAtUserIds(frame),
