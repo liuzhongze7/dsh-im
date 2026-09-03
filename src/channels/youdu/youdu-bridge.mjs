@@ -62,6 +62,11 @@ import {
 import { isSharedLocalCommand } from '../shared/command-permission.mjs';
 import { t } from '../shared/i18n.mjs';
 import { prepareMessageBody } from './youdu-protocol/index.js';
+import {
+  bindYouduKbRunContext,
+  buildYouduKbRunContext,
+  releaseYouduKbRunContext,
+} from './kb/kb-run-context.mjs';
 
 function interactionResolvedText() {
   return t('这个问题已在其他客户端处理，无需再次回答。');
@@ -149,6 +154,7 @@ export class YouduBridge {
   #replyTimeoutMs;
   #ownerUserId;
   #botId;
+  #kbAccount;
   #gid = '';
   #contextEnhancement;
   #accessPolicy;
@@ -172,6 +178,7 @@ export class YouduBridge {
     replyTimeoutMs = 600_000,
     ownerUserId = '*',
     botId = '',
+    kbAccount,
     contextEnhancement,
     accessPolicy,
     groupResponseMode = 'mention',
@@ -187,6 +194,11 @@ export class YouduBridge {
     this.#replyTimeoutMs = replyTimeoutMs;
     this.#ownerUserId = ownerUserId ?? '*';
     this.#botId = botId ?? '';
+    this.#kbAccount = kbAccount
+      && typeof kbAccount === 'object'
+      && (typeof kbAccount.botId === 'string' || typeof kbAccount.secret === 'string' || typeof kbAccount.url === 'string')
+      ? kbAccount
+      : null;
     this.#contextEnhancement = contextEnhancement;
     this.#accessPolicy = accessPolicy;
     const resolvedGroupMode = groupResponseMode
@@ -635,31 +647,43 @@ export class YouduBridge {
       }
 
       await markMessageSeen();
-      const { answer, artifacts = [] } = await askInWorkspaceSession({
-        harness: this.#harness,
-        state: this.#state,
-        key,
-        text,
-        content,
-        contextEnhanced,
-        createOptions: { signal: this.#signal },
-        existsOptions: { signal: this.#signal },
-        askOptions: {
-          timeoutMs: this.#replyTimeoutMs,
-          signal: this.#signal,
-          control: { owner: this, key },
-          progressMode: 'all',
-          onUpdate: () => undefined,
-          onInteraction: (interaction) => this.#handleInteraction(interaction, {
-            key,
-            actor: message.senderId,
-            target,
-            requiresMention: message.kind === 'group',
-          }),
-          onInteractionResolved: (resolution) => this.#handleInteractionResolved(resolution),
-          files: hasFiles ? promptMessage.files : undefined,
-        },
-      });
+      let answer;
+      let artifacts = [];
+      let boundKbSessionId = null;
+      try {
+        ({ answer, artifacts } = await askInWorkspaceSession({
+          harness: this.#harness,
+          state: this.#state,
+          key,
+          text,
+          content,
+          contextEnhanced,
+          createOptions: { signal: this.#signal },
+          existsOptions: { signal: this.#signal },
+          onSessionReady: (binding) => {
+            if (!this.#kbAccount) return;
+            boundKbSessionId = binding.sessionId;
+            bindYouduKbRunContext(binding.sessionId, buildYouduKbRunContext(this.#kbAccount, message));
+          },
+          askOptions: {
+            timeoutMs: this.#replyTimeoutMs,
+            signal: this.#signal,
+            control: { owner: this, key },
+            progressMode: 'all',
+            onUpdate: () => undefined,
+            onInteraction: (interaction) => this.#handleInteraction(interaction, {
+              key,
+              actor: message.senderId,
+              target,
+              requiresMention: message.kind === 'group',
+            }),
+            onInteractionResolved: (resolution) => this.#handleInteractionResolved(resolution),
+            files: hasFiles ? promptMessage.files : undefined,
+          },
+        }));
+      } finally {
+        if (boundKbSessionId) releaseYouduKbRunContext(boundKbSessionId);
+      }
       if (batchSubmission) {
         this.#batchInputs.complete(key, batchSubmission.token);
         batchSettled = true;

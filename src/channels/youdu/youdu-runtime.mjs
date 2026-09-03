@@ -160,6 +160,11 @@ export class YouduRuntime {
       replyTimeoutMs: this.#replyTimeoutMs,
       ownerUserId: this.#config.ownerUserId,
       botId: this.#botId || this.#config.sourceBotId || this.#config.botId,
+      kbAccount: {
+        botId: this.#config.sourceBotId || this.#config.botId || this.#botId || '',
+        secret: this.#secret,
+        url: this.#config.wsHost,
+      },
       contextEnhancement: this.#contextEnhancement,
       accessPolicy: this.#accessPolicy,
       signal: controller.signal,

@@ -1,5 +1,6 @@
 import { createProductionController } from './production.mjs';
 import { installYouduRpc } from './rpc.mjs';
+import { installYouduKbTool } from '../../../../src/channels/youdu/kb/tool.mjs';
 
 export const name = 'dsh-im-youdu-host';
 export const inject = ['connection', 'credentials', 'typertGateway'];
@@ -14,6 +15,14 @@ export async function apply(ctx, config = {}) {
   }
   const production = await createProductionController(ctx, config, config.internals);
   log.info('[dsh-im-youdu] production controller created');
+  // Register the youdu_kb knowledge-base tool host-globally. It resolves its
+  // account + gids from the per-session run context bound by the YouDu bridge;
+  // absent a bound context it fails closed (YOUDU_IM_CONTEXT_REQUIRED).
+  if (typeof ctx?.inject === 'function') {
+    ctx.inject(['tools', 'systemPrompt'], (toolCtx) => installYouduKbTool(toolCtx));
+  } else {
+    installYouduKbTool(ctx);
+  }
   const disposeRpc = installYouduRpc(
     ctx,
     production.controller,
