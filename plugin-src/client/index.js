@@ -45,6 +45,7 @@ import { WhatsappSettingsTab } from './channels/whatsapp/index.js';
 import { installWhatsappStyles } from './channels/whatsapp/styles.js';
 import { YouduSettingsTab } from './channels/youdu/index.js';
 import { YOUDU_RPC_CHANNEL } from './channels/youdu/api.js';
+import { installYouduStyles } from './channels/youdu/styles.js';
 import { en, h, IM_LOCALE_NAMESPACE, setImTranslator, zh } from './i18n.js';
 import { BotSettingsContext } from './channel-card-meta.js';
 import {
@@ -353,6 +354,7 @@ export function apply(ctx) {
       installTelegramStyles(),
       installDiscordStyles(),
       installWhatsappStyles(),
+      installYouduStyles(),
       installOfficeStyles(),
       installImStyles(),
     ];

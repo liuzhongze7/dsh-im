@@ -1,6 +1,7 @@
 import * as React from 'react';
 
 import { h } from '../../i18n.js';
+import youduLogo from './youdu_logo.png';
 import { CredentialActionIcon } from '../../credential-binding.js';
 import {
   BotSettingsButton,
@@ -66,6 +67,51 @@ function accessModeLabel(account) {
   return mode === 'allowlist' ? `白名单模式（${commands}）` : `开放模式（${commands}）`;
 }
 
+function BrandMark() {
+  return h('div', { className: 'ydt-brandMark', 'aria-hidden': 'true' },
+    h('img', { src: youduLogo, alt: '', width: 64, height: 64 }));
+}
+
+function BotAvatar() {
+  return h('div', { className: 'ydt-avatar dim-botAvatar', 'aria-hidden': 'true' },
+    h('img', { src: youduLogo, alt: '', width: 34, height: 34 }));
+}
+
+function LoadingView() {
+  return h('div', {
+    className: 'dim-surfaceCard dim-loadingView',
+    'aria-busy': 'true',
+    'aria-label': '正在读取有度机器人列表',
+  },
+  h('div', { className: 'dim-spinner', 'aria-hidden': 'true' }),
+  h('span', null, '正在读取有度连接状态…'));
+}
+
+function EmptyView({ onStart }) {
+  return h('section', { className: 'dim-surfaceCard' },
+    h('div', { className: 'ydt-empty dim-emptyView' },
+      h('div', { className: 'ydt-emptyCopy dim-emptyCopy' },
+        h('div', { className: 'dim-stateLabel' },
+          h('span', { className: 'dim-stateDot' }),
+          h('span', null, '尚未接入机器人')),
+        h('h3', null, '接入第一个有度机器人'),
+        h('p', null, '填写有度机器人服务器地址、botId 与密钥，即可把有度消息接入 DeepSeek Harness。'),
+        h('div', { className: 'dim-viewActions' },
+          h(Button, { kind: 'primary', onClick: onStart }, '手动接入机器人'))),
+      h('div', { className: 'ydt-emptyBrand dim-emptyBrand', 'aria-hidden': 'true' }, h(BrandMark))));
+}
+
+function PageError({ error, onRetry }) {
+  return h('section', { className: 'dim-surfaceCard' },
+    h('div', { className: 'dim-inlineError', role: 'alert' },
+      h('div', null,
+        h('h3', null, '无法读取有度机器人'),
+        h('p', null, error.message),
+        error.code ? h('span', { className: 'dim-errorCode' }, error.code) : null,
+        h('div', { className: 'dim-viewActions' },
+          h(Button, { kind: 'primary', onClick: onRetry }, '重新读取')))));
+}
+
 function RemoveConfirmation({ account, busy, onConfirm, onCancel }) {
   return h('div', { className: 'ddt-confirm dim-confirm', role: 'alertdialog' },
     h('strong', null, `从 DeepSeek Harness 移除“${account.bot.name}”？`),
@@ -95,7 +141,8 @@ function AccountCard({
   return h('article', { className: 'ddt-card dim-botCard', 'data-bot-id': account.botId },
     h('div', { className: 'ddt-cardBody dim-botCardBody' },
       h('div', { className: 'ddt-accountTop dim-botCardTop' },
-        h('div', { className: 'ddt-accountIdentity dim-botIdentity' },
+        h('div', { className: 'ydt-accountIdentity dim-botIdentity' },
+          h(BotAvatar),
           h('div', { className: 'dim-botName' },
             h('h3', null, account.bot.name),
             h('p', { title: account.bot.wsHostMasked }, account.bot.wsHostMasked ?? '服务器已安全保存'))),
@@ -115,7 +162,7 @@ function AccountCard({
             connected: account.connected,
             accessPolicy: account.accessPolicy,
           }))),
-      h('div', { className: 'dim-botAccessMode' },
+      h('div', { className: 'ydt-accessMode dim-botAccessMode' },
         h('span', null, '访问模式'),
         h('strong', null, accessModeLabel(account))),
       h(WorkspaceEditor, {
@@ -160,20 +207,18 @@ export function YouduSettingsTab({ rpcCall }) {
     bots: [],
     totals: { configured: 0, connected: 0 },
   });
-  const [busy, setBusy] = React.useState(false);
   const [busyByBot, setBusyByBot] = React.useState({});
   const [feedbackByBot, setFeedbackByBot] = React.useState({});
   const [removeTarget, setRemoveTarget] = React.useState(null);
   const [credentialOpen, setCredentialOpen] = React.useState(false);
   const [credentialBusy, setCredentialBusy] = React.useState(false);
   const [credentialError, setCredentialError] = React.useState(null);
+  const [pageError, setPageError] = React.useState(null);
 
   const [wsHost, setWsHost] = React.useState('');
   const [botId, setBotId] = React.useState('');
   const [secret, setSecret] = React.useState('');
   const [ownerUserId, setOwnerUserId] = React.useState('');
-
-  const [error, setError] = React.useState(null);
 
   const invoke = React.useCallback(async (endpoint, payload = {}, signal) => {
     return unwrapRpcResult(await rpcCall(endpoint, payload, signal));
@@ -190,20 +235,33 @@ export function YouduSettingsTab({ rpcCall }) {
         bots: snapshot.bots,
         totals: snapshot.totals,
       }));
-      setError(null);
+      setPageError(null);
     } catch (cause) {
-      setError(presentError(cause));
+      if (silent) {
+        setModel((current) => ({ ...current, statusError: presentError(cause) }));
+      } else {
+        setPageError(presentError(cause));
+      }
     }
   }, [invoke]);
 
   React.useEffect(() => { void refresh({ silent: false }); }, [refresh]);
+
+  // 每 15s 静默刷新，保证状态不过期。
+  React.useEffect(() => {
+    if (model.phase !== 'ready') return undefined;
+    const timer = window.setInterval(async () => {
+      await refresh({ silent: true });
+    }, 15_000);
+    return () => window.clearInterval(timer);
+  }, [model.phase, refresh]);
 
   const bind = async (event) => {
     event.preventDefault();
     if (credentialBusy) return;
     setCredentialBusy(true);
     setCredentialError(null);
-    setError(null);
+    setPageError(null);
     try {
       const snapshot = normalizeSnapshot(await invoke(YOUDU_ENDPOINTS.attachBot, {
         wsHost,
@@ -226,7 +284,7 @@ export function YouduSettingsTab({ rpcCall }) {
   };
 
   const runBotAction = async (endpoint, bot, payload = {}) => {
-    setError(null);
+    setPageError(null);
     const botIdValue = bot.botId;
     try {
       if (endpoint === YOUDU_ENDPOINTS.connectionTest) {
@@ -247,12 +305,12 @@ export function YouduSettingsTab({ rpcCall }) {
         setModel((current) => ({ ...current, ...snapshot, phase: 'ready' }));
       }
     } catch (cause) {
-      setError(presentError(cause));
+      setPageError(presentError(cause));
     }
   };
 
   const saveBotSetting = async (endpoint, bot, payload, label) => {
-    setError(null);
+    setPageError(null);
     setBusyFor(bot.botId, label);
     try {
       const snapshot = normalizeSnapshot(await invoke(endpoint, {
@@ -262,30 +320,38 @@ export function YouduSettingsTab({ rpcCall }) {
       setModel((current) => ({ ...current, ...snapshot, phase: 'ready' }));
       setFeedbackByBot((current) => ({ ...current, [bot.botId]: '已保存。' }));
     } catch (cause) {
-      setError(presentError(cause));
+      setPageError(presentError(cause));
     } finally {
       setBusyFor(bot.botId, false);
     }
   };
 
-  const botList = model.bots.length === 0
-    ? h('p', { className: 'dim-emptyCopy' }, '还没有接入任何有度机器人。')
-    : h('ul', { className: 'dim-botList', role: 'list' },
-        model.bots.map((bot) => (
-          h('li', { key: bot.botId, className: 'dim-botCard dim-surfaceCard' },
-            h(AccountCard, {
-              account: bot,
-              busy: busyByBot[bot.botId] ?? false,
-              feedback: feedbackByBot[bot.botId],
-              removing: removeTarget === bot.botId,
-              onReconnect: () => runBotAction(YOUDU_ENDPOINTS.reconnectBot, bot),
-              onWorkspaceSave: (workspace) => saveBotSetting(YOUDU_ENDPOINTS.setWorkspace, bot, { workspace }, 'workspace'),
-              onAgentPresetSave: (agentPreset) => saveBotSetting(YOUDU_ENDPOINTS.setAgentPreset, bot, { agentPreset }, 'preset'),
-              onContextEnhancementSave: (config) => saveBotSetting(YOUDU_ENDPOINTS.setContextEnhancement, bot, { config }, 'context'),
-              onRequestRemove: () => setRemoveTarget(bot.botId),
-              onConfirmRemove: () => runBotAction(YOUDU_ENDPOINTS.deleteBot, bot),
-              onCancelRemove: () => setRemoveTarget(null),
-            })))))
+  const openCredential = () => {
+    setCredentialOpen(true);
+    setCredentialError(null);
+  };
+
+  const content = model.phase === 'loading'
+    ? h(LoadingView)
+    : pageError
+      ? h(PageError, { error: pageError, onRetry: () => refresh({ silent: false }) })
+      : model.bots.length === 0
+        ? h(EmptyView, { onStart: openCredential })
+        : h('ul', { className: 'dim-botList', role: 'list' },
+            model.bots.map((bot) => h('li', { key: bot.botId, className: 'dim-botCard dim-surfaceCard' },
+              h(AccountCard, {
+                account: bot,
+                busy: busyByBot[bot.botId] ?? false,
+                feedback: feedbackByBot[bot.botId],
+                removing: removeTarget === bot.botId,
+                onReconnect: () => runBotAction(YOUDU_ENDPOINTS.reconnectBot, bot),
+                onWorkspaceSave: (workspace) => saveBotSetting(YOUDU_ENDPOINTS.setWorkspace, bot, { workspace }, 'workspace'),
+                onAgentPresetSave: (agentPreset) => saveBotSetting(YOUDU_ENDPOINTS.setAgentPreset, bot, { agentPreset }, 'preset'),
+                onContextEnhancementSave: (config) => saveBotSetting(YOUDU_ENDPOINTS.setContextEnhancement, bot, { config }, 'context'),
+                onRequestRemove: () => setRemoveTarget(bot.botId),
+                onConfirmRemove: () => runBotAction(YOUDU_ENDPOINTS.deleteBot, bot),
+                onCancelRemove: () => setRemoveTarget(null),
+              }))));
 
   return h('section', { className: 'dim-page', 'aria-label': '有度机器人设置' },
     h(ChannelListHeading, {
@@ -350,6 +416,5 @@ export function YouduSettingsTab({ rpcCall }) {
               }, '取消'))))
       : null,
 
-    error ? h('div', { className: 'dim-inlineError', role: 'alert' }, error.message) : null,
-    model.phase === 'loading' ? h('p', null, '正在读取连接状态…') : botList);
+    content);
 }

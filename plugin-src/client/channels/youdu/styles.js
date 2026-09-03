@@ -1,0 +1,40 @@
+export const YOUDU_STYLE_ID = 'xmanrui-dsh-im-youdu-settings';
+
+const CSS = String.raw`
+.dim-page, .ydt-* { --ddt-accent: #1f7bff; --ddt-accent-deep: #0f5bd6; --ddt-accent-wash: #e8f1ff; }
+.ydt-brandMark {
+  display: flex; align-items: center; justify-content: center;
+  width: 96px; height: 96px; border-radius: 20px;
+  background: linear-gradient(135deg, #e8f1ff 0%, #d4e4ff 100%);
+}
+.ydt-brandMark img { display: block; width: 56px; height: 56px; object-fit: contain; }
+.ydt-empty { display: flex; gap: 28px; align-items: center; justify-content: space-between; }
+.ydt-emptyCopy { flex: 1 1 auto; min-width: 0; }
+.ydt-emptyBrand { flex-shrink: 0; }
+.ydt-accountIdentity { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.ydt-avatar {
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0; width: 40px; height: 40px; border-radius: 10px;
+  background: linear-gradient(135deg, #e8f1ff 0%, #d4e4ff 100%);
+  overflow: hidden;
+}
+.ydt-avatar img { display: block; width: 26px; height: 26px; object-fit: contain; }
+.ydt-accessMode {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 0; margin-bottom: 8px;
+}
+.ydt-accessMode span { opacity: 0.65; font-size: 13px; }
+.ydt-accessMode strong { font-weight: 600; }
+`;
+
+export function installYouduStyles() {
+  if (typeof document === 'undefined') return () => {};
+  const existing = document.querySelector(`style[data-plugin-css="${YOUDU_STYLE_ID}"]`);
+  if (existing) return () => {};
+  const style = document.createElement('style');
+  style.dataset.plugin = '@xmanrui/dsh-im';
+  style.dataset.pluginCss = YOUDU_STYLE_ID;
+  style.textContent = CSS;
+  document.head.appendChild(style);
+  return () => style.remove();
+}
