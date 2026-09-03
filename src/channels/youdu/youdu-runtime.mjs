@@ -4,7 +4,7 @@ import {
   normalizeWsHost,
   uploadMedia as youduUploadMedia,
   YouduSocket,
-} from '@youdu/youdu-protocol';
+} from './youdu-protocol/index.js';
 import { t } from '../shared/i18n.mjs';
 import {
   createYouduBridgeStatus,

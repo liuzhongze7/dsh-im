@@ -16,6 +16,7 @@ const result = await build({
   platform: 'browser',
   target: ['chrome100'],
   external: ['react', 'react-dom'],
+  loader: { '.png': 'dataurl' },
   write: false,
   minify: process.env.NODE_ENV === 'production',
   legalComments: 'none',

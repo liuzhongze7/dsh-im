@@ -61,7 +61,7 @@ import {
 } from '../shared/inbound-access.mjs';
 import { isSharedLocalCommand } from '../shared/command-permission.mjs';
 import { t } from '../shared/i18n.mjs';
-import { prepareMessageBody } from '@youdu/youdu-protocol';
+import { prepareMessageBody } from './youdu-protocol/index.js';
 
 function interactionResolvedText() {
   return t('这个问题已在其他客户端处理，无需再次回答。');

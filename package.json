@@ -98,7 +98,6 @@
     "@tencent-connect/qqbot-connector": "1.2.0",
     "@tencent-connect/qqbot-nodejs": "1.0.4",
     "@wecom/aibot-node-sdk": "1.0.7",
-    "@youdu/youdu-protocol": "file:../youdu-protocol",
     "dingtalk-stream": "2.1.4",
     "qrcode": "1.5.4",
     "undici": "7.29.0",
