@@ -6,6 +6,10 @@ export const YOUDU_ENDPOINTS = Object.freeze({
   reconnectBot: 'bot.reconnect',
   deleteBot: 'bot.delete',
   connectionTest: 'bot.connection-test',
+  setWorkspace: 'bot.workspace.set',
+  setAgentPreset: 'bot.preset.set',
+  setContextEnhancement: 'bot.context-enhancement.set',
+  setAccessPolicy: 'bot.access-policy.set',
 });
 
 const BOT_STATES = new Set(['connected', 'connecting', 'offline', 'error']);
@@ -64,6 +68,10 @@ function normalizeBot(value) {
       code: text(value.error.code, 'YOUDU_ACCOUNT_ERROR', 80),
       message: text(value.error.message, '有度连接尚未就绪'),
     } : null,
+    workspace: typeof value.workspace === 'string' ? value.workspace : undefined,
+    agentPreset: value.agentPreset ?? undefined,
+    contextEnhancement: isRecord(value.contextEnhancement) ? value.contextEnhancement : undefined,
+    accessPolicy: isRecord(value.accessPolicy) ? value.accessPolicy : undefined,
   };
 }
 

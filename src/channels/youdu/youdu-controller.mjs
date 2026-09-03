@@ -14,6 +14,7 @@ export class YouduController {
   #credentials;
   #configStore;
   #createRuntime;
+  #settingsStore;
   #deleteState;
   #logger;
   #runtimes = new Map();
@@ -26,6 +27,7 @@ export class YouduController {
     credentials,
     configStore,
     createRuntime,
+    settingsStore,
     deleteState = async () => {},
     logger = console,
   }) {
@@ -41,6 +43,7 @@ export class YouduController {
     this.#credentials = credentials;
     this.#configStore = configStore;
     this.#createRuntime = createRuntime;
+    this.#settingsStore = settingsStore ?? null;
     this.#deleteState = deleteState;
     this.#logger = logger;
   }
@@ -220,7 +223,7 @@ export class YouduController {
       };
     });
     const connectedCount = bots.filter((bot) => bot.connected).length;
-    return {
+    const base = {
       schemaVersion: 1,
       revision: this.#revision,
       state: bots.length === 0 ? 'disconnected'
@@ -229,6 +232,46 @@ export class YouduController {
       bots,
       totals: { configured: bots.length, connected: connectedCount },
     };
+    return this.#settingsStore ? this.#settingsStore.decorateStatus(base) : base;
+  }
+
+  /** 更新机器人工作区（轻量 config-backed；当前值读写，重启保留属后续缺口）。 */
+  async updateWorkspace(botId, workspace) {
+    this.#assertBot(botId);
+    if (!this.#settingsStore) throw new TypeError('Youdu settings store is required');
+    return this.#settingsStore.setWorkspace(botId, workspace);
+  }
+
+  /** 更新机器人 Agent Preset。 */
+  async updateAgentPreset(botId, agentPreset) {
+    this.#assertBot(botId);
+    if (!this.#settingsStore) throw new TypeError('Youdu settings store is required');
+    return this.#settingsStore.setAgentPreset(botId, agentPreset);
+  }
+
+  /** 更新机器人上下文增强设置。 */
+  async updateContextEnhancement(botId, config, projectStatus) {
+    this.#assertBot(botId);
+    if (!this.#settingsStore) throw new TypeError('Youdu settings store is required');
+    const result = await this.#settingsStore.setContextEnhancement(botId, config);
+    return typeof projectStatus === 'function'
+      ? projectStatus(this.status())
+      : result;
+  }
+
+  /** 更新机器人访问策略。 */
+  async updateAccessPolicy(botId, policy, projectStatus) {
+    this.#assertBot(botId);
+    if (!this.#settingsStore) throw new TypeError('Youdu settings store is required');
+    const result = await this.#settingsStore.setAccessPolicy(botId, policy);
+    return typeof projectStatus === 'function'
+      ? projectStatus(this.status())
+      : result;
+  }
+
+  #assertBot(botId) {
+    if (!this.#configStore.get(botId)) throw new Error('Unknown Youdu bot');
+    if (this.#settingsStore) this.#settingsStore.ensure(botId);
   }
 
   async close() {

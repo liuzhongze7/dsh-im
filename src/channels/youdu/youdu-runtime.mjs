@@ -37,6 +37,9 @@ export class YouduRuntime {
   #logger;
   #replyTimeoutMs;
   #connectTimeoutMs;
+  #botId;
+  #contextEnhancement;
+  #accessPolicy;
   #createSocket;
   #status = createYouduRuntimeStatus();
   #socket = null;
@@ -52,6 +55,9 @@ export class YouduRuntime {
     logger = console,
     replyTimeoutMs = 600_000,
     connectTimeoutMs = 20_000,
+    botId = '',
+    contextEnhancement,
+    accessPolicy,
     createSocket = (options) => new YouduSocket(options),
   }) {
     if (!config || !secret || !harness || !state) {
@@ -64,6 +70,9 @@ export class YouduRuntime {
     this.#logger = logger;
     this.#replyTimeoutMs = replyTimeoutMs;
     this.#connectTimeoutMs = connectTimeoutMs;
+    this.#botId = botId ?? '';
+    this.#contextEnhancement = contextEnhancement;
+    this.#accessPolicy = accessPolicy;
     this.#createSocket = createSocket;
   }
 
@@ -135,6 +144,19 @@ export class YouduRuntime {
           }
           return buffer;
         },
+        deliverArtifact: async (target, file, kind) => {
+          const host = normalizeWsHost(this.#config.wsHost);
+          const media = await uploadYouduMedia({
+            host,
+            token: socket.getToken(),
+            fileName: file?.fileName,
+            contentType: file?.mediaType,
+            content: file?.bytes,
+            kind,
+          });
+          const body = buildMediaMessageBody(media);
+          return socket.sendReply(target.reqId, body);
+        },
       },
       harness: this.#harness,
       state: this.#state,
@@ -142,6 +164,9 @@ export class YouduRuntime {
       logger: this.#logger,
       replyTimeoutMs: this.#replyTimeoutMs,
       ownerUserId: this.#config.ownerUserId,
+      botId: this.#botId || this.#config.sourceBotId || this.#config.botId,
+      contextEnhancement: this.#contextEnhancement,
+      accessPolicy: this.#accessPolicy,
       signal: controller.signal,
     });
     this.#bridge = bridge;

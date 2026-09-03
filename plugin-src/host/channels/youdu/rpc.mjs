@@ -1,4 +1,8 @@
 import { resolveRpcAuthority } from '../../rpc-authority.mjs';
+import { SET_WORKSPACE_ENDPOINT, validWorkspacePayload } from '../shared/workspace-rpc.mjs';
+import { SET_AGENT_PRESET_ENDPOINT, validAgentPresetPayload } from '../shared/agent-preset-rpc.mjs';
+import { SET_CONTEXT_ENHANCEMENT_ENDPOINT, validContextEnhancementPayload } from '../shared/context-enhancement-rpc.mjs';
+import { SET_ACCESS_POLICY_ENDPOINT, validAccessPolicyPayload } from '../shared/access-policy-rpc.mjs';
 
 export const YOUDU_RPC_CHANNEL = '/youdu';
 export const YOUDU_ENDPOINTS = Object.freeze({
@@ -7,6 +11,10 @@ export const YOUDU_ENDPOINTS = Object.freeze({
   reconnectBot: 'bot.reconnect',
   deleteBot: 'bot.delete',
   connectionTest: 'bot.connection-test',
+  setWorkspace: SET_WORKSPACE_ENDPOINT,
+  setAgentPreset: SET_AGENT_PRESET_ENDPOINT,
+  setContextEnhancement: SET_CONTEXT_ENHANCEMENT_ENDPOINT,
+  setAccessPolicy: SET_ACCESS_POLICY_ENDPOINT,
 });
 export const YOUDU_RPC_ENDPOINTS = Object.freeze(Object.values(YOUDU_ENDPOINTS));
 
@@ -89,6 +97,32 @@ export function createYouduRpcHandler(controller, options = {}) {
       } else if (endpoint === YOUDU_ENDPOINTS.deleteBot) {
         if (!validBotId(payload?.botId)) throw new TypeError('Invalid Youdu bot id');
         value = await publicStatus(await controller.deleteBot(payload.botId), cachedEncode);
+      } else if (endpoint === YOUDU_ENDPOINTS.setWorkspace) {
+        if (!validWorkspacePayload(payload)) throw new TypeError('请输入工作区绝对路径。');
+        value = await publicStatus(
+          await controller.updateWorkspace(payload.botId, payload.workspace),
+          cachedEncode,
+        );
+      } else if (endpoint === YOUDU_ENDPOINTS.setAgentPreset) {
+        if (!validAgentPresetPayload(payload)) throw new TypeError('请选择 Agent Preset。');
+        value = await publicStatus(
+          await controller.updateAgentPreset(payload.botId, payload.agentPreset),
+          cachedEncode,
+        );
+      } else if (endpoint === YOUDU_ENDPOINTS.setContextEnhancement) {
+        if (!validContextEnhancementPayload(payload)) throw new TypeError('请提交有效的上下文增强设置。');
+        value = await controller.updateContextEnhancement(
+          payload.botId,
+          payload.config,
+          (status) => publicStatus(status, cachedEncode),
+        );
+      } else if (endpoint === YOUDU_ENDPOINTS.setAccessPolicy) {
+        if (!validAccessPolicyPayload(payload)) throw new TypeError('请提交有效的访问设置。');
+        value = await controller.updateAccessPolicy(
+          payload.botId,
+          payload.policy,
+          (status) => publicStatus(status, cachedEncode),
+        );
       } else {
         throw new Error(`Unknown Youdu RPC endpoint: ${endpoint}`);
       }
