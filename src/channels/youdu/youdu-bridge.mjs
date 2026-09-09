@@ -118,6 +118,21 @@ function conversationKey(message) {
   return message.kind === 'group' ? `group:${message.chatId}` : `direct:${message.senderId}`;
 }
 
+/**
+ * 稳定的消息去重键。
+ * 有度 push 帧的 `body.msgId` 可能是 `"0"`（该 push 类型未填数字消息 ID），
+ * 真正全局唯一的是 `raw.push.Msg.msgUid`；缺失时退回非零 msgId，再退回投递 reqId，
+ * 避免把不同消息都当成重复丢弃。
+ */
+function youduMessageId(frame) {
+  const body = frame?.body ?? {};
+  const msgUid = clean(body?.raw?.push?.Msg?.msgUid);
+  if (msgUid) return msgUid;
+  const msgId = clean(body?.msgId);
+  if (msgId && msgId !== '0') return msgId;
+  return clean(frame?.headers?.reqId) ?? msgId ?? '';
+}
+
 /** 回传目标：与 bridge 内 sendReply 的实现保持一致。 */
 function messageTarget(message) {
   return {
@@ -219,10 +234,11 @@ export class YouduBridge {
     const { text, media } = prepareMessageBody(body);
     const msgType = body?.msgType ?? undefined;
     const message = {
-      messageId: clean(frame.body?.msgId) ?? clean(frame.headers?.reqId),
+      messageId: youduMessageId(frame),
       chatId: clean(frame.body?.chatId),
       chatType: clean(frame.body?.chatType) ?? 'single',
       senderId: clean(frame.body?.from?.userId) ?? clean(frame.body?.from?.userid) ?? '',
+      senderAccount: clean(frame.body?.from?.account) ?? '',
       senderName: clean(frame.body?.from?.name) ?? '',
       kind: (frame.body?.chatType === 'group' || frame.body?.chatType === 'groupChat') ? 'group' : 'direct',
       text: cleanMentions(text),
@@ -412,7 +428,9 @@ export class YouduBridge {
     if (this.#accessPolicy) {
       return evaluateInboundAccess(this.#accessPolicy, {
         conversationType: message.kind === 'group' ? 'group' : 'direct',
-        senderIds: message.senderId,
+        // 发送者身份：数字 userId + 账号名（from.account，如 lewis.liu），两者任一匹配白名单/owner 即放行。
+        // 这样设置页里既可用纯数字 ID，也可用账号名（对齐 openclaw 的 senderAccount 语义）。
+        senderIds: [message.senderId, message.senderAccount].filter(Boolean),
         text,
         hasImages,
         hasFiles,
@@ -423,12 +441,12 @@ export class YouduBridge {
     // 群聊普通消息显式放开避免误拒；群聊命令受 owner 约束（防止任意群成员触发命令）。
     const isCommand = isSharedLocalCommand(text, { hasImages, hasFiles });
     if (isCommand) {
-      return this.#isSenderAllowed(message.senderId)
+      return this.#isSenderAllowed([message.senderId, message.senderAccount].filter(Boolean))
         ? Object.freeze({ allowed: true, reason: 'legacy-owner' })
         : Object.freeze({ allowed: false, reason: 'command-not-allowed' });
     }
     if (message.kind === 'group') return Object.freeze({ allowed: true, reason: 'legacy-group' });
-    return this.#isSenderAllowed(message.senderId)
+    return this.#isSenderAllowed([message.senderId, message.senderAccount].filter(Boolean))
       ? Object.freeze({ allowed: true, reason: 'legacy-owner' })
       : Object.freeze({ allowed: false, reason: 'sender-not-allowed' });
   }
@@ -465,10 +483,11 @@ export class YouduBridge {
     return task;
   }
 
-  /** 私聊访问控制：ownerUserId 为 '*'（默认）时放开；否则只允许配置的 owner。 */
-  #isSenderAllowed(senderId) {
+  /** 私聊访问控制：ownerUserId 为 '*'（默认）时放开；否则只允许配置的 owner（数字 ID 或账号名任一命中）。 */
+  #isSenderAllowed(senderIds) {
     if (this.#ownerUserId === '*' || !this.#ownerUserId) return true;
-    return senderId === this.#ownerUserId;
+    const candidates = Array.isArray(senderIds) ? senderIds : [senderIds];
+    return candidates.some((id) => String(id) === String(this.#ownerUserId));
   }
 
   /** 当前私聊会话是否存在待处理的交互/审批。 */

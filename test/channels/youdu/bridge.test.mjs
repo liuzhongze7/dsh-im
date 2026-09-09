@@ -101,6 +101,21 @@ test('in-flight redelivery is deduped via acceptedMessageIds (G1/F2)', async () 
   assert.equal(asks.length, 1);
 });
 
+// The youdu push frame may carry a non-unique body.msgId ("0") for a message type
+// whose numeric id is unset; the stable dedup key is raw.push.Msg.msgUid.
+test('distinct messages with a non-unique msgId=0 are not deduped (msgUid is the key)', async () => {
+  const { state } = stateFixture();
+  const sent = [];
+  const asks = [];
+  const harness = baseHarness({ ask: async () => { asks.push(1); return 'ok'; } });
+  const bridge = new YouduBridge({ bot: makeBot(sent), harness, state, ownerUserId: '*' });
+  await bridge.accept(frame('0', '第一条', { raw: { push: { Msg: { msgUid: 'uid-1' } } } }));
+  await bridge.accept(frame('0', '第二条', { raw: { push: { Msg: { msgUid: 'uid-2' } } } }));
+  assert.equal(asks.length, 2, 'each unique msgUid must be processed even when msgId is "0"');
+  await bridge.accept(frame('0', '第二条', { raw: { push: { Msg: { msgUid: 'uid-2' } } } }));
+  assert.equal(asks.length, 2, 'a redelivered msgUid must be deduped');
+});
+
 // G3: group @ addressing with mention (strict) and all modes.
 test('mention mode processes group only when atUser hits the bot', async () => {
   const { state } = stateFixture();
@@ -166,6 +181,29 @@ test('closed default denies commands without an owner and gives a guidance hint,
   assert.equal(ownerSent.some(({ text }) => text.includes('没有执行命令的权限')), true);
   await ownerBridge.accept(frame('owner-cmd-allowed', '/models', { from: { userId: 'owner-1' } }));
   assert.match(ownerSent.at(-1).text, /p\/m/);
+});
+
+// G6: allowlist matches the sender account name (from.account), even when a numeric
+// user id is sent — so configs may use the account (e.g. lewis.liu) instead of the
+// numeric ID (aligned with openclaw senderAccount semantics).
+test('allowlist matches the sender account name even when a numeric user id is sent', async () => {
+  const { state } = stateFixture();
+  const sent = [];
+  const asks = [];
+  const harness = baseHarness({ ask: async () => { asks.push(1); return 'ok'; } });
+  const allowlistScope = createAccessPolicyScope({
+    mode: 'allowlist',
+    open: { defaultCanExecuteCommands: false, commandPermissionOverrides: [] },
+    allowlist: { users: [{ id: 'lewis.liu', canExecuteCommands: true }] },
+  });
+  const policy = { getSettings: () => createAccessPolicy({ direct: allowlistScope, group: allowlistScope }) };
+  const bridge = new YouduBridge({ bot: makeBot(sent), harness, state, ownerUserId: '*', accessPolicy: policy });
+  // numeric userId 6463894 + account name 'lewis.liu' → allowlisted via account.
+  await bridge.accept(frame('acct-ok', '你好', { from: { userId: '6463894', account: 'lewis.liu', name: 'Lewis' } }));
+  assert.equal(asks.length, 1, 'a sender whose account name is allowlisted must be processed');
+  // numeric userId 9999 + account 'someone.else' → not allowlisted → rejected.
+  await bridge.accept(frame('acct-no', '你好', { from: { userId: '9999', account: 'someone.else', name: 'X' } }));
+  assert.equal(asks.length, 1, 'a sender with no matching account or id must be rejected');
 });
 
 // contextEnhancement channel field output (F4 regression).
