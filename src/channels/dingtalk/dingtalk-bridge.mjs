@@ -1,3 +1,4 @@
+import { createDeferredDeliveryCoordinator, deferredOutcomeText } from '../shared/deferred-delivery-coordinator.mjs';
 import {
   DINGTALK_DONE_REACTION_NAME,
   DINGTALK_ERROR_REACTION_NAME,
@@ -6,6 +7,7 @@ import {
   splitDingtalkText,
 } from './dingtalk-api.mjs';
 import { createDingTalkCardStream } from './dingtalk-card-stream.mjs';
+import { dingtalkMenuSnapshot, dingtalkMenuCommand, isDingtalkMenuCommand } from './dingtalk-menu.mjs';
 import {
   harnessAnswerForQuestion,
   harnessQuestionText,
@@ -76,11 +78,13 @@ const HELP_TEXT_LINES = [
   '钉钉机器人已连接 DeepSeek Harness。',
   '',
   '直接发送文字、图片或文件即可继续当前会话。',
+  '/m 或 /menu  打开下拉操作菜单',
   '/new  开启一个全新会话',
   '/compact  压缩当前会话的较早上下文',
   '/history [数量]  查看最近历史消息（默认 3 条，最多 5 条）',
   '/workspace 工作区序号或绝对路径  切换工作区',
   '/workspacelist  列出工作区绝对路径',
+  '/ws、/wsl、/workspaces  工作区命令别名',
   '/sessionlist 或 /sessions [工作区序号或绝对路径]  列出会话 ID 和标题',
   '/sessionlist --limit N  仅列出当前工作区前 N 个会话',
   '/session Session ID 或当前工作区序号  将当前聊天绑定到指定会话',
@@ -474,6 +478,7 @@ export class DingtalkHarnessBridge {
   #clientSecret;
   #harness;
   #state;
+  #deferred;
   #contextEnhancement;
   #accessPolicy;
   #status;
@@ -487,6 +492,7 @@ export class DingtalkHarnessBridge {
   #interactionKeys = new Map();
   #interactionTasks = new Set();
   #commandTasks = new Set();
+  #menus = new Map();
   // Keep the accepted configuration through the existing queue/reply lifecycle.
   #acceptedMessageIds = new Map();
   #approvals;
@@ -528,6 +534,9 @@ export class DingtalkHarnessBridge {
       : 5_000;
     this.#maxMessageChars = maxMessageChars;
     this.#signal = signal;
+    this.#deferred = createDeferredDeliveryCoordinator({ harness, state, signal, logger,
+      deliver: (entry, outcome) => this.#deliverDeferredOutcome(entry, outcome),
+    });
     ensureStats(this.#status);
     this.#refreshPendingSenders();
   }
@@ -573,6 +582,7 @@ export class DingtalkHarnessBridge {
         text: commandText,
         hasImages: hasInboundImages(promptMessage),
         hasFiles: hasInboundFiles(promptMessage),
+        ...(isDingtalkMenuCommand(commandText) ? { isCommand: true } : {}),
       });
       if (!access.allowed) {
         this.#acceptedMessageIds.set(messageId, null);
@@ -616,7 +626,8 @@ export class DingtalkHarnessBridge {
         statusReaction,
       ));
     }
-    if (direct && sessionWebhook && (batchCommand || batchStatus.phase === 'collecting')) {
+    if (direct && sessionWebhook && !isDingtalkMenuCommand(commandText)
+      && (batchCommand || batchStatus.phase === 'collecting')) {
       const exactBatchStart = /^\/batch$/iu.test(commandText);
       const result = exactBatchStart
         && batchStatus.phase === 'idle'
@@ -651,7 +662,10 @@ export class DingtalkHarnessBridge {
         ));
       }
     }
-    const commandRunner = isHistoryCommand(commandText) ? runHistoryCommand
+    const commandRunner = isDingtalkMenuCommand(commandText)
+      && !hasInboundFiles(promptMessage) && !hasInboundImages(promptMessage)
+      ? async () => { await this.#showMenu(message, key); }
+      : isHistoryCommand(commandText) ? runHistoryCommand
       : hasInboundFiles(promptMessage) ? null : isControlCommand(commandText)
       ? runControlCommand
       : (isModelCommand(commandText)
@@ -770,6 +784,111 @@ export class DingtalkHarnessBridge {
       return finish(current);
     }
     return finish(this.#enqueueMessage(message, messageId, sender, key, { statusReaction }));
+  }
+
+  async #showMenu(message, key) {
+    if (typeof this.#api.createMenuCard !== 'function') {
+      await this.#send(message.sessionWebhook, helpText(), this.#atUsersFor(message));
+      return;
+    }
+    const snapshot = await dingtalkMenuSnapshot(this.#harness, this.#state, key, this.#signal);
+    const now = Date.now();
+    for (const [id, entry] of this.#menus) {
+      if (entry.expiresAt <= now || entry.key === key) this.#menus.delete(id);
+    }
+    while (this.#menus.size >= 256) this.#menus.delete(this.#menus.keys().next().value);
+    const { cardInstanceId } = await this.#api.createMenuCard({
+      clientId: this.#clientId, clientSecret: this.#clientSecret,
+      target: cardTarget(message, senderStaffId(message)), data: snapshot.data, signal: this.#signal,
+    });
+    this.#menus.set(cardInstanceId, {
+      ...snapshot, key, message, cardInstanceId, expiresAt: now + 30 * 60_000, busy: false,
+    });
+  }
+
+  acceptCard(callback, messageId) {
+    if (this.#signal?.aborted || !nonEmptyString(messageId) || this.#state.hasSeen(messageId)) {
+      return Promise.resolve();
+    }
+    const entry = this.#menus.get(callback?.outTrackId);
+    if (!entry || entry.busy || entry.expiresAt <= Date.now()
+      || callback?.userId !== senderStaffId(entry.message)) return Promise.resolve();
+    const command = dingtalkMenuCommand(entry, callback);
+    if (!command) return Promise.resolve();
+    entry.busy = true;
+    let task;
+    task = this.#processMenuAction(entry, command, messageId).catch(async (error) => {
+      if (this.#signal?.aborted) return;
+      this.#status.lastError = error?.message ?? String(error);
+      this.#logger.warn?.('[dsh-dingtalk] menu action failed', safeErrorDiagnostic(error));
+      await this.#api.updateMenuCard({
+        clientId: this.#clientId, clientSecret: this.#clientSecret,
+        cardInstanceId: entry.cardInstanceId,
+        data: { notice: t('操作未完成，请重新发送 /m 后重试。') }, signal: this.#signal,
+      }).catch(() => undefined);
+    }).finally(() => { entry.busy = false; this.#commandTasks.delete(task); });
+    this.#commandTasks.add(task);
+    return task;
+  }
+
+  async #processMenuAction(entry, command, messageId) {
+    await this.#state.markSeen(messageId);
+    const { key, message } = entry;
+    const options = {
+      signal: this.#signal, isDirect: String(message.conversationType) === '1',
+      pendingInteraction: this.#pendingInteractions.has(key) || this.#approvals.hasPending(key),
+      control: { owner: this, key }, deferredDelivery: this.#deferred,
+    };
+    const access = evaluateInboundAccess(this.#accessPolicy, {
+      conversationType: options.isDirect ? 'direct' : 'group',
+      senderIds: senderStaffId(message), text: command, isCommand: true,
+    });
+    let result;
+    if (!access.allowed) {
+      await this.#api.updateMenuCard({
+        clientId: this.#clientId, clientSecret: this.#clientSecret,
+        cardInstanceId: entry.cardInstanceId,
+        data: { notice: t(COMMAND_PERMISSION_DENIED_MESSAGE) }, signal: this.#signal,
+      });
+      return;
+    }
+    if (entry.workspace !== this.#harness.currentWorkspace?.()
+      || entry.sessionId !== this.#state.sessionFor(key)) {
+      result = { message: t('会话或工作区已变化，菜单已刷新，请重新选择。') };
+    } else if ((this.#queues.has(key) || options.pendingInteraction || this.#batchInputs.status(key).phase !== 'idle')
+      && !['/stop', '/help', '/status', '/history'].includes(command)) {
+      result = { message: t('当前任务尚未结束，请先停止任务或等待完成后再操作。') };
+    } else if (command === '/new') {
+      await this.#state.clearSession(key);
+      result = { message: t('已开启新会话。请发送你的问题。') };
+    } else if (command === '/status') {
+      await this.#harness.ensureRunning({ signal: this.#signal });
+      result = { message: t('钉钉机器人与 DeepSeek Harness 连接正常。') };
+    } else if (command === '/help') {
+      result = { message: helpText() };
+    } else {
+      result = await runWorkspaceCommand(command, this.#harness, key)
+        ?? await runCompactCommand(command, this.#harness, this.#state, key, options)
+        ?? await runControlCommand(command, this.#harness, this.#state, key, options)
+        ?? await runHistoryCommand(command, this.#harness, this.#state, key, options)
+        ?? await runModelCommand(command, this.#harness, this.#state, key, options)
+        ?? await runPresetCommand(command, this.#harness, this.#state, key, options);
+    }
+    if (result?.stopped) await Promise.allSettled([
+      this.#cancelPendingInteraction(key), this.#approvals.closeRoute(key),
+    ]);
+    const snapshot = await dingtalkMenuSnapshot(this.#harness, this.#state, key, this.#signal);
+    if (command === '/help' || command === '/history') {
+      for (const reply of result?.messages ?? [result?.message]) {
+        if (reply) await this.#send(message.sessionWebhook, reply, this.#atUsersFor(message));
+      }
+    } else snapshot.data.notice = (result?.message ?? '').slice(0, 300);
+    await this.#api.updateMenuCard({
+      clientId: this.#clientId, clientSecret: this.#clientSecret,
+      cardInstanceId: entry.cardInstanceId, data: snapshot.data, signal: this.#signal,
+    });
+    Object.assign(entry, snapshot);
+    this.#status.lastError = null;
   }
 
   #runReactionCall(method, target, reactionName, kind) {
@@ -935,6 +1054,19 @@ export class DingtalkHarnessBridge {
     return { content: text };
   }
 
+  async #deliverDeferredOutcome(entry, outcome) {
+    const text = deferredOutcomeText(outcome);
+    if (outcome.found && ['createAiCard', 'updateAiCard', 'finishAiCard'].every((name) => typeof this.#api[name] === 'function')) {
+      const card = createDingTalkCardStream({ api: this.#api, clientId: this.#clientId,
+        clientSecret: this.#clientSecret, target: entry.target, signal: this.#signal, logger: this.#logger });
+      if (await card.start(t(CARD_INITIAL_TEXT)) && await card.finish(text)) return true;
+      this.#logger.warn?.('[dsh-dingtalk] deferred card unavailable; sending robot text');
+    }
+    await this.#api.sendRobotText({ clientId: this.#clientId, clientSecret: this.#clientSecret,
+      target: entry.target, text, signal: this.#signal });
+    return true;
+  }
+
   async waitForIdle() {
     await Promise.allSettled([
       ...this.#queues.values(),
@@ -944,6 +1076,7 @@ export class DingtalkHarnessBridge {
       ...this.#interactionTasks,
       ...this.#commandTasks,
     ]);
+    await this.#deferred.whenIdle();
   }
 
   async #processFastCommand(message, messageId, key, sessionWebhook, prompt, runner) {
@@ -965,6 +1098,7 @@ export class DingtalkHarnessBridge {
         pendingInteraction: this.#pendingInteractions.has(key)
           || this.#approvals.hasPending(key),
         control: { owner: this, key },
+        deferredDelivery: this.#deferred,
       },
     );
     if (result?.stopped) {
@@ -1136,6 +1270,7 @@ export class DingtalkHarnessBridge {
           senderId: sender,
           senderName: message.senderNick,
           conversationTitle: message.conversationTitle,
+          chatId: message.conversationId,
         }));
         contextEnhanced = content !== originalContent;
       }
@@ -1155,6 +1290,7 @@ export class DingtalkHarnessBridge {
         if (cardStarted) cardStartedAt = startedAt;
       }
       const { answer, artifacts = [] } = await askInWorkspaceSession({
+        deferredDelivery: () => ({ coordinator: this.#deferred, target: { ...cardTarget(message, sender), robotCode: this.#clientId } }),
         harness: this.#harness,
         state: this.#state,
         key,
@@ -1200,6 +1336,8 @@ export class DingtalkHarnessBridge {
             providerMessageIds: cardStream.providerMessageIds,
           });
         } else {
+          // Failed streams close the card with a notice pointing to a
+          // follow-up message. Deliver the answer through that fallback.
           textReceipt = createDeliveryReceipt({
             deliveryId: messageId,
             presentation: 'dingtalk-text',
@@ -1275,7 +1413,9 @@ export class DingtalkHarnessBridge {
           ? `${errorText}\n\n${batchFailureMessage}`
           : errorText;
         const streamed = cardStarted && await cardStream.finish(visibleError);
-        if (!streamed) await this.#send(sessionWebhook, visibleError, this.#atUsersFor(message));
+        if (!streamed) {
+          await this.#send(sessionWebhook, visibleError, this.#atUsersFor(message));
+        }
       } catch {
         this.#logger.error?.('[dsh-dingtalk] failed to send the safe error reply');
       }

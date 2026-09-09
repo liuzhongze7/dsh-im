@@ -1,3 +1,4 @@
+import { managementFetch } from './fixtures/management-rpc.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
@@ -18,6 +19,7 @@ function serviceFixture() {
     'createTarget',
     'updateTarget',
     'deleteTarget',
+    'setSessionSync',
   ]) {
     service[method] = async (...args) => {
       calls.push([method, ...args]);
@@ -47,6 +49,9 @@ test('delivery RPC forwards all endpoints and both target.test payloads to the s
     ['target.create', { botId: 'bot_one', target }],
     ['target.update', { botId: 'bot_one', targetId: 'daily-report', target: replacement }],
     ['target.delete', { botId: 'bot_one', targetId: 'daily-report' }],
+    ['target.session-sync.set', {
+      botId: 'bot_one', targetId: 'daily-report', enabled: true,
+    }],
     ['target.test', { botId: 'bot_one', targetId: 'daily-report' }],
     ['target.test', { botId: 'bot_one', target: draft }],
   ]) {
@@ -59,6 +64,7 @@ test('delivery RPC forwards all endpoints and both target.test payloads to the s
     ['createTarget', 'bot_one', target],
     ['updateTarget', 'bot_one', 'daily-report', replacement],
     ['deleteTarget', 'bot_one', 'daily-report'],
+    ['setSessionSync', 'bot_one', 'daily-report', true],
     ['send', 'bot_one', 'daily-report', DELIVERY_TEST_MESSAGE, { signal }],
     ['send', 'bot_one', draft, DELIVERY_TEST_MESSAGE, { signal }],
   ]);
@@ -83,6 +89,10 @@ test('delivery RPC rejects unknown, missing, and extra fields before calling the
       target: { targetId: 'new', kind: 'group', route: { chatId: 'one' } },
     }],
     ['target.delete', { botId: 'bot_one', targetId: 'target', confirm: true }],
+    ['target.session-sync.set', { botId: 'bot_one', targetId: 'target', enabled: 'yes' }],
+    ['target.session-sync.set', {
+      botId: 'bot_one', targetId: 'target', enabled: true, sessionId: 'no',
+    }],
     ['target.test', ['bot_one', 'target']],
     ['target.test', { botId: 'bot_one', targetId: 'target', target: {
       kind: 'group', route: { chatId: 'one' },
@@ -119,13 +129,13 @@ test('delivery RPC returns only stable public errors and handles pre-cancelled c
   });
 });
 
-test('delivery RPC uses its own channel and the configured management authority', () => {
+test('delivery RPC uses its own channel and the configured management authority', async () => {
   const { service } = serviceFixture();
   const calls = [];
   installDeliveryRpc({
-    connection: { rpc: { handle: (...args) => calls.push(args) } },
+    connection: { fetch: managementFetch((...args) => calls.push(args)) },
   }, service, { authority: 'trusted-host' });
   assert.equal(calls[0][0], DELIVERY_RPC_CHANNEL);
   assert.equal(typeof calls[0][1], 'function');
-  assert.deepEqual(calls[0][2], { authority: 'trusted-host' });
+  assert.deepEqual(await calls[0][1]('target.list', { botId: 'bot_one' }, undefined, { host: 'trusted.example' }), { ok: true, value: { method: 'listTargets' } });
 });

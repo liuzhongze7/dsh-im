@@ -1,3 +1,4 @@
+import { registerManagementRpc } from '../../../management-rpc.mjs';
 import QRCode from 'qrcode';
 import {
   connectionTestTargetUnavailable,
@@ -8,6 +9,7 @@ import { SET_ACCESS_POLICY_ENDPOINT, validAccessPolicyPayload } from '../shared/
 import { resolveRpcAuthority } from '../../rpc-authority.mjs';
 import { publicWorkspaceError, SET_WORKSPACE_ENDPOINT, validWorkspacePayload } from '../shared/workspace-rpc.mjs';
 import { SET_AGENT_PRESET_ENDPOINT, validAgentPresetPayload } from '../shared/agent-preset-rpc.mjs';
+import { SET_MODEL_ENDPOINT, validModelPayload } from '../shared/model-setting-rpc.mjs';
 
 export const QQ_RPC_CHANNEL = '/qq';
 export const QQ_ENDPOINTS = Object.freeze({
@@ -19,6 +21,7 @@ export const QQ_ENDPOINTS = Object.freeze({
   reconnectBot: 'bot.reconnect',
   deleteBot: 'bot.delete',
   setWorkspace: SET_WORKSPACE_ENDPOINT,
+  setModel: SET_MODEL_ENDPOINT,
   setAgentPreset: SET_AGENT_PRESET_ENDPOINT,
   setContextEnhancement: SET_CONTEXT_ENHANCEMENT_ENDPOINT,
   setAccessPolicy: SET_ACCESS_POLICY_ENDPOINT,
@@ -75,6 +78,9 @@ function payloadFailure(endpoint, payload) {
   if (endpoint === QQ_ENDPOINTS.setWorkspace) {
     return validWorkspacePayload(payload)
       ? null : '请输入工作区绝对路径。';
+  }
+  if (endpoint === QQ_ENDPOINTS.setModel) {
+    return validModelPayload(payload) ? null : '请选择有效模型。';
   }
   if (endpoint === QQ_ENDPOINTS.setAgentPreset) {
     return validAgentPresetPayload(payload)
@@ -183,6 +189,12 @@ export function createQqRpcHandler(controller, { encodeQr = qrDataUrl } = {}) {
           await controller.updateWorkspace(payload.botId, payload.workspace),
           cachedEncode,
         );
+      } else if (endpoint === QQ_ENDPOINTS.setModel) {
+        if (typeof controller.updateModel !== 'function') throw new Error('Model update is unavailable');
+        value = await publicStatus(
+          await controller.updateModel(payload.botId, payload.model),
+          cachedEncode,
+        );
       } else if (endpoint === QQ_ENDPOINTS.setContextEnhancement) {
         if (typeof controller.updateContextEnhancement !== 'function') throw new Error('Context enhancement update is unavailable');
         value = await controller.updateContextEnhancement(
@@ -216,10 +228,7 @@ export function createQqRpcHandler(controller, { encodeQr = qrDataUrl } = {}) {
 }
 
 export function installQqRpc(ctx, controller, options, authority) {
-  if (!ctx?.connection?.rpc || typeof ctx.connection.rpc.handle !== 'function') {
-    throw new TypeError('DSH Host Connection RPC is required');
-  }
-  return ctx.connection.rpc.handle(
+  return registerManagementRpc(ctx,
     QQ_RPC_CHANNEL,
     createQqRpcHandler(controller, options),
     { authority: resolveRpcAuthority(authority) },

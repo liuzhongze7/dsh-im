@@ -1,3 +1,4 @@
+import { deferredStateAccess, normalizeDeferredState } from '../shared/deferred-state.mjs';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
@@ -6,7 +7,9 @@ const EMPTY_STATE = Object.freeze({
   sessions: {},
   seenMessageIds: [],
   watches: {},
+  deferred: {},
   includeArchivedSessions: false,
+  topics: {},
 });
 
 /** One conversation key may watch at most this many sessions. */
@@ -24,6 +27,7 @@ export class StateStore {
   #path;
   #state = structuredClone(EMPTY_STATE);
   #writeQueue = Promise.resolve();
+  #deferred = deferredStateAccess(() => this.#state, () => this.#persist());
 
   constructor(path) {
     this.#path = path;
@@ -37,9 +41,11 @@ export class StateStore {
         sessions: parsed.sessions && typeof parsed.sessions === 'object' ? parsed.sessions : {},
         seenMessageIds: Array.isArray(parsed.seenMessageIds) ? parsed.seenMessageIds.slice(-1000) : [],
         watches: parsed.watches && typeof parsed.watches === 'object' ? parsed.watches : {},
+        deferred: normalizeDeferredState(parsed.deferred),
         includeArchivedSessions: typeof parsed.includeArchivedSessions === 'boolean'
           ? parsed.includeArchivedSessions
           : false,
+        topics: parsed.topics && typeof parsed.topics === 'object' ? parsed.topics : {},
       };
     } catch (error) {
       if (error?.code !== 'ENOENT') throw error;
@@ -47,6 +53,11 @@ export class StateStore {
     }
     return this;
   }
+
+  deferredEntries() { return this.#deferred.entries(); }
+  putDeferred(entry) { return this.#deferred.put(entry); }
+  patchDeferred(id, patch) { return this.#deferred.patch(id, patch); }
+  removeDeferred(id) { return this.#deferred.remove(id); }
 
   sessionFor(key) {
     return this.#state.sessions[key] ?? null;
@@ -134,6 +145,31 @@ export class StateStore {
       for (const entry of list) if (validWatchEntry(entry)) ids.add(entry.sessionId);
     }
     return [...ids];
+  }
+
+  // ── Deferred delivery (persisted: surviving restarts) ───────────────────
+
+  // ── Managed Feishu topics (thread_id → root message, persisted) ────────
+
+  topicRootFor(threadId) {
+    const entry = this.#state.topics[threadId];
+    return entry && typeof entry === 'object'
+      && typeof entry.rootMessageId === 'string' && entry.rootMessageId.length > 0
+      && typeof entry.chatId === 'string' && entry.chatId.length > 0
+      ? { rootMessageId: entry.rootMessageId, chatId: entry.chatId }
+      : null;
+  }
+
+  async setTopic(threadId, root) {
+    const validRoot = root && typeof root === 'object'
+      && typeof root.rootMessageId === 'string' && root.rootMessageId.length > 0
+      && typeof root.chatId === 'string' && root.chatId.length > 0;
+    if (!validRoot) throw new TypeError('Invalid Feishu topic root');
+    this.#state.topics[threadId] = {
+      rootMessageId: root.rootMessageId,
+      chatId: root.chatId,
+    };
+    await this.#persist();
   }
 
   // ── Session-list archived policy (per bot) ───────────────────

@@ -65,6 +65,7 @@ test('Host provides #65 and installs #84 with the same delivery service', async 
     async listTargets(botId) {
       return { botId, channel: 'telegram', targets: [{ targetId: 'target' }] };
     },
+    async listBots() { return [{ botId: 'bot_one', channel: 'telegram' }]; },
   };
   const provided = [];
   const rpc = [];
@@ -83,7 +84,7 @@ test('Host provides #65 and installs #84 with the same delivery service', async 
     installDeliveryHttp: (...args) => http.push(args),
   });
   const ctx = {
-    connection: { rpc: {} },
+    connection: { fetch: {} },
     webServer: { register() {} },
     effect() {},
     provide: (...args) => provided.push(args),
@@ -97,6 +98,7 @@ test('Host provides #65 and installs #84 with the same delivery service', async 
   assert.equal(http[0][1], deliveryService);
   assert.ok(channelServices.every((service) => service === deliveryService));
   assert.deepEqual(await provided[0][1].listTargets('bot_one'), [{ targetId: 'target' }]);
+  assert.deepEqual(await provided[0][1].listBots(), [{ botId: 'bot_one', channel: 'telegram' }]);
   assert.deepEqual(await provided[0][1].send('bot_one', 'target', 'hello'), { sent: true });
   assert.deepEqual(sent, [['bot_one', 'target', 'hello', undefined]]);
 });
@@ -105,8 +107,8 @@ test('#65 activates a real Cordis consumer without crossing the Connection RPC',
   const ctx = new Context();
   const rpcCalls = [];
   ctx.provide('connection', {
+    fetch: { register: () => async () => {} },
     rpc: {
-      handle: () => async () => {},
       call: (...args) => rpcCalls.push(args),
     },
   });
@@ -122,6 +124,7 @@ test('#65 activates a real Cordis consumer without crossing the Connection RPC',
       return { sent: true };
     },
     async listTargets() { return { targets: [] }; },
+    async listBots() { return []; },
   };
   const internals = Object.fromEntries(CHANNELS.map(([, applyName]) => [
     applyName,
@@ -183,11 +186,65 @@ test('Host waits for apiProxy on legacy Harness and Controllers on modern Harnes
   }
 });
 
+test('Host installs channel prefixes through the real Cordis sessions dependency', async (t) => {
+  const ctx = new Context();
+  ctx.provide('connection', { fetch: { register: () => () => {} } });
+  ctx.provide('credentials', {});
+  ctx.provide('typertGateway', { stream() {} });
+  ctx.provide('sessionController', {});
+  ctx.provide('workspaceController', {});
+  const data = { title: '自动标题', messageSeqs: [0], source: { kind: 'fallback' } };
+  const events = [{ type: 'session/title', seq: 1, data }];
+  const session = {
+    id: 'weixin-old-session',
+    snapshotEvents: () => events.slice(),
+    append(type, value) { events.push({ type, data: value, seq: events.length + 1 }); },
+  };
+  ctx.provide('sessions', { get: () => session, list: () => [session] });
+  const internals = Object.fromEntries(CHANNELS.map(([, applyName]) => [applyName, async () => {}]));
+  Object.assign(internals, {
+    installUpdateRpc: () => {}, installInboundTtlRpc: () => {},
+    installDeliveryRpc: () => {}, installSessionSyncCoordinator: () => {},
+  });
+  const host = ctx.plugin(createImHostPlugin(internals));
+  t.after(() => host.dispose());
+  await host.await();
+  await new Promise((done) => setTimeout(done, 0));
+  assert.deepEqual(events.at(-1).data, { ...data, title: '微信 · 自动标题' });
+  assert.equal(events.length, 2);
+});
+
+test('Session title injection returns a valid Cordis startup effect', async () => {
+  const effects = [];
+  let installed = false;
+  const ctx = {
+    credentials: {}, typertGateway: { stream() {} },
+    sessions: { get: () => undefined, list: () => [] },
+    on: () => () => {},
+    effect: (run) => { effects.push(run()); },
+    inject(dependencies, callback) {
+      if (dependencies.includes('sessions')) {
+        const result = callback(ctx);
+        assert.equal(result, undefined, 'a controller object makes Cordis unload the title observer');
+        installed = true;
+        return;
+      }
+      if (dependencies.includes('sessionController')) return callback(ctx);
+    },
+  };
+  const internals = Object.fromEntries(CHANNELS.map(([, applyName]) => [applyName, async () => {}]));
+  Object.assign(internals, { installSessionSyncCoordinator: () => {} });
+  await createImHostPlugin(internals).apply(ctx);
+  assert.equal(installed, true);
+  for (const dispose of effects.reverse()) dispose?.();
+});
+
 const CHANNELS = [
   ['feishu', 'applyFeishu'],
   ['weixin', 'applyWeixin'],
   ['dingtalk', 'applyDingtalk'],
   ['wecom', 'applyWecom'],
+  ['wecomApp', 'applyWecomApp'],
   ['qq', 'applyQq'],
   ['slack', 'applySlack'],
   ['telegram', 'applyTelegram'],
@@ -220,17 +277,17 @@ function activationFixture(failedChannels) {
   return { plugin: createImHostPlugin(internals), ctx, calls, events, errors, failures };
 }
 
-test('Host continues activating channels in order when one channel fails', async () => {
+test('Host starts all channels before awaiting them and isolates activation failures', async () => {
   for (const [failedChannel] of CHANNELS) {
     const fixture = activationFixture(new Set([failedChannel]));
 
     await fixture.plugin.apply(fixture.ctx, {});
 
     assert.deepEqual(fixture.calls, CHANNELS.map(([channel]) => channel));
-    assert.deepEqual(fixture.events, CHANNELS.flatMap(([channel]) => [
-      `${channel}:start`,
-      `${channel}:${channel === failedChannel ? 'failed' : 'end'}`,
-    ]));
+    assert.deepEqual(fixture.events, [
+      ...CHANNELS.map(([channel]) => `${channel}:start`),
+      ...CHANNELS.map(([channel]) => `${channel}:${channel === failedChannel ? 'failed' : 'end'}`),
+    ]);
     assert.equal(fixture.errors.length, 1);
     assert.match(fixture.errors[0][0], new RegExp(`activate ${failedChannel}`));
     assert.equal(fixture.errors[0][1], fixture.failures.get(failedChannel));

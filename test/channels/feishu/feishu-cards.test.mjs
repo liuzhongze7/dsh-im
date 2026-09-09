@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  answeredQuestionCard,
   cardActionProbeCard,
   completionCard,
   customSteerCard,
@@ -9,6 +10,7 @@ import {
   menuHelpText,
   modelCard,
   presetCard,
+  questionCard,
   sessionListCard,
   statusCard,
   steerCard,
@@ -70,6 +72,7 @@ test('menu and card help advertise Agent Preset, reasoning, and batch commands',
   assert.match(help, /\/presets/);
   assert.match(help, /\/sessions/);
   assert.match(help, /\/workspace 工作区序号或绝对路径/);
+  assert.match(help, /\/ws、\/wsl、\/workspaces/);
   assert.match(help, /\/preset \[序号或完整ID\]/);
   assert.match(help, /\/preset id:<ID>/);
   assert.match(help, /\/preset --default/);
@@ -85,6 +88,7 @@ test('menu and card help advertise Agent Preset, reasoning, and batch commands',
   assert.match(card, /\/presets/);
   assert.match(card, /\/sessions/);
   assert.match(card, /\/workspace 工作区序号或绝对路径/);
+  assert.match(card, /\/ws、\/wsl、\/workspaces/);
   assert.match(card, /\/reasoninglist/);
   assert.match(card, /\/reasonings/);
   assert.match(card, /\/reasoning \[序号、等级ID或 --default\]/);
@@ -220,7 +224,9 @@ test('reachable Feishu cards contain no Chinese literals in English mode', () =>
     const englishMenuHelp = menuHelpText();
     const englishCardHelp = helpCard(['Additional help']);
     assert.match(englishMenuHelp, /\/workspace <workspace index or absolute path>/);
+    assert.match(englishMenuHelp, /\/ws, \/wsl, \/workspaces/);
     assert.match(englishCardHelp, /\/workspace <workspace index or absolute path>/);
+    assert.match(englishCardHelp, /\/ws, \/wsl, \/workspaces/);
     rendered.push(
       menuCard({
         workspaces: ['/work'],
@@ -260,4 +266,25 @@ test('reachable Feishu cards contain no Chinese literals in English mode', () =>
   for (const output of rendered) {
     assert.doesNotMatch(output, /[\u3400-\u9fff]/u);
   }
+});
+
+test('issue #162: questionCard 渲染「✏️ 其他答案…」自定义入口按钮', () => {
+  const card = questionCard({
+    interactionId: 'i-1', header: 'H', question: 'Q?',
+    options: [{ label: 'A', description: 'a' }, { label: 'B' }], index: 0, total: 1,
+  });
+  const actions = String(card);
+  assert.ok(actions.includes('answerCustom:i-1:0'), '必须包含自定义入口 action');
+  assert.ok(actions.includes('其他答案'));
+});
+
+test('issue #162: answeredQuestionCard 无任何按钮且标注已选项', () => {
+  const card = answeredQuestionCard({
+    interactionId: 'i-1', header: 'H', question: 'Q?',
+    options: [{ label: 'A' }, { label: 'B' }], chosen: 'B', index: 0, total: 2,
+  });
+  const json = String(card);
+  assert.ok(!json.includes('"tag":"button"'), '已答状态卡不得含可点按钮');
+  assert.ok(json.includes('已回答') && json.includes('✅ 已选择：B'));
+  assert.ok(json.includes('A') && json.includes('B'), '选项列表保留');
 });

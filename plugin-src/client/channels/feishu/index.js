@@ -2,13 +2,13 @@ import * as React from "react";
 
 import { FeishuLogoGlyph } from "../../channel-logos.js";
 import { CredentialActionIcon, CredentialBindingPanel, QrActionIcon } from "../../credential-binding.js";
+import { CollapsibleAccountSection } from "../shared/collapsible-account.js";
 import { h } from "../../i18n.js";
 import {
   FEISHU_ENDPOINTS,
   FEISHU_REGISTRATION_OPERATIONS,
   formatRemaining,
   normalizeBotsSnapshot,
-  normalizeGroupResponseMode,
   normalizePollResult,
   normalizeProvisioning,
   presentError,
@@ -22,6 +22,11 @@ import {
   AgentPresetEditor,
   EMPTY_AGENT_PRESET_CATALOG,
 } from "../../agent-preset.js";
+import {
+  EMPTY_MODEL_CATALOG,
+  ModelCatalogContext,
+  ModelEditor,
+} from "../../model-setting.js";
 import { useWorkspaceSnapshotFence } from "../../workspace-snapshot-fence.js";
 import {
   BotSettingsButton,
@@ -305,7 +310,7 @@ function QrPane({ provision, now, onRefresh, onCancel, busy }) {
               ? "使用飞书确认群消息权限"
               : "使用飞书扫码创建机器人"),
         h("p", null, repairing
-          ? "扫码会更新现有飞书应用，增量补充当前缺少的卡片按钮回调、读取用户消息内图片或文件所需的 im:message:readonly（飞书显示为“获取单聊、群组消息”）、上传机器人图片或文件所需的 im:resource，以及原生命令面板所需的 application:app_slash_command:read / write；不会创建新应用。确认页只显示当前缺少项，完成后此机器人会短暂重连，其他机器人不受影响。"
+          ? "扫码会更新现有飞书应用，增量补充当前缺少的卡片按钮回调、读取用户消息内图片或文件所需的 im:message:readonly（飞书显示为“获取单聊、群组消息”）、上传机器人图片或文件所需的 im:resource、接收群内其他机器人 @ 当前机器人所需的 im:message.group_at_msg.include_bot:readonly，以及原生命令面板所需的 application:app_slash_command:read / write；不会创建新应用。确认页只显示当前缺少项，完成后此机器人会短暂重连，其他机器人不受影响。"
           : grantingGroupMessages
             ? "扫码会更新现有飞书应用，只增量开通“获取群组中所有消息”权限；不会创建新应用。确认后会自动启用“响应所有群消息”，其他机器人不受影响。"
             : "扫码只会新增一个机器人，已接入的机器人会继续正常收发消息。"),
@@ -459,87 +464,88 @@ function RemoveConfirmation({ bot, busy, onConfirm, onCancel }) {
   );
 }
 
-function GroupResponseModeEditor({
-  value,
-  permissionGranted = false,
-  disabled = false,
-  authorizationDisabled = false,
-  onSave,
-  onAuthorize,
-}) {
-  const current = normalizeGroupResponseMode(value);
+/** One select for the step-push presentation: off / per-step posts / process card. */
+function StepPushEditor({ value = false, mode = "post", disabled = false, onSave, onModeSave }) {
+  const titleId = React.useId();
+  const helpId = `${titleId}-help`;
+  const current = value === true ? mode : "off";
   const [saving, setSaving] = React.useState(false);
-  const [authorizing, setAuthorizing] = React.useState(false);
   const [error, setError] = React.useState(null);
 
-  const change = async (event) => {
-    const next = normalizeGroupResponseMode(event.target.value);
-    if (next === current || saving || disabled) return;
+  const save = async (run) => {
+    if (saving || disabled) return;
     setSaving(true);
     setError(null);
     try {
-      await onSave?.(next);
+      await run();
     } catch (cause) {
-      setError(cause?.message ?? "群聊响应方式修改失败，请重试。");
+      setError(cause?.message ?? "分步直推设置保存失败，请重试。");
     } finally {
       setSaving(false);
     }
   };
 
-  const authorize = async () => {
-    if (current !== "all" || saving || authorizing || disabled || authorizationDisabled) return;
-    setAuthorizing(true);
-    setError(null);
-    try {
-      await onAuthorize?.();
-    } catch (cause) {
-      setError(cause?.message ?? "群消息权限授权失败，请重试。");
-    } finally {
-      setAuthorizing(false);
-    }
+  const change = (event) => {
+    const next = event.target.value;
+    if (next === current) return;
+    void save(async () => {
+      if (next === "off") {
+        // Turning off only needs the flag when it was on.
+        if (value === true) await onSave?.(false);
+        return;
+      }
+      const nextMode = next === "streaming_card" ? "streaming_card" : "post";
+      // Enabling (or switching presentation) may need both writes; the flag
+      // must land before the mode so the runtime never sees a mode without
+      // step push enabled.
+      if (value !== true) await onSave?.(true);
+      if (nextMode !== mode) await onModeSave?.(nextMode);
+    });
   };
 
-  return h("div", { className: "bxf-responseMode dim-responseMode" },
-    h("div", { className: "bxf-responseModeHeader dim-responseModeHeader" },
-      h("span", null, "群聊响应方式"),
-      saving || authorizing
-        ? h("span", { className: "bxf-responseModeStatus dim-responseModeStatus" },
-            saving ? "保存中…" : "正在准备授权…")
-        : null),
-    h("select", {
-      className: "bxf-responseModeSelect dim-responseModeSelect",
-      value: current,
-      disabled: disabled || saving,
-      "aria-label": "群聊响应方式",
-      onChange: (event) => { void change(event); },
-    },
-      h("option", { value: "mention" }, "仅在 @机器人时响应（推荐）"),
-      h("option", { value: "all" }, "响应所有群消息"),
-    ),
-    h("small", { className: "bxf-responseModeHelp dim-responseModeHelp" },
-      current === "mention"
-        ? permissionGranted
-          ? "私聊始终响应；群聊仅处理明确 @当前机器人的消息。群消息权限已开通，再次切换无需授权。"
-          : "私聊始终响应；群聊仅处理明确 @当前机器人的消息。选择全部消息后会打开飞书官方授权流程。"
-        : permissionGranted
-          ? "已开通“获取群组中所有消息”权限（im:message.group_msg）；机器人会处理群聊中的所有可见消息。"
-          : "尚未确认“获取群组中所有消息”权限，请完成飞书授权。"),
-    current === "all"
-      ? h("div", { className: "bxf-responseModePermissionAction dim-responseModePermissionAction" },
-          h(Button, {
-            className: "bxf-responseModePermissionButton",
-            size: "small",
-            disabled: disabled || authorizationDisabled || saving || authorizing,
-            "aria-busy": authorizing ? "true" : undefined,
-            "aria-label": permissionGranted ? "重新授权群消息权限" : "授权群消息权限",
-            onClick: () => { void authorize(); },
-          }, authorizing ? "正在准备…" : permissionGranted ? "重新授权" : "去授权"))
-      : null,
-    error ? h("p", {
-      className: "bxf-responseModeError dim-responseModeError",
-      role: "alert",
-    }, error) : null,
-  );
+  const helpText = current === "off"
+    ? "适合日常问答：执行过程中不显示工具调用等中间步骤，只回复最终结果"
+    : current === "streaming_card"
+      ? "推荐长任务使用：过程与最终答案都在同一张卡片里实时更新，不刷屏"
+      : "每一步都单独发一条消息（含工具调用和过程说明）；注意长任务会连续发送较多消息";
+
+  return h("section", {
+    className: "dim-feishuGroupControl",
+    "aria-labelledby": titleId,
+  },
+  h("div", { className: "dim-feishuGroupControlHeader" },
+    h("div", { className: "dim-presetTitle" },
+      h("h3", { id: titleId }, "任务过程展示"),
+      h("span", { className: "dim-presetHelp" },
+        h("button", {
+          type: "button",
+          className: "dim-presetHelpButton",
+          "aria-label": "查看分步直推说明",
+          "aria-describedby": helpId,
+        }, h("span", { "aria-hidden": "true" }, "?")),
+        h("span", {
+          id: helpId,
+          className: "dim-presetTooltip",
+          role: "tooltip",
+        }, "设置任务执行过程的呈现方式：不显示、实时卡片或逐步消息"))),
+    saving
+      ? h("span", { className: "dim-feishuGroupControlStatus", role: "status" }, "保存中…")
+      : null),
+  h("select", {
+    className: "dim-feishuGroupSelect",
+    value: current,
+    disabled: disabled || saving,
+    "aria-label": "任务过程展示",
+    onChange: change,
+  },
+  h("option", { value: "off" }, "不显示过程（只发送最终答案）"),
+  h("option", { value: "streaming_card" }, "实时过程卡（全程一张卡片动态更新）"),
+  h("option", { value: "post" }, "逐步直播（每一步单独发一条消息）")),
+  h("p", { className: "dim-feishuGroupHelp" }, helpText),
+  error ? h("p", {
+    className: "dim-feishuGroupError",
+    role: "alert",
+  }, error) : null);
 }
 
 export function BotCard({
@@ -554,10 +560,11 @@ export function BotCard({
   onReconnect,
   onRepairCallback,
   onWorkspaceSave,
+  onModelSave,
   onAgentPresetSave,
   onContextEnhancementSave,
-  onGroupResponseModeSave,
-  onGroupMessagePermissionAuthorize,
+  onStepPushSave,
+  onStepPushModeSave,
   onRequestRemove,
   onConfirmRemove,
   onCancelRemove,
@@ -586,36 +593,53 @@ export function BotCard({
     ref: cardRef,
   },
     h("div", { className: "bxf-cardBody dim-botCardBody" },
-      h("div", { className: "bxf-connectedTop dim-botCardTop" },
-        h("div", { className: "bxf-botIdentity dim-botIdentity" },
-          h("div", { className: "bxf-avatar dim-botAvatar", "aria-hidden": "true" },
-            h(FeishuLogoGlyph, { size: 34 })),
-          h("div", { className: "bxf-botName dim-botName" },
-            h("h3", { id: titleId, title: bot.name }, bot.name),
-            h("p", { title: bot.appIdMasked }, bot.appIdMasked ?? "应用标识已安全保存")),
-        ),
-        h("div", { className: "dim-botCardTools" },
-          h(BotStatusMeta, {
-            className: "bxf-healthPill",
-            dotClassName: "bxf-dot",
-            tone,
-            stateLabel: HEALTH_LABELS[stateForDisplay] ?? "状态未知",
-            lastCheckedAt: health.lastCheckedAt,
-            formatCheckedTime,
-            healthState: stateForDisplay,
-          }),
-          h(BotSettingsButton, {
-            channel: "feishu",
-            botId: connection.botId,
-            botName: bot.name,
-            connected,
-            accessPolicy: connection.accessPolicy,
-          })),
-      ),
-      h(WorkspaceEditor, {
-        workspace: connection.workspace,
+      h(CollapsibleAccountSection, {
+        id: `bxf-settings-${connection.botId.replace(/[^a-zA-Z0-9_-]/g, "-")}`,
+        header: h("div", { className: "bxf-connectedTop dim-botCardTop" },
+          h("div", { className: "bxf-botIdentity dim-botIdentity" },
+            h("div", { className: "bxf-avatar dim-botAvatar", "aria-hidden": "true" },
+              h(FeishuLogoGlyph, { size: 34 })),
+            h("div", { className: "bxf-botName dim-botName" },
+              h("h3", { id: titleId, title: bot.name }, bot.name),
+              h("p", { title: bot.appIdMasked }, bot.appIdMasked ?? "应用标识已安全保存")),
+          ),
+          h("div", {
+            className: "dim-botCardTools",
+            // The header is the collapse toggle; keep inner controls clickable.
+            onClick: (event) => { event.stopPropagation(); },
+            onKeyDown: (event) => { if (event.key === "Enter" || event.key === " ") event.stopPropagation(); },
+          },
+            h(BotStatusMeta, {
+              className: "bxf-healthPill",
+              dotClassName: "bxf-dot",
+              tone,
+              stateLabel: HEALTH_LABELS[stateForDisplay] ?? "状态未知",
+              lastCheckedAt: health.lastCheckedAt,
+              formatCheckedTime,
+              healthState: stateForDisplay,
+            }),
+            h(BotSettingsButton, {
+              channel: "feishu",
+              botId: connection.botId,
+              botName: bot.name,
+              connected,
+              accessPolicy: connection.accessPolicy,
+              channelSettings: {
+                groupResponseMode: connection.groupResponseMode,
+                groupTopicReply: connection.groupTopicReply,
+                groupMessagePermissionGranted: connection.groupMessagePermissionGranted,
+              },
+            }))),
+      },
+        h(WorkspaceEditor, {
+          workspace: connection.workspace,
+          disabled: Boolean(busy),
+          onSave: onWorkspaceSave,
+        }),
+      h(ModelEditor, {
+        model: connection.model,
         disabled: Boolean(busy),
-        onSave: onWorkspaceSave,
+        onSave: onModelSave,
       }),
       h(AgentPresetEditor, {
         agentPreset: connection.agentPreset,
@@ -627,13 +651,12 @@ export function BotCard({
         disabled: Boolean(busy),
         onSave: onContextEnhancementSave,
       }),
-      h(GroupResponseModeEditor, {
-        value: connection.groupResponseMode,
-        permissionGranted: connection.groupMessagePermissionGranted,
+      h(StepPushEditor, {
+        value: connection.stepPush,
+        mode: connection.stepPushMode,
         disabled: Boolean(busy),
-        authorizationDisabled: repairDisabled,
-        onSave: onGroupResponseModeSave,
-        onAuthorize: onGroupMessagePermissionAuthorize,
+        onSave: onStepPushSave,
+        onModeSave: onStepPushModeSave,
       }),
       provisionContent
         ? h("section", {
@@ -683,6 +706,7 @@ export function BotCard({
             className: "bxf-healthSummary dim-cardFeedback",
             role: "status",
           }, testNotice) : null),
+        ),
       ),
     ),
     removing
@@ -723,10 +747,11 @@ function BotList(props) {
           onReconnect: () => props.onReconnect(bot),
           onRepairCallback: () => props.onRepairCallback(bot),
           onWorkspaceSave: (workspace) => props.onWorkspaceSave(bot, workspace),
+          onModelSave: (model) => props.onModelSave(bot, model),
           onAgentPresetSave: (agentPreset) => props.onAgentPresetSave(bot, agentPreset),
           onContextEnhancementSave: (config) => props.onContextEnhancementSave(bot, config),
-          onGroupResponseModeSave: (groupResponseMode) => props.onGroupResponseModeSave(bot, groupResponseMode),
-          onGroupMessagePermissionAuthorize: () => props.onGroupMessagePermissionAuthorize(bot),
+          onStepPushSave: (stepPush) => props.onStepPushSave(bot, stepPush),
+          onStepPushModeSave: (stepPushMode) => props.onStepPushModeSave(bot, stepPushMode),
           onRequestRemove: () => props.onRequestRemove(bot),
           onConfirmRemove: () => props.onConfirmRemove(bot),
           onCancelRemove: props.onCancelRemove,
@@ -779,6 +804,7 @@ export function mergeFeishuSnapshotState(
     pageError: null,
     statusError: null,
     agentPresetCatalog: snapshot.agentPresetCatalog ?? current.agentPresetCatalog,
+    modelCatalog: snapshot.modelCatalog ?? current.modelCatalog,
   };
 }
 
@@ -792,6 +818,7 @@ export function FeishuSettingsTab({ rpcCall }) {
     pageError: null,
     statusError: null,
     agentPresetCatalog: EMPTY_AGENT_PRESET_CATALOG,
+    modelCatalog: EMPTY_MODEL_CATALOG,
   });
   const [pageBusy, setPageBusy] = React.useState(false);
   const [provisionBusy, setProvisionBusy] = React.useState(false);
@@ -1333,56 +1360,6 @@ export function FeishuSettingsTab({ rpcCall }) {
     }
   }, [invoke, loadStatus, mergeSnapshot, setBotBusy, setBotError, workspaceFence]);
 
-  const authorizeGroupMessages = React.useCallback(async (connection) => {
-    const { botId } = connection;
-    if (model.provisioning) {
-      throw new Error("请先完成当前飞书授权操作，再开通群消息权限。");
-    }
-    setRemoveTargetId(null);
-    setBotError(botId, null);
-    setTestNoticesByBot((current) => {
-      const next = { ...current };
-      delete next[botId];
-      return next;
-    });
-    await startProvisioning({
-      operation: GROUP_MESSAGE_PERMISSION_OPERATION,
-      bot: connection,
-    });
-  }, [model.provisioning, setBotError, startProvisioning]);
-
-  const saveGroupResponseMode = React.useCallback(async (connection, groupResponseMode) => {
-    const { botId } = connection;
-    if (groupResponseMode === "all" && connection.groupMessagePermissionGranted !== true) {
-      await authorizeGroupMessages(connection);
-      return;
-    }
-    const snapshotVersion = workspaceFence.beginMutation();
-    setBotBusy(botId, "group-response-mode");
-    setBotError(botId, null);
-    try {
-      const snapshot = normalizeBotsSnapshot(await invoke(
-        FEISHU_ENDPOINTS.setGroupResponseMode,
-        { botId, groupResponseMode },
-      ));
-      if (mountedRef.current && workspaceFence.canCommitMutation(snapshotVersion)) {
-        mergeSnapshot(snapshot);
-      }
-    } finally {
-      const shouldRefresh = workspaceFence.endMutation();
-      if (shouldRefresh && mountedRef.current) void loadStatus({ silent: true });
-      if (mountedRef.current) setBotBusy(botId, null);
-    }
-  }, [
-    invoke,
-    authorizeGroupMessages,
-    loadStatus,
-    mergeSnapshot,
-    setBotBusy,
-    setBotError,
-    workspaceFence,
-  ]);
-
   const requestRemove = React.useCallback((connection) => {
     setRemoveTargetId(connection.botId);
   }, []);
@@ -1490,7 +1467,9 @@ export function FeishuSettingsTab({ rpcCall }) {
     else removeButtonRefs.current.delete(botId);
   }, []);
 
-  return h(AgentPresetCatalogContext.Provider, {
+  return h(ModelCatalogContext.Provider, {
+    value: model.modelCatalog ?? EMPTY_MODEL_CATALOG,
+  }, h(AgentPresetCatalogContext.Provider, {
     value: model.agentPresetCatalog ?? EMPTY_AGENT_PRESET_CATALOG,
   }, h("section", { className: "bxf-page dim-channelPage", "aria-label": "飞书机器人设置" },
     h(Heading, {
@@ -1538,14 +1517,21 @@ export function FeishuSettingsTab({ rpcCall }) {
                   onReconnect: (bot) => void reconnectOneBot(bot),
                   onRepairCallback: repairCallback,
                   onWorkspaceSave: saveWorkspace,
+                  onModelSave: (connection, selectedModel) => saveBotSetting(
+                    connection, "model", FEISHU_ENDPOINTS.setModel, { model: selectedModel },
+                  ),
                   onAgentPresetSave: (connection, agentPreset) => saveBotSetting(
                     connection, "preset", FEISHU_ENDPOINTS.setAgentPreset, { agentPreset },
                   ),
                   onContextEnhancementSave: (connection, config) => saveBotSetting(
                     connection, "context-enhancement", FEISHU_ENDPOINTS.setContextEnhancement, { config },
                   ),
-                  onGroupResponseModeSave: saveGroupResponseMode,
-                  onGroupMessagePermissionAuthorize: authorizeGroupMessages,
+                  onStepPushSave: (connection, stepPush) => saveBotSetting(
+                    connection, "step-push", FEISHU_ENDPOINTS.setStepPush, { stepPush },
+                  ),
+                  onStepPushModeSave: (connection, stepPushMode) => saveBotSetting(
+                    connection, "step-push-mode", FEISHU_ENDPOINTS.setStepPushMode, { stepPushMode },
+                  ),
                   onRequestRemove: requestRemove,
                   onConfirmRemove: (bot) => void confirmRemove(bot),
                   onCancelRemove: cancelRemove,
@@ -1554,5 +1540,5 @@ export function FeishuSettingsTab({ rpcCall }) {
                 })
               : null,
           ),
-  ));
+  )));
 }

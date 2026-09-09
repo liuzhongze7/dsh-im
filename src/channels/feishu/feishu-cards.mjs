@@ -492,6 +492,7 @@ export function menuHelpText() {
     '/session ID  绑定已有会话',
     '/workspacelist  列出工作区',
     '/workspace 工作区序号或绝对路径  切换工作区',
+    '/ws、/wsl、/workspaces  工作区命令别名',
     '/new  开启全新会话',
     '',
     '📊 状态 / 压缩',
@@ -595,6 +596,7 @@ export function helpCard(extraTextLines = []) {
     { tag: 'hr' },
     { tag: 'div', text: markdown([
       t(HELP_TEXT_COMMANDS),
+      t('/ws、/wsl、/workspaces  工作区命令别名'),
       t('`/version` — 查看插件版本'),
       t('/history [数量]  查看最近历史消息（默认 3 条，最多 5 条）'),
     ].join('\n') + extraText) },
@@ -866,4 +868,239 @@ export function customSteerCard() {
     button(t('🔙 返回菜单'), 'back_to_menu'),
   ];
   return cardWith(t('➕ 自定义指令'), elements);
+}
+
+/**
+ * Interactive approval card with approve / reject buttons. Action values carry
+ * the approvalId so the card callback can submit the decision:
+ *   approve:<approvalId>  /  reject:<approvalId>
+ * `requiresMention` is advisory; a button click is itself the operator's
+ * explicit intent, so it does not need an @ mention in groups.
+ */
+export function approvalCard({ toolName, operation, reason, approvalId }) {
+  const elements = [];
+  if (toolName) {
+    elements.push({ tag: 'div', text: markdown(t('工具：{tool}', { tool: String(toolName) })) });
+  }
+  if (operation) {
+    // Cap the operation text so an oversized argument list cannot overflow the
+    // card (the plain-text path rejects >6000 chars; here we truncate so the
+    // approve/reject buttons still render).
+    const MAX_OPERATION_CHARS = 6_000;
+    const op = String(operation);
+    const shown = op.length > MAX_OPERATION_CHARS
+      ? `${op.slice(0, MAX_OPERATION_CHARS)}\n…（操作参数过长，已截断）`
+      : op;
+    elements.push({ tag: 'div', text: markdown(t('操作参数：\n{operation}', { operation: shown })) });
+  }
+  if (reason) {
+    elements.push({ tag: 'div', text: markdown(t('原因：{reason}', { reason: String(reason) })) });
+  }
+  elements.push(
+    { tag: 'hr' },
+    buttonPair(t('✅ 批准'), `approve:${approvalId}`, t('❌ 拒绝'), `reject:${approvalId}`),
+  );
+  return cardWith(t('🔐 工具审批'), elements);
+}
+
+// ── Streaming step card (流式过程卡片) ────────────────────────────────────
+
+/** One streaming step card carries at most this many JSON bytes after the
+ *  card has been serialized (Feishu caps card content near 30KB; stay lower
+ *  so headers and JSON escaping always fit). */
+export const STEP_STREAM_CARD_MAX_BYTES = 24_000;
+
+/**
+ * Build one streaming step card from the accumulated process blocks:
+ *   { kind: 'message', text }         — interim note / warning / context line
+ *   { kind: 'tools', lines: string[] } — tool-call summary panel
+ * `status`: 'running' keeps panels expanded and ends with an italic status
+ * line; 'completed' / 'stopped' collapse the panels and swap the status text;
+ * 'sealed' is an overflow spill chunk with no status line at all. Finished
+ * turns (and sealed spill chunks) merge every tool/thinking panel into one
+ * collapsed "process details" panel so the sealed card stays compact.
+ */
+
+export function stepStreamCard(rawBlocks, { status = 'running' } = {}) {
+  const running = status === 'running';
+  const elements = [];
+  const panelElements = [];
+  for (const block of Array.isArray(rawBlocks) ? rawBlocks : []) {
+    if (block?.kind === 'tools' || block?.kind === 'notes') {
+      const lines = (Array.isArray(block.lines) ? block.lines : [])
+        .filter((line) => typeof line === 'string' && line.trim());
+      if (lines.length === 0) continue;
+      const count = lines.length + (Number(block.omitted) || 0);
+      const panel = stepPanel(lines, {
+        title: block.kind === 'tools'
+          ? t('🛠️ 工具摘要（{count}）', { count })
+          : t('💭 思考过程（{count}）', { count }),
+        // Tool summaries stay visible while the turn runs; thinking notes
+        // remain folded at all times. Finished turns keep both panels but
+        // tuck them inside one collapsed "process details" wrapper.
+        expanded: block.kind === 'tools' && running,
+      });
+      if (running) elements.push(panel);
+      else panelElements.push(panel);
+      continue;
+    }
+    const text = typeof block?.text === 'string' ? block.text.trim() : '';
+    if (text) elements.push({ tag: 'markdown', content: text });
+  }
+  if (!running && panelElements.length > 0) {
+    // Finished turns: the tool/thinking panels nest inside one collapsed
+    // "process details" wrapper, so the sealed card shows a single line.
+    elements.push(processDetailsPanel(panelElements));
+  }
+  if (elements.length === 0) elements.push({ tag: 'markdown', content: ' ' });
+  if (status !== 'sealed') {
+    elements.push({ tag: 'markdown', content: `_${stepStatusText(status)}_` });
+  }
+  return JSON.stringify({
+    schema: '2.0',
+    header: { title: plainText(t('⚙️ 任务过程')), template: 'blue' },
+    body: { elements },
+  });
+}
+
+/** The collapsed wrapper that holds the per-kind panels on finished turns. */
+function processDetailsPanel(children) {
+  return {
+    tag: 'collapsible_panel',
+    expanded: false,
+    background_color: 'grey-50',
+    border: { color: 'grey', corner_radius: '8px' },
+    padding: '8px 8px 8px 8px',
+    header: {
+      title: { tag: 'plain_text', content: t('📋 过程详情') },
+      vertical_align: 'center',
+      padding: '8px 8px 8px 8px',
+      icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', color: 'grey', size: '16px 16px' },
+      icon_position: 'right',
+      icon_expanded_angle: -180,
+    },
+    elements: children,
+  };
+}
+
+/** The collapsible grey panel used for tool summaries and thinking notes. */
+function stepPanel(lines, { title, expanded }) {
+  return {
+    tag: 'collapsible_panel',
+    expanded: expanded === true,
+    background_color: 'grey-50',
+    border: { color: 'grey', corner_radius: '8px' },
+    padding: '8px 8px 8px 8px',
+    header: {
+      title: { tag: 'plain_text', content: title },
+      vertical_align: 'center',
+      padding: '8px 8px 8px 8px',
+      icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', color: 'grey', size: '16px 16px' },
+      icon_position: 'right',
+      icon_expanded_angle: -180,
+    },
+    elements: [{ tag: 'markdown', content: lines.join('\n') }],
+  };
+}
+
+function stepStatusText(status) {
+  if (status === 'completed') return t('已完成');
+  if (status === 'stopped') return t('已停止');
+  return t('运行中');
+}
+
+/**
+ * Split accumulated blocks into card-sized chunks at block boundaries,
+ * budgeted by the encoded running-status card (the largest render). Every
+ * chunk keeps at least one block so progress is never dropped. The caller
+ * renders all but the last chunk as `sealed` and the last one live.
+ */
+export function splitStepStreamCardBlocks(blocks, limit = STEP_STREAM_CARD_MAX_BYTES) {
+  const list = (Array.isArray(blocks) ? blocks : []).filter(Boolean);
+  if (list.length === 0) return [];
+  const chunks = [];
+  let current = [];
+  for (const block of list) {
+    if (current.length > 0
+      && Buffer.byteLength(stepStreamCard([...current, block]), 'utf8') > limit) {
+      chunks.push(current);
+      current = [block];
+    } else {
+      current.push(block);
+    }
+  }
+  if (current.length > 0) chunks.push(current);
+  return chunks;
+}
+
+/**
+ * Interactive question card. When the question carries options, each option is
+ * rendered as its own button; the selected option label is submitted via a
+ * card callback. Multi-select questions fall back to the plain-text flow (the
+ * caller decides), because a multi-select needs a confirm step.
+ * Action: answer:<interactionId>:<optionLabel>
+ */
+export function questionCard({ interactionId, header, question, detail, options, index, total }) {
+  const elements = [];
+  const progress = total > 1 ? `（${index + 1}/${total}）` : '';
+  if (header) elements.push({ tag: 'div', text: markdown(String(header)) });
+  const qText = typeof question === 'string' && question.trim() ? question : t('请输入你的回答。');
+  elements.push({ tag: 'div', text: markdown(String(qText)) });
+  if (detail) elements.push({ tag: 'div', text: markdown(String(detail)) });
+
+  if (Array.isArray(options) && options.length > 0) {
+    elements.push({ tag: 'hr' });
+    for (const option of options) {
+      const label = typeof option?.label === 'string' ? option.label : '';
+      if (!label) continue;
+      const description = typeof option?.description === 'string' && option.description.trim()
+        ? option.description.trim()
+        : '';
+      // Include the option description in the button so the user sees the full
+      // meaning (mirrors the text form "1. label — description").
+      const buttonText = description ? `${label}\n${description}` : label;
+      // Action carries the question index so a stale card from a previous
+      // question cannot be applied to the current one: answer:<interactionId>:<index>:<label>
+      elements.push(button(buttonText, `answer:${interactionId}:${index}:${label}`));
+    }
+    // issue #162：自定义答案入口与 menuCard/steerCard 的「✏️ 更多 / 自定义…」
+    // 对齐——文字流本就支持 custom 答案，卡片补上引导入口。
+    elements.push(button(t('✏️ 其他答案…'), `answerCustom:${interactionId}:${index}`));
+  }
+  return cardWith(t('❓ 请补充信息{progress}', { progress }), elements);
+}
+
+/**
+ * issue #162：提问卡被回答后的已答状态卡——原卡整卡替换为该回执样式：
+ * 保留问题与选项文本、标注已选项、不渲染任何按钮（重复点击从根源消失）。
+ * 与 questionCard 一样返回 JSON 字符串，调用方直接作为卡 content 使用。
+ */
+export function answeredQuestionCard({ interactionId, header, question, detail, options, chosen, index, total }) {
+  const elements = [];
+  const progress = total > 1 ? `（${index + 1}/${total}）` : '';
+  if (header) elements.push({ tag: 'div', text: markdown(String(header)) });
+  const qText = typeof question === 'string' && question.trim() ? question : t('请输入你的回答。');
+  elements.push({ tag: 'div', text: markdown(String(qText)) });
+  if (detail) elements.push({ tag: 'div', text: markdown(String(detail)) });
+  if (Array.isArray(options) && options.length > 0) {
+    elements.push({ tag: 'hr' });
+    let chosenShown = false;
+    for (const option of options) {
+      const label = typeof option?.label === 'string' ? option.label : '';
+      if (!label) continue;
+      if (label === chosen) chosenShown = true;
+      elements.push({ tag: 'div', text: markdown(label === chosen
+        ? t('✅ 已选择：{label}', { label })
+        : label) });
+    }
+    // 自定义文本答案不在预设选项里——单独一行展示所选内容。
+    if (!chosenShown && typeof chosen === 'string' && chosen.trim()) {
+      elements.push({ tag: 'div', text: markdown(t('✅ 已选择：{label}', { label: chosen })) });
+    }
+  } else if (typeof chosen === 'string' && chosen.trim()) {
+    elements.push({ tag: 'div', text: markdown(t('✅ 已选择：{label}', { label: chosen })) });
+  }
+  elements.push({ tag: 'hr' });
+  elements.push({ tag: 'div', text: markdown(t('回答已提交，对话将继续。')) });
+  return cardWith(t('✅ 已回答{progress}', { progress }), elements);
 }

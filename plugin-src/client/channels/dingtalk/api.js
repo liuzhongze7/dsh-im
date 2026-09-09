@@ -1,4 +1,5 @@
 import { normalizeAgentPresetCatalog, normalizeAgentPresetId, SET_AGENT_PRESET_ENDPOINT } from '../../agent-preset.js';
+import { normalizeModelCatalog, normalizeModelSelection, SET_MODEL_ENDPOINT } from '../../model-setting.js';
 import { normalizeLastMessageError } from '../../last-message-error.js';
 import { normalizeAccessPolicy } from '../../../../src/channels/shared/access-policy.mjs';
 import { normalizeContextEnhancementConfig } from '../../../../src/channels/shared/context-enhancement.mjs';
@@ -14,6 +15,7 @@ export const DINGTALK_ENDPOINTS = Object.freeze({
   reconnectBot: 'bot.reconnect',
   deleteBot: 'bot.delete',
   setWorkspace: 'bot.workspace.set',
+  setModel: SET_MODEL_ENDPOINT,
   setAgentPreset: SET_AGENT_PRESET_ENDPOINT,
   setContextEnhancement: 'bot.context-enhancement.set',
   setAccessPolicy: 'bot.access-policy.set',
@@ -85,11 +87,20 @@ function sanitizeMessage(value, fallback) {
   return message.replace(/([=:]\s*)[^\s,;，。]+/g, '$1••••••').slice(0, 240);
 }
 
+function safeReferenceId(value) {
+  const referenceId = optionalString(value, 40);
+  return referenceId && /^DT-CONN-[A-F0-9]{8}$/.test(referenceId) ? referenceId : undefined;
+}
+
 function normalizeError(value, fallbackCode, fallbackMessage) {
   if (!isRecord(value)) return undefined;
+  const hint = sanitizeMessage(value.hint, '');
+  const referenceId = safeReferenceId(value.referenceId);
   return {
     code: safeErrorCode(value.code, fallbackCode),
     message: sanitizeMessage(value.message, fallbackMessage),
+    ...(hint ? { hint } : {}),
+    ...(referenceId ? { referenceId } : {}),
   };
 }
 
@@ -108,8 +119,15 @@ export function unwrapRpcResult(result) {
     throw new Error('钉钉服务返回了无法识别的响应');
   }
   if (!result.ok) {
-    const error = new Error(sanitizeMessage(result.error?.message, '钉钉操作失败'));
-    error.code = safeErrorCode(result.error?.code, 'DINGTALK_RPC_ERROR');
+    const visible = normalizeError(
+      result.error,
+      'DINGTALK_RPC_ERROR',
+      '钉钉操作失败',
+    ) ?? { code: 'DINGTALK_RPC_ERROR', message: '钉钉操作失败' };
+    const error = new Error(visible.message);
+    error.code = visible.code;
+    if (visible.hint) error.hint = visible.hint;
+    if (visible.referenceId) error.referenceId = visible.referenceId;
     throw error;
   }
   return result.value;
@@ -165,6 +183,7 @@ function normalizeBot(value) {
     connected,
     configured: value.configured !== false,
     workspace: optionalString(value.workspace, 4_096) ?? '',
+    model: normalizeModelSelection(value.model),
     agentPreset: normalizeAgentPresetId(value.agentPreset),
     contextEnhancement: normalizeContextEnhancementConfig(value.contextEnhancement),
     ...(Object.hasOwn(value, 'accessPolicy')
@@ -215,6 +234,7 @@ export function normalizeSnapshot(value) {
     provisioning: source.provisioning ? normalizeProvisioning(source.provisioning) : null,
     testMessage: normalizeTestMessage(source.testMessage),
     agentPresetCatalog: normalizeAgentPresetCatalog(source.agentPresetCatalog),
+    modelCatalog: normalizeModelCatalog(source.modelCatalog),
   };
 }
 
@@ -227,10 +247,11 @@ export function connectionTestFeedback(result) {
 }
 
 export function presentError(error) {
-  return {
-    code: safeErrorCode(error?.code, 'DINGTALK_ERROR'),
-    message: sanitizeMessage(error?.message, '钉钉操作失败，请稍后重试'),
-  };
+  return normalizeError(
+    error,
+    'DINGTALK_ERROR',
+    '钉钉操作失败，请稍后重试',
+  ) ?? { code: 'DINGTALK_ERROR', message: '钉钉操作失败，请稍后重试' };
 }
 
 export function formatRemaining(milliseconds) {

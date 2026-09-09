@@ -1,3 +1,4 @@
+import { managementFetch } from '../../fixtures/management-rpc.mjs';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -38,12 +39,10 @@ async function rpcFixture(controller) {
   let disposed = false;
   const ctx = {
     connection: {
-      rpc: {
-        handle(channel, handler, options) {
-          registration = { channel, handler, options };
-          return async () => { disposed = true; };
-        },
-      },
+      fetch: managementFetch((channel, handler, options) => {
+        registration = { channel, handler, options };
+        return async () => { disposed = true; };
+      }),
     },
   };
   const dispose = await apply(ctx, { controller });
@@ -54,7 +53,7 @@ async function rpcFixture(controller) {
   };
 }
 
-test('Host plugin registers the real rc.6 Connection RPC shape as loopback-only', async () => {
+test('Host plugin registers the public management Fetch route as loopback-only', async () => {
   const controller = {
     status: async () => status(),
     startRegistration: async () => status(),
@@ -64,7 +63,8 @@ test('Host plugin registers the real rc.6 Connection RPC shape as loopback-only'
   const fx = await rpcFixture(controller);
 
   assert.equal(fx.registration.channel, '/feishu');
-  assert.deepEqual(fx.registration.options, { authority: 'loopback' });
+  assert.equal(fx.registration.options.path, '/api/dsh-im/feishu');
+  await assert.rejects(fx.registration.handler(FEISHU_ENDPOINTS.status, {}, undefined, { host: 'remote.example' }), /HTTP 403/);
   const result = await fx.registration.handler(FEISHU_ENDPOINTS.status, {}, signal());
   assert.equal(result.ok, true);
   assert.equal(result.value.state, 'disconnected');
@@ -242,6 +242,111 @@ test('Host validates and updates the Feishu group response mode', async () => {
   const invalid = await fx.registration.handler(
     FEISHU_ENDPOINTS.setGroupResponseMode,
     { botId: 'bot_mode', groupResponseMode: 'sometimes' },
+    signal(),
+  );
+  assert.equal(invalid.ok, false);
+  assert.equal(invalid.error.code, 'bad-request');
+  await fx.dispose();
+});
+
+test('Host validates and updates the Feishu group topic reply flag', async () => {
+  let topicReply = false;
+  const current = () => status({
+    schemaVersion: 2,
+    revision: 4,
+    configured: true,
+    bots: [{
+      botId: 'bot_topic',
+      phase: 'connected',
+      connected: true,
+      configured: true,
+      groupResponseMode: 'mention',
+      groupTopicReply: topicReply,
+      bot: { name: '话题机器人', domain: 'feishu' },
+      connection: {
+        ready: true,
+        feishuLongConnectionState: 'connected',
+        harnessReachable: true,
+      },
+    }],
+  });
+  const controller = {
+    status: async () => current(),
+    startRegistration: async () => current(),
+    cancelRegistration: async () => current(),
+    disconnect: async () => status(),
+    updateGroupTopicReply: async (botId, value) => {
+      assert.equal(botId, 'bot_topic');
+      topicReply = value;
+      return current();
+    },
+  };
+  const fx = await rpcFixture(controller);
+
+  const updated = await fx.registration.handler(
+    FEISHU_ENDPOINTS.setGroupTopicReply,
+    { botId: 'bot_topic', groupTopicReply: true },
+    signal(),
+  );
+  assert.equal(updated.ok, true);
+  assert.equal(updated.value.bots[0].groupTopicReply, true);
+
+  const invalid = await fx.registration.handler(
+    FEISHU_ENDPOINTS.setGroupTopicReply,
+    { botId: 'bot_topic', groupTopicReply: 'sometimes' },
+    signal(),
+  );
+  assert.equal(invalid.ok, false);
+  assert.equal(invalid.error.code, 'bad-request');
+  await fx.dispose();
+});
+
+test('Host validates and updates the Feishu step push flag', async () => {
+  let stepPush = false;
+  const current = () => status({
+    schemaVersion: 2,
+    revision: 5,
+    configured: true,
+    bots: [{
+      botId: 'bot_step',
+      phase: 'connected',
+      connected: true,
+      configured: true,
+      groupResponseMode: 'mention',
+      groupTopicReply: false,
+      stepPush,
+      bot: { name: '分步直推机器人', domain: 'feishu' },
+      connection: {
+        ready: true,
+        feishuLongConnectionState: 'connected',
+        harnessReachable: true,
+      },
+    }],
+  });
+  const controller = {
+    status: async () => current(),
+    startRegistration: async () => current(),
+    cancelRegistration: async () => current(),
+    disconnect: async () => status(),
+    updateStepPush: async (botId, value) => {
+      assert.equal(botId, 'bot_step');
+      stepPush = value;
+      return current();
+    },
+  };
+  const fx = await rpcFixture(controller);
+
+  const updated = await fx.registration.handler(
+    FEISHU_ENDPOINTS.setStepPush,
+    { botId: 'bot_step', stepPush: true },
+    signal(),
+  );
+  assert.equal(updated.ok, true);
+  assert.equal(updated.value.bots[0].stepPush, true);
+
+  const invalid = await fx.registration.handler(
+    FEISHU_ENDPOINTS.setStepPush,
+    { botId: 'bot_step', stepPush: 'sometimes' },
     signal(),
   );
   assert.equal(invalid.ok, false);

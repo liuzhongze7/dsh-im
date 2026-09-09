@@ -1,3 +1,4 @@
+import { registerManagementRpc } from '../management-rpc.mjs';
 import { resolveRpcAuthority } from './rpc-authority.mjs';
 
 export const DELIVERY_RPC_CHANNEL = '/dsh-im-delivery';
@@ -9,6 +10,7 @@ export const DELIVERY_ENDPOINTS = Object.freeze({
   createTarget: 'target.create',
   updateTarget: 'target.update',
   deleteTarget: 'target.delete',
+  setSessionSync: 'target.session-sync.set',
   testTarget: 'target.test',
 });
 
@@ -22,6 +24,7 @@ const PUBLIC_ERRORS = new Set([
   'bot-not-connected',
   'target-rejected',
   'delivery-failed',
+  'session-sync-unavailable',
   'cancelled',
 ]);
 
@@ -85,6 +88,11 @@ function validPayload(endpoint, payload) {
       || (exactKeys(payload, ['botId', 'target'])
         && validBotId(payload.botId) && validDraftTarget(payload.target));
   }
+  if (endpoint === DELIVERY_ENDPOINTS.setSessionSync) {
+    return exactKeys(payload, ['botId', 'targetId', 'enabled'])
+      && validBotId(payload.botId) && validTargetId(payload.targetId)
+      && typeof payload.enabled === 'boolean';
+  }
   return exactKeys(payload, ['botId', 'targetId'])
     && validBotId(payload.botId) && validTargetId(payload.targetId);
 }
@@ -131,6 +139,11 @@ export function createDeliveryRpcHandler(service) {
         value = await service.updateTarget(payload.botId, payload.targetId, payload.target);
       } else if (endpoint === DELIVERY_ENDPOINTS.deleteTarget) {
         value = await service.deleteTarget(payload.botId, payload.targetId);
+      } else if (endpoint === DELIVERY_ENDPOINTS.setSessionSync) {
+        if (typeof service.setSessionSync !== 'function') {
+          throw new TypeError('Session sync is unavailable');
+        }
+        value = await service.setSessionSync(payload.botId, payload.targetId, payload.enabled);
       } else {
         value = await service.send(
           payload.botId,
@@ -147,10 +160,7 @@ export function createDeliveryRpcHandler(service) {
 }
 
 export function installDeliveryRpc(ctx, service, { authority } = {}) {
-  if (!ctx?.connection?.rpc || typeof ctx.connection.rpc.handle !== 'function') {
-    throw new TypeError('DSH Host Connection RPC is required');
-  }
-  return ctx.connection.rpc.handle(
+  return registerManagementRpc(ctx,
     DELIVERY_RPC_CHANNEL,
     createDeliveryRpcHandler(service),
     { authority: resolveRpcAuthority(authority) },

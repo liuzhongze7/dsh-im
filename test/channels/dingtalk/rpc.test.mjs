@@ -1,3 +1,4 @@
+import { managementFetch } from '../../fixtures/management-rpc.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
@@ -6,6 +7,7 @@ import {
   createDingtalkRpcHandler,
   installDingtalkRpc,
 } from '../../../plugin-src/host/channels/dingtalk/rpc.mjs';
+import { dingtalkPublicConnectionError } from '../../../src/channels/dingtalk/connection-error.mjs';
 
 function controller(overrides = {}) {
   return {
@@ -96,23 +98,44 @@ test('credential RPC accepts Client ID fields while keeping Client Secret host-o
   assert.equal((await handler(DINGTALK_ENDPOINTS.bindCredentials, { clientId: 'manual-client' })).ok, false);
 });
 
-test('RPC is registered for loopback clients only', () => {
+test('RPC returns only the safe connection diagnostic projection', async () => {
+  const cause = new Error('request body contains clientSecret=must-not-leak');
+  const publicError = {
+    code: 'stream-proxy-dependency-incompatible',
+    message: '钉钉 Stream 连接失败。',
+    hint: '请修复代理依赖后重试。',
+    referenceId: 'DT-CONN-DEADBEEF',
+  };
+  const handler = createDingtalkRpcHandler(controller({
+    reconnectBot: async () => {
+      throw dingtalkPublicConnectionError(publicError, cause);
+    },
+  }));
+
+  const result = await handler(DINGTALK_ENDPOINTS.reconnectBot, {
+    botId: 'dt_abc', sendTest: true,
+  });
+
+  assert.deepEqual(result, { ok: false, error: publicError });
+  assert.doesNotMatch(JSON.stringify(result), /must-not-leak|clientSecret|cause/);
+});
+
+test('RPC is registered for loopback clients only', async () => {
   const registrations = [];
   const dispose = () => {};
   const ctx = {
     connection: {
-      rpc: {
-        handle: (...args) => {
-          registrations.push(args);
-          return dispose;
-        },
-      },
+      fetch: managementFetch((...args) => {
+        registrations.push(args);
+        return dispose;
+      }),
     },
   };
 
   assert.equal(installDingtalkRpc(ctx, controller()), dispose);
   assert.equal(registrations[0][0], '/dingtalk');
-  assert.deepEqual(registrations[0][2], { authority: 'loopback' });
+  assert.equal(registrations[0][2].path, '/api/dsh-im/dingtalk');
+  await assert.rejects(registrations[0][1]('connection.status', {}, undefined, { host: 'remote.example' }), /HTTP 403/);
 });
 
 test('reconnect sends a DingTalk test message only for a connected bot and isolates send failures', async () => {

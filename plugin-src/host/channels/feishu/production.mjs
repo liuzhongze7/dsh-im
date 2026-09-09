@@ -7,6 +7,10 @@ import { createConnectionSupervisor } from './connection-supervisor.mjs';
 import { createHarnessCommandExecutor } from '../../harness-command-executor.mjs';
 import { harnessConnection } from '../../harness-connection.mjs';
 import { createHarnessSessionExecutors } from '../../harness-session-coordinator.mjs';
+import {
+  getInboundTtlRuntime,
+  registerInboundTtlWorkspaces,
+} from '../../inbound-ttl-runtime.mjs';
 import { verifyFeishuApp } from '../../../../src/channels/feishu/feishu-app.mjs';
 import { FeishuRuntime } from '../../../../src/channels/feishu/feishu-runtime.mjs';
 import { HarnessClient } from '../../../../src/channels/feishu/harness-client.mjs';
@@ -23,6 +27,7 @@ import {
   observeBotWorkspaceRemovals,
 } from '../../../../src/channels/shared/bot-workspace-store.mjs';
 import { listAgentPresetCatalog } from '../../../../src/channels/shared/agent-preset.mjs';
+import { listModelCatalog } from '../../../../src/channels/shared/model-setting.mjs';
 import { createDeliveryAdapter } from '../../delivery-adapter.mjs';
 import {
   accessPolicyProvider,
@@ -158,10 +163,19 @@ export async function createProductionController(ctx, config = {}, internals = {
     return stateFor(botConfig);
   };
   const commandExecutor = createHarnessCommandExecutor(ctx, internals.commandExecutor);
+  const inboundTtl = internals.inboundTtl ?? getInboundTtlRuntime(ctx, config);
+  const inboundTtlService = inboundTtl?.service ?? inboundTtl;
+  registerInboundTtlWorkspaces(ctx, inboundTtlService, {
+    workspaces,
+    configStore: observedConfigStore,
+    defaultWorkspace,
+    botIdFrom: (bot) => bot?.id,
+  });
   const { controlExecutor, sessionMaintenanceExecutor, fileIngressExecutor } = createHarnessSessionExecutors(ctx, {
     controlExecutor: internals.controlExecutor,
     sessionMaintenanceExecutor: internals.sessionMaintenanceExecutor,
     fileIngressExecutor: internals.fileIngressExecutor,
+    inboundTtlService,
   });
   const harness = new Harness({
     ...connection,
@@ -178,6 +192,7 @@ export async function createProductionController(ctx, config = {}, internals = {
   const proxyEnv = internals.proxyEnv ?? process.env;
   const wsAgent = createFeishuWebSocketAgent(proxyEnv, internals.createProxyAgent);
 
+  const modelCatalog = () => listModelCatalog(harness);
   const coreController = new Controller({
     registerApp: (options) => lark.registerApp(options),
     verifyApp,
@@ -202,6 +217,9 @@ export async function createProductionController(ctx, config = {}, internals = {
         domain: botConfig.domain,
         botOpenId: botConfig.botOpenId,
         groupResponseMode: botConfig.groupResponseMode,
+        groupTopicReply: botConfig.groupTopicReply,
+        stepPush: botConfig.stepPush,
+        stepPushMode: botConfig.stepPushMode,
         ownerOpenIds: botConfig.ownerOpenIds ?? [botConfig.ownerOpenId],
         harness: workspaceScope.harness,
         state: workspaceScope.state,
@@ -233,6 +251,7 @@ export async function createProductionController(ctx, config = {}, internals = {
     workspaces,
     stateFor: stateForBotId,
     agentPresetCatalog,
+    modelCatalog,
   });
 
   const supervisor = createSupervisor({

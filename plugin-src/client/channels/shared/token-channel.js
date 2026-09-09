@@ -1,6 +1,7 @@
 import * as React from 'react';
 
 import { CredentialActionIcon, CredentialBindingPanel } from '../../credential-binding.js';
+import { CollapsibleAccountSection } from './collapsible-account.js';
 import { h } from '../../i18n.js';
 import { installDingtalkStyles } from '../dingtalk/styles.js';
 import { WorkspaceEditor } from '../../workspace-editor.js';
@@ -10,6 +11,11 @@ import {
   AgentPresetEditor,
   EMPTY_AGENT_PRESET_CATALOG,
 } from '../../agent-preset.js';
+import {
+  EMPTY_MODEL_CATALOG,
+  ModelCatalogContext,
+  ModelEditor,
+} from '../../model-setting.js';
 import { useWorkspaceSnapshotFence } from '../../workspace-snapshot-fence.js';
 import {
   BotSettingsButton,
@@ -75,7 +81,7 @@ export function createTokenChannelSettings(definition) {
     accountSettingsEndpoint = null,
   } = definition;
 
-  function AccountCard({ account, busy, testNotice, removing, onReconnect, onWorkspaceSave, onAgentPresetSave, onContextEnhancementSave, onAccountSettingsSave, onRequestRemove, onConfirmRemove, onCancelRemove }) {
+  function AccountCard({ account, busy, testNotice, removing, onReconnect, onWorkspaceSave, onModelSave, onAgentPresetSave, onContextEnhancementSave, onAccountSettingsSave, onRequestRemove, onConfirmRemove, onCancelRemove }) {
     const state = busy === 'reconnect' ? 'connecting' : account.state;
     const tone = account.connected ? 'success' : state === 'error' ? 'error' : 'warning';
     const stateLabel = account.connected ? '运行正常' : state === 'connecting' ? '正在连接' : '连接未就绪';
@@ -83,32 +89,45 @@ export function createTokenChannelSettings(definition) {
     const identity = account.bot.username ? `@${account.bot.username}` : account.bot.idMasked;
     return h('article', { className: 'ddt-card dim-botCard', 'data-bot-id': account.botId },
       h('div', { className: 'ddt-cardBody dim-botCardBody' },
-        h('div', { className: 'ddt-accountTop dim-botCardTop' },
-          h('div', { className: 'ddt-accountIdentity dim-botIdentity' },
-            h('div', { className: `ddt-avatar dim-botAvatar ${avatarClass}`, 'aria-hidden': 'true' },
-              h(LogoGlyph, { size: 29 })),
-            h('div', { className: 'dim-botName' },
-              h('h3', null, account.bot.name), h('p', null, identity))),
-          h('div', { className: 'dim-botCardTools' },
-            h(BotStatusMeta, {
-              className: 'ddt-health',
-              dotClassName: 'ddt-dot',
-              tone,
-              stateLabel,
-              lastCheckedAt: account.health.lastCheckedAt,
-              formatCheckedTime: checkedTime,
-            }),
-            h(BotSettingsButton, {
-              channel: channel.toLowerCase(),
-              botId: account.botId,
-              botName: account.bot.name,
-              connected: account.connected,
-              accessPolicy: account.accessPolicy,
-            }))),
-        h(WorkspaceEditor, {
-          workspace: account.workspace,
+        h(CollapsibleAccountSection, {
+          id: `tok-settings-${account.botId.replace(/[^a-zA-Z0-9_-]/g, '-')}`,
+          header: h('div', { className: 'ddt-accountTop dim-botCardTop' },
+            h('div', { className: 'ddt-accountIdentity dim-botIdentity' },
+              h('div', { className: `ddt-avatar dim-botAvatar ${avatarClass}`, 'aria-hidden': 'true' },
+                h(LogoGlyph, { size: 29 })),
+              h('div', { className: 'dim-botName' },
+                h('h3', null, account.bot.name), h('p', null, identity))),
+            h('div', {
+              className: 'dim-botCardTools',
+              // The header is the collapse toggle; keep inner controls clickable.
+              onClick: (event) => { event.stopPropagation(); },
+              onKeyDown: (event) => { if (event.key === 'Enter' || event.key === ' ') event.stopPropagation(); },
+            },
+              h(BotStatusMeta, {
+                className: 'ddt-health',
+                dotClassName: 'ddt-dot',
+                tone,
+                stateLabel,
+                lastCheckedAt: account.health.lastCheckedAt,
+                formatCheckedTime: checkedTime,
+              }),
+              h(BotSettingsButton, {
+                channel: channel.toLowerCase(),
+                botId: account.botId,
+                botName: account.bot.name,
+                connected: account.connected,
+                accessPolicy: account.accessPolicy,
+              }))),
+        },
+          h(WorkspaceEditor, {
+            workspace: account.workspace,
+            disabled: Boolean(busy),
+            onSave: onWorkspaceSave,
+          }),
+        h(ModelEditor, {
+          model: account.model,
           disabled: Boolean(busy),
-          onSave: onWorkspaceSave,
+          onSave: onModelSave,
         }),
         h(AgentPresetEditor, {
           agentPreset: account.agentPreset,
@@ -147,7 +166,9 @@ export function createTokenChannelSettings(definition) {
             testNotice ? h('div', {
               className: 'ddt-summary dim-cardFeedback',
               role: 'status',
-            }, testNotice) : null))),
+            }, testNotice) : null)),
+        ),
+      ),
       removing ? h('div', { className: 'ddt-confirm dim-confirm', role: 'alertdialog' },
         h('strong', null, `从 DeepSeek Harness 移除“${account.bot.name}”？`),
         h('p', null, `这会停止消息连接，并删除本机保存的 ${credentialNoun}、机器人配置及会话映射。${platformLabel}中的机器人不会被自动删除。`),
@@ -161,6 +182,7 @@ export function createTokenChannelSettings(definition) {
     const [model, setModel] = React.useState({
       phase: 'loading', bots: [], totals: { configured: 0, connected: 0 }, error: null,
       agentPresetCatalog: EMPTY_AGENT_PRESET_CATALOG,
+      modelCatalog: EMPTY_MODEL_CATALOG,
     });
     const [credentialOpen, setCredentialOpen] = React.useState(false);
     const [credentialError, setCredentialError] = React.useState(null);
@@ -198,6 +220,7 @@ export function createTokenChannelSettings(definition) {
         setModel({
           phase: 'ready', bots: snapshot.bots, totals: snapshot.totals, error: null,
           agentPresetCatalog: snapshot.agentPresetCatalog ?? EMPTY_AGENT_PRESET_CATALOG,
+          modelCatalog: snapshot.modelCatalog ?? EMPTY_MODEL_CATALOG,
         });
       } catch (error) {
         if (error?.name !== 'AbortError' && mounted.current && !signal?.aborted
@@ -244,6 +267,7 @@ export function createTokenChannelSettings(definition) {
           setModel({
           phase: 'ready', bots: snapshot.bots, totals: snapshot.totals, error: null,
           agentPresetCatalog: snapshot.agentPresetCatalog ?? EMPTY_AGENT_PRESET_CATALOG,
+          modelCatalog: snapshot.modelCatalog ?? EMPTY_MODEL_CATALOG,
         });
         }
         setCredentialOpen(false);
@@ -266,6 +290,7 @@ export function createTokenChannelSettings(definition) {
           setModel({
           phase: 'ready', bots: snapshot.bots, totals: snapshot.totals, error: null,
           agentPresetCatalog: snapshot.agentPresetCatalog ?? EMPTY_AGENT_PRESET_CATALOG,
+          modelCatalog: snapshot.modelCatalog ?? EMPTY_MODEL_CATALOG,
         });
         }
         if (mounted.current && operation === 'reconnect') {
@@ -318,6 +343,12 @@ export function createTokenChannelSettings(definition) {
                 endpoints.setWorkspace,
                 { botId: account.botId, workspace },
               ),
+              onModelSave: (selectedModel) => botAction(
+                account,
+                'model',
+                endpoints.setModel,
+                { botId: account.botId, model: selectedModel },
+              ),
               onAgentPresetSave: (agentPreset) => botAction(
                 account,
                 'preset',
@@ -350,7 +381,9 @@ export function createTokenChannelSettings(definition) {
             })))))
       : null;
 
-    return h(AgentPresetCatalogContext.Provider, {
+    return h(ModelCatalogContext.Provider, {
+      value: model.modelCatalog ?? EMPTY_MODEL_CATALOG,
+    }, h(AgentPresetCatalogContext.Provider, {
       value: model.agentPresetCatalog ?? EMPTY_AGENT_PRESET_CATALOG,
     }, h('section', {
       className: `ddt-page ${pageClass} dim-channelPage`,
@@ -418,7 +451,7 @@ export function createTokenChannelSettings(definition) {
                       'aria-hidden': 'true',
                     }, h(LogoGlyph, { size: 64 }))))
               : null,
-            botList)));
+            botList))));
   }
 
   return { SettingsTab, AccountCard };

@@ -15,6 +15,11 @@ import {
   isFeishuGroupResponseMode,
   normalizeFeishuGroupResponseMode,
 } from './group-response-mode.mjs';
+import {
+  DEFAULT_FEISHU_STEP_PUSH_MODE,
+  isFeishuStepPushMode,
+  normalizeFeishuStepPushMode,
+} from './step-push-mode.mjs';
 
 const ACTIVE_REGISTRATION_STATES = new Set([
   'starting', 'qr_ready', 'polling', 'slow_down', 'domain_switched',
@@ -90,6 +95,9 @@ function configuredBotFingerprint(config) {
     botOpenId: config.botOpenId,
     activated: config.activated,
     groupResponseMode: normalizeFeishuGroupResponseMode(config.groupResponseMode),
+    groupTopicReply: config.groupTopicReply === true,
+    stepPush: config.stepPush === true,
+    stepPushMode: normalizeFeishuStepPushMode(config.stepPushMode),
     groupMessagePermissionGranted: config.groupMessagePermissionGranted === true,
     deletionPending: config.deletionPending === true,
     connectedAt: config.connectedAt ?? null,
@@ -445,6 +453,8 @@ export class MultiBotDshFeishuController {
         botName: bot.name,
         botOpenId: bot.openId,
         activated: bot.activated,
+        stepPush: existing?.stepPush ?? true,
+        stepPushMode: existing?.stepPushMode ?? DEFAULT_FEISHU_STEP_PUSH_MODE,
         deletionPending: false,
         connectedAt: new Date().toISOString(),
         createdAt: existing?.createdAt ?? new Date().toISOString(),
@@ -584,6 +594,48 @@ export class MultiBotDshFeishuController {
     }));
   }
 
+  async updateGroupTopicReply(botId, groupTopicReply) {
+    this.#assertOpen();
+    if (typeof groupTopicReply !== 'boolean') {
+      throw new TypeError('Invalid Feishu group topic reply flag');
+    }
+    return this.#serializeConfig(() => this.#withBotTransition(botId, async () => {
+      const config = this.#requireBot(botId);
+      const saved = await this.#configStore.saveBot({ ...config, groupTopicReply });
+      this.#runtimes.get(botId)?.setGroupTopicReply?.(saved.groupTopicReply);
+      this.#touch();
+      return this.status(botId);
+    }));
+  }
+
+  async updateStepPush(botId, stepPush) {
+    this.#assertOpen();
+    if (typeof stepPush !== 'boolean') {
+      throw new TypeError('Invalid Feishu step push flag');
+    }
+    return this.#serializeConfig(() => this.#withBotTransition(botId, async () => {
+      const config = this.#requireBot(botId);
+      const saved = await this.#configStore.saveBot({ ...config, stepPush });
+      this.#runtimes.get(botId)?.setStepPush?.(saved.stepPush);
+      this.#touch();
+      return this.status(botId);
+    }));
+  }
+
+  async updateStepPushMode(botId, stepPushMode) {
+    this.#assertOpen();
+    if (!isFeishuStepPushMode(stepPushMode)) {
+      throw new TypeError('Invalid Feishu step push mode');
+    }
+    return this.#serializeConfig(() => this.#withBotTransition(botId, async () => {
+      const config = this.#requireBot(botId);
+      const saved = await this.#configStore.saveBot({ ...config, stepPushMode });
+      this.#runtimes.get(botId)?.setStepPushMode?.(saved.stepPushMode);
+      this.#touch();
+      return this.status(botId);
+    }));
+  }
+
   async deleteBot(botId) {
     this.#assertOpen();
     return this.#serializeConfig(() => this.#withBotTransition(botId, async () => {
@@ -646,6 +698,9 @@ export class MultiBotDshFeishuController {
         connected,
         configured: true,
         groupResponseMode: normalizeFeishuGroupResponseMode(config.groupResponseMode),
+        groupTopicReply: config.groupTopicReply === true,
+        stepPush: config.stepPush === true,
+        stepPushMode: normalizeFeishuStepPushMode(config.stepPushMode),
         groupMessagePermissionGranted: config.groupMessagePermissionGranted === true,
         bot: publicBot(config),
         connection,
@@ -1079,6 +1134,11 @@ export class MultiBotDshFeishuController {
         botName: bot.name,
         botOpenId: bot.openId,
         activated: bot.activated,
+        // New connections start with the process-card presentation; existing
+        // bots keep whatever they saved before (the spread above re-applies
+        // their stored values, undefined falls through to the defaults here).
+        stepPush: existing?.stepPush ?? true,
+        stepPushMode: existing?.stepPushMode ?? DEFAULT_FEISHU_STEP_PUSH_MODE,
         deletionPending: false,
         connectedAt: new Date().toISOString(),
         createdAt: existing?.createdAt ?? new Date().toISOString(),

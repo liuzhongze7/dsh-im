@@ -2,6 +2,7 @@ import * as React from 'react';
 
 import { WeixinLogoGlyph } from '../../channel-logos.js';
 import { QrActionIcon } from '../../credential-binding.js';
+import { CollapsibleAccountSection } from '../shared/collapsible-account.js';
 import { h } from '../../i18n.js';
 import {
   WEIXIN_ENDPOINTS,
@@ -21,6 +22,11 @@ import {
   AgentPresetEditor,
   EMPTY_AGENT_PRESET_CATALOG,
 } from '../../agent-preset.js';
+import {
+  EMPTY_MODEL_CATALOG,
+  ModelCatalogContext,
+  ModelEditor,
+} from '../../model-setting.js';
 import { useWorkspaceSnapshotFence } from '../../workspace-snapshot-fence.js';
 import {
   BotSettingsButton,
@@ -208,6 +214,7 @@ export function AccountCard({
   removing,
   onReconnect,
   onWorkspaceSave,
+  onModelSave,
   onAgentPresetSave,
   onContextEnhancementSave,
   onRequestRemove,
@@ -219,11 +226,18 @@ export function AccountCard({
   const summary = account.error?.message ?? (account.connected ? null : account.health.summary);
   return h('article', { className: 'dxw-card dim-botCard', tabIndex: -1, 'data-bot-id': account.botId },
     h('div', { className: 'dxw-cardBody dim-botCardBody' },
-      h('div', { className: 'dxw-accountTop dim-botCardTop' },
+      h(CollapsibleAccountSection, {
+        id: `dxw-settings-${account.botId.replace(/[^a-zA-Z0-9_-]/g, '-')}`,
+        header: h('div', { className: 'dxw-accountTop dim-botCardTop' },
         h('div', { className: 'dxw-accountIdentity dim-botIdentity' },
           h('div', { className: 'dxw-avatar dim-botAvatar', 'aria-hidden': 'true' }, h(WeixinLogoGlyph, { size: 27 })),
           h('div', { className: 'dim-botName' }, h('h3', null, account.bot.name), h('p', null, account.bot.accountIdMasked))),
-        h('div', { className: 'dim-botCardTools' },
+        h('div', {
+            className: 'dim-botCardTools',
+            // The header is the collapse toggle; keep inner controls clickable.
+            onClick: (event) => { event.stopPropagation(); },
+            onKeyDown: (event) => { if (event.key === 'Enter' || event.key === ' ') event.stopPropagation(); },
+          },
           h(BotStatusMeta, {
             className: 'dxw-health',
             dotClassName: 'dxw-dot',
@@ -238,11 +252,17 @@ export function AccountCard({
             botName: account.bot.name,
             connected: account.connected,
             accessPolicy: account.accessPolicy,
-          }))),
-      h(WorkspaceEditor, {
+          })))
+      },
+        h(WorkspaceEditor, {
         workspace: account.workspace,
         disabled: Boolean(busy),
         onSave: onWorkspaceSave,
+      }),
+      h(ModelEditor, {
+        model: account.model,
+        disabled: Boolean(busy),
+        onSave: onModelSave,
       }),
       h(AgentPresetEditor, {
         agentPreset: account.agentPreset,
@@ -270,7 +290,9 @@ export function AccountCard({
             className: 'dxw-summary dim-cardFeedback',
             role: 'status',
             'aria-live': 'polite',
-          }, feedback) : null))),
+          }, feedback) : null)),
+      ),
+    ),
     removing ? h('div', { className: 'dxw-confirm dim-confirm', role: 'alertdialog' },
       h('strong', null, '从此 Harness 移除这个微信账号？'),
       h('p', null, '这会停止消息连接，并删除本机保存的 bot_token、账号配置和会话映射。其他微信账号不受影响。'),
@@ -296,6 +318,7 @@ function AccountList(props) {
         removing: props.removeTarget === account.botId,
         onReconnect: () => props.onReconnect(account),
         onWorkspaceSave: (workspace) => props.onWorkspaceSave(account, workspace),
+        onModelSave: (model) => props.onModelSave(account, model),
         onAgentPresetSave: (agentPreset) => props.onAgentPresetSave(account, agentPreset),
         onContextEnhancementSave: (config) => props.onContextEnhancementSave(account, config),
         onRequestRemove: () => props.onRequestRemove(account),
@@ -324,6 +347,7 @@ export function WeixinSettingsTab({ rpcCall }) {
   const [model, setModel] = React.useState({
     phase: 'loading', bots: [], totals: EMPTY_TOTALS, revision: 0, error: null,
     agentPresetCatalog: EMPTY_AGENT_PRESET_CATALOG,
+    modelCatalog: EMPTY_MODEL_CATALOG,
   });
   const [provision, setProvision] = React.useState(null);
   const [busy, setBusy] = React.useState(false);
@@ -367,6 +391,7 @@ export function WeixinSettingsTab({ rpcCall }) {
         phase: 'ready', bots: snapshot.bots, totals: snapshot.totals,
         revision: snapshot.revision, error: null,
         agentPresetCatalog: snapshot.agentPresetCatalog ?? EMPTY_AGENT_PRESET_CATALOG,
+        modelCatalog: snapshot.modelCatalog ?? EMPTY_MODEL_CATALOG,
       });
       if (snapshot.provisioning) {
         setProvision((current) => mergeWeixinProvisioningSnapshot(
@@ -558,6 +583,7 @@ export function WeixinSettingsTab({ rpcCall }) {
         setModel((current) => ({
           ...current, bots: snapshot.bots, totals: snapshot.totals, revision: snapshot.revision,
           agentPresetCatalog: snapshot.agentPresetCatalog ?? current.agentPresetCatalog,
+          modelCatalog: snapshot.modelCatalog ?? current.modelCatalog,
         }));
       }
       const refreshed = snapshot.bots.find((bot) => bot.botId === account.botId);
@@ -603,6 +629,7 @@ export function WeixinSettingsTab({ rpcCall }) {
           phase: 'ready', bots: snapshot.bots, totals: snapshot.totals,
           revision: snapshot.revision, error: null,
           agentPresetCatalog: snapshot.agentPresetCatalog ?? EMPTY_AGENT_PRESET_CATALOG,
+          modelCatalog: snapshot.modelCatalog ?? EMPTY_MODEL_CATALOG,
         });
       }
     } finally {
@@ -625,6 +652,7 @@ export function WeixinSettingsTab({ rpcCall }) {
           phase: 'ready', bots: snapshot.bots, totals: snapshot.totals,
           revision: snapshot.revision, error: null,
           agentPresetCatalog: snapshot.agentPresetCatalog ?? EMPTY_AGENT_PRESET_CATALOG,
+          modelCatalog: snapshot.modelCatalog ?? EMPTY_MODEL_CATALOG,
         });
       }
     } finally {
@@ -646,6 +674,7 @@ export function WeixinSettingsTab({ rpcCall }) {
         setModel((current) => ({
           ...current, bots: snapshot.bots, totals: snapshot.totals, revision: snapshot.revision,
           agentPresetCatalog: snapshot.agentPresetCatalog ?? current.agentPresetCatalog,
+          modelCatalog: snapshot.modelCatalog ?? current.modelCatalog,
         }));
       }
       setRemoveTarget(null);
@@ -686,7 +715,9 @@ export function WeixinSettingsTab({ rpcCall }) {
     });
   }
 
-  return h(AgentPresetCatalogContext.Provider, {
+  return h(ModelCatalogContext.Provider, {
+    value: model.modelCatalog ?? EMPTY_MODEL_CATALOG,
+  }, h(AgentPresetCatalogContext.Provider, {
     value: model.agentPresetCatalog ?? EMPTY_AGENT_PRESET_CATALOG,
   }, h('section', { className: 'dxw-page dim-channelPage', 'aria-label': '微信设置' },
     h(Heading, {
@@ -721,6 +752,9 @@ export function WeixinSettingsTab({ rpcCall }) {
                   removeTarget,
                   onReconnect: (account) => void reconnect(account),
                   onWorkspaceSave: saveWorkspace,
+                  onModelSave: (account, selectedModel) => saveBotSetting(
+                    account, 'model', WEIXIN_ENDPOINTS.setModel, { model: selectedModel },
+                  ),
                   onAgentPresetSave: (account, agentPreset) => saveBotSetting(
                     account, 'preset', WEIXIN_ENDPOINTS.setAgentPreset, { agentPreset },
                   ),
@@ -732,5 +766,5 @@ export function WeixinSettingsTab({ rpcCall }) {
                   onCancelRemove: () => setRemoveTarget(null),
                 })
               : null),
-  ));
+  )));
 }

@@ -1,6 +1,7 @@
 import * as React from 'react';
 
 import { AccessPolicySettingsPage } from './access-policy-settings.js';
+import { FeishuGroupSettingsPage } from './channels/feishu/group-settings.js';
 import { h, isEnglish, localizeText } from './i18n.js';
 
 export const DELIVERY_RPC_CHANNEL = '/dsh-im-delivery';
@@ -16,6 +17,7 @@ export const DELIVERY_ENDPOINTS = Object.freeze({
   create: 'target.create',
   update: 'target.update',
   delete: 'target.delete',
+  sessionSync: 'target.session-sync.set',
   test: 'target.test',
 });
 
@@ -23,6 +25,15 @@ export const BOT_SETTINGS_TABS = Object.freeze([
   Object.freeze({ id: 'delivery', label: '投递设置' }),
   Object.freeze({ id: 'access', label: '访问设置' }),
 ]);
+
+export const FEISHU_BOT_SETTINGS_TABS = Object.freeze([
+  ...BOT_SETTINGS_TABS,
+  Object.freeze({ id: 'group', label: '群聊' }),
+]);
+
+export function botSettingsTabsForChannel(channel) {
+  return channel === 'feishu' ? FEISHU_BOT_SETTINGS_TABS : BOT_SETTINGS_TABS;
+}
 
 const CHANNEL_DEFINITIONS = Object.freeze({
   weixin: {
@@ -52,6 +63,13 @@ const CHANNEL_DEFINITIONS = Object.freeze({
     fields: {
       user: [{ key: 'chatId', label: '用户 ID', placeholder: '填写企业微信用户 ID' }],
       group: [{ key: 'chatId', label: '群 Chat ID', placeholder: '填写群 chatid' }],
+    },
+  },
+  wecomApp: {
+    label: '企业微信应用',
+    kinds: [{ value: 'user', label: '私聊' }],
+    fields: {
+      user: [{ key: 'chatId', label: '用户 ID', placeholder: '填写企业微信用户 ID' }],
     },
   },
   qq: {
@@ -296,7 +314,9 @@ function TargetForm({
     h('div', { className: 'dim-targetFormHeading' },
       h('h3', null, editing ? '编辑投递目标' : '新建投递目标'),
       editing
-        ? null
+        ? initialValue?.sessionSync?.enabled
+          ? h('p', null, '修改接收位置会关闭会话双向同步。')
+          : null
         : h('p', null, source === 'suggestion'
             ? '已从会话自动填入目标信息；确认后再保存。'
             : '请手动填写从对应平台取得的原生标识。')),
@@ -457,8 +477,17 @@ function TargetSuggestionPicker({
 function TargetRow({ definition, target, botId, connected, rpcCall, onChanged, onEdit }) {
   const [action, setAction] = React.useState(null);
   const [testState, setTestState] = React.useState(null);
+  const [syncFeedback, setSyncFeedback] = React.useState(null);
   const [copyState, setCopyState] = React.useState(null);
   const [confirmDelete, setConfirmDelete] = React.useState(false);
+  const sessionSync = target.sessionSync ?? { enabled: false, state: 'unavailable' };
+  const syncDescription = sessionSync.state === 'active'
+    ? '自动跟随该私聊的当前会话'
+    : sessionSync.state === 'waiting'
+      ? '等待该私聊建立新会话'
+      : sessionSync.state === 'unavailable'
+        ? '仅支持已经聊过、已建立当前会话且使用当前 Host Harness 的私聊目标'
+        : '关闭时不发送 DSH 会话消息';
   const testTarget = async () => {
     setAction('test');
     setTestState(null);
@@ -494,6 +523,28 @@ function TargetRow({ definition, target, botId, connected, rpcCall, onChanged, o
     }
   };
 
+  const setSessionSync = async (enabled) => {
+    setAction('sync');
+    setSyncFeedback(null);
+    try {
+      await rpcCall(DELIVERY_ENDPOINTS.sessionSync, {
+        botId,
+        targetId: target.targetId,
+        enabled,
+      });
+      await onChanged();
+    } catch (error) {
+      setSyncFeedback({
+        tone: 'error',
+        message: error?.code === 'session-sync-unavailable'
+          ? '会话同步仅支持已经聊过、已建立当前会话且使用当前 Host Harness 的私聊目标。'
+          : presentError(error, '会话同步设置失败，请稍后重试。'),
+      });
+    } finally {
+      setAction(null);
+    }
+  };
+
   return h('li', { className: 'dim-targetRow', 'data-target-id': target.targetId },
     h('div', { className: 'dim-targetSummary' },
       h('div', { className: 'dim-targetTitle' },
@@ -514,7 +565,24 @@ function TargetRow({ definition, target, botId, connected, rpcCall, onChanged, o
         onClick: () => setConfirmDelete(true),
         disabled: Boolean(action),
       }, '删除')),
+    h('label', { className: 'dim-targetSessionSync' },
+      h('span', { className: 'dim-targetSessionSyncCopy' },
+        h('strong', null, '会话双向同步'),
+        h('small', null, syncDescription)),
+      h('input', {
+        type: 'checkbox',
+        checked: sessionSync.enabled === true,
+        disabled: Boolean(action)
+          || (sessionSync.enabled !== true && sessionSync.state === 'unavailable'),
+        onChange: (event) => void setSessionSync(event.target.checked),
+        'aria-label': '会话双向同步',
+      })),
     copyState ? h('p', { className: 'dim-targetFeedback', role: 'status' }, copyState) : null,
+    syncFeedback ? h('p', {
+      className: 'dim-targetFeedback',
+      'data-tone': syncFeedback.tone,
+      role: 'alert',
+    }, syncFeedback.message) : null,
     testState ? h('p', {
       className: 'dim-targetFeedback',
       'data-tone': testState.tone,
@@ -524,7 +592,8 @@ function TargetRow({ definition, target, botId, connected, rpcCall, onChanged, o
     confirmDelete ? h('div', { className: 'dim-targetDeleteConfirm', role: 'alertdialog' },
       h('p', null,
         '删除 ', h('code', null, target.targetId),
-        '？使用这个 targetId 的外部调用将返回 unknown-target。'),
+        '？使用这个 targetId 的外部调用将返回 unknown-target。',
+        sessionSync.enabled ? ' 会话同步设置也会一并删除。' : null),
       h('div', { className: 'dim-targetFormActions' },
         h(DeliveryButton, {
           onClick: () => setConfirmDelete(false),
@@ -672,8 +741,9 @@ export function DeliveryTargetSettingsPage({
     }
   };
 
-  const activeTab = BOT_SETTINGS_TABS.find((tab) => tab.id === activeTabId)
-    ?? BOT_SETTINGS_TABS[0];
+  const settingsTabs = botSettingsTabsForChannel(channel);
+  const activeTab = settingsTabs.find((tab) => tab.id === activeTabId)
+    ?? settingsTabs[0];
   const activeTabDomId = `dim-bot-settings-${activeTab.id}-tab`;
   const activePanelId = `dim-bot-settings-${activeTab.id}-panel`;
 
@@ -688,7 +758,7 @@ export function DeliveryTargetSettingsPage({
       className: 'dim-botSettingsTabs',
       role: 'tablist',
       'aria-label': '机器人设置页签',
-    }, BOT_SETTINGS_TABS.map((tab) => h('button', {
+    }, settingsTabs.map((tab) => h('button', {
       key: tab.id,
       id: `dim-bot-settings-${tab.id}-tab`,
       type: 'button',
@@ -712,6 +782,11 @@ export function DeliveryTargetSettingsPage({
         rpcCall: accessRpcCall,
         onSaved: setAccessPolicy,
       })
+    : activeTab.id === 'group' && channel === 'feishu'
+      ? h(FeishuGroupSettingsPage, {
+          account,
+          rpcCall: accessRpcCall,
+        })
     : h(React.Fragment, null,
   h('section', { className: 'dim-deliveryIdentity', 'aria-labelledby': 'dim-delivery-bot-title' },
     h('div', { className: 'dim-deliveryIdentityHeading' },

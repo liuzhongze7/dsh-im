@@ -15,6 +15,7 @@ function workspaceSession(harness, sessionId) {
     isRunning: (...args) => harness.isSessionRunning(sessionId, ...args),
     hasActiveTurn: (...args) => harness.hasActiveTurn(sessionId, ...args),
     stopActiveTurn: (...args) => harness.stopActiveTurn(sessionId, ...args),
+    stopDeferredTurn: (...args) => harness.stopDeferredTurn?.(sessionId, ...args) ?? false,
     steerActiveTurn: (...args) => harness.steerActiveTurn(sessionId, ...args),
     ask: (...args) => harness.ask(sessionId, ...args),
   };
@@ -52,6 +53,7 @@ export async function askInWorkspaceSession({
   existsOptions,
   askOptions,
   onSessionReady,
+  deferredDelivery,
 }) {
   const initialTitle = contextEnhanced
     ? initialSessionTitle({
@@ -99,7 +101,20 @@ export async function askInWorkspaceSession({
         artifacts.push(artifact);
         await originalOnArtifact?.(artifact);
       };
-      const answer = await binding.session.ask(content ?? text, artifactOptions);
+      let answer;
+      try {
+        answer = await binding.session.ask(content ?? text, artifactOptions);
+      } catch (error) {
+        if (error?.code === 'harness-reply-timeout' && deferredDelivery) {
+          try {
+            const { coordinator, ...destination } = deferredDelivery();
+            await coordinator.trackTimeout(error, { ...destination, key, sessionId: binding.sessionId });
+          } catch (registrationError) {
+            console.warn('[dsh-im] unable to persist deferred delivery:', registrationError.message);
+          }
+        }
+        throw error;
+      }
       return {
         sessionId: binding.sessionId,
         answer,

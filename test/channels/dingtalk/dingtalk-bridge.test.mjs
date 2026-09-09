@@ -1629,6 +1629,113 @@ test('bridge falls back to final text with group sender mentions when AI Card cr
   }
 });
 
+test('bridge delivers text after an active AI Card fails during progress or finalization', async (t) => {
+  for (const stage of ['update', 'finish']) {
+    for (const modelFails of [false, true]) {
+      for (const conversationType of ['1', '2']) {
+        await t.test(`${stage}, modelFails=${modelFails}, conversationType=${conversationType}`, async () => {
+          const fixture = stateFixture();
+          const sent = [];
+          const closed = [];
+          const finished = [];
+          const bridge = new DingtalkHarnessBridge({
+            api: {
+              createAiCard: async () => ({ cardInstanceId: 'card-one' }),
+              updateAiCard: async () => { throw new Error('card update rejected'); },
+              finishAiCard: async (request) => {
+                finished.push(request);
+                throw new Error('card final frame rejected');
+              },
+              failAiCard: async (request) => closed.push(request),
+              sendText: async (request) => {
+                sent.push(request);
+                return { messageId: 'fallback-message' };
+              },
+            },
+            clientId: 'ding-client',
+            clientSecret: 'host-secret',
+            harness: {
+              sessionExists: async () => false,
+              createSession: async () => 'session-card-failure',
+              ask: async (_sessionId, _text, options) => {
+                if (stage === 'update') {
+                  options.onUpdate({ type: 'text', text: '生成中的进度' });
+                  await eventually(() => closed.length === 1, 'failed progress must close the card');
+                }
+                if (modelFails) throw new Error('private model failure');
+                return '最终完整回答';
+              },
+            },
+            state: fixture.state,
+            logger: { error() {}, warn() {} },
+          });
+
+          await bridge.accept(message('active-card-failure', '请回答', {
+            conversationType,
+            isInAtList: true,
+          }));
+
+          assert.equal(closed.length, 1);
+          assert.equal(closed[0].text, '卡片已结束，请查看后续消息。');
+          assert.equal(finished.length, stage === 'finish' ? 1 : 0);
+          assert.equal(sent.length, 1);
+          assert.deepEqual(sent[0].at, conversationType === '2'
+            ? { atUserIds: ['staff-approved'] }
+            : undefined);
+          if (modelFails) {
+            assert.match(sent[0].text, /参考号：MF-[A-F0-9]{8}/);
+            assert.doesNotMatch(sent[0].text, /private model failure|host-secret/);
+            assert.equal(bridge.status.messagesReplied, 0);
+            assert.equal(fixture.outbound.length, 0);
+          } else {
+            assert.equal(sent[0].text, '最终完整回答');
+            assert.equal(bridge.status.messagesReplied, 1);
+            assert.equal(bridge.status.lastError, null);
+            assert.equal(fixture.outbound.length, 1);
+            assert.equal(fixture.outbound[0].text, '最终完整回答');
+            assert.deepEqual(fixture.outbound[0].providerMessageIds, ['fallback-message']);
+          }
+        });
+      }
+    }
+  }
+});
+
+test('bridge does not record a delivered answer when both the AI Card and text fallback fail', async () => {
+  const fixture = stateFixture();
+  const sent = [];
+  const bridge = new DingtalkHarnessBridge({
+    api: {
+      createAiCard: async () => ({ cardInstanceId: 'card-one' }),
+      updateAiCard: async () => {},
+      finishAiCard: async () => { throw new Error('card rejected'); },
+      failAiCard: async () => {},
+      sendText: async (request) => {
+        sent.push(request);
+        throw new Error('text rejected');
+      },
+    },
+    clientId: 'ding-client',
+    clientSecret: 'host-secret',
+    harness: {
+      sessionExists: async () => false,
+      createSession: async () => 'session-no-delivery',
+      ask: async () => '最终完整回答',
+    },
+    state: fixture.state,
+    logger: { error() {}, warn() {} },
+  });
+
+  await bridge.accept(message('no-delivery', '请回答'));
+
+  assert.equal(sent.length, 2);
+  assert.equal(sent[0].text, '最终完整回答');
+  assert.match(sent[1].text, /参考号：MF-[A-F0-9]{8}/);
+  assert.equal(bridge.status.messagesReplied, 0);
+  assert.ok(bridge.status.lastError);
+  assert.equal(fixture.outbound.length, 0);
+});
+
 test('commands stay local and unsafe session webhooks are rejected before Harness', async () => {
   const fixture = stateFixture();
   fixture.sessions.set('p2p:staff-approved', 'old-session');
@@ -2797,4 +2904,75 @@ test('DingTalk group batch commands are rejected without reaching Harness', asyn
 
   assert.equal(asks, 0);
   assert.match(sent.at(-1), /仅支持私聊/);
+});
+
+test('native menu selects exact session without a second message and updates the same card', async () => {
+  const fixture = stateFixture();
+  const cards = [];
+  const updates = [];
+  const sent = [];
+  const accessPolicy = directAccessPolicy({ users: [{ id: 'staff-approved', canExecuteCommands: true }] });
+  const harness = {
+    currentWorkspace: () => process.cwd(),
+    listWorkspaces: async () => [process.cwd()],
+    listWorkspaceSessions: async () => ({ sessions: [{ sessionId: 'session-a', title: 'Existing session' }] }),
+    bindWorkspaceSession: async (key, sessionId) => {
+      fixture.sessions.set(key, sessionId);
+      return { sessionId, title: 'Existing session', workspace: process.cwd() };
+    },
+    agentPresetSettings: async () => ({ agentPresetCatalog: { items: [{ id: '123', label: 'Numeric preset' }] } }),
+    listModels: async () => ({ groups: [{ id: 'deepseek', models: [{ id: 'flash', name: 'Flash' }] }], current: { provider: 'deepseek', model: 'flash' } }),
+    ask: async () => assert.fail('menu must not reach the model'),
+  };
+  const bridge = new DingtalkHarnessBridge({
+    api: {
+      sendText: async ({ text }) => sent.push(text),
+      createMenuCard: async (args) => { cards.push(args); return { cardInstanceId: 'menu-one' }; },
+      updateMenuCard: async (args) => updates.push(args),
+    },
+    clientId: 'client', clientSecret: 'secret', harness, state: fixture.state,
+    accessPolicy, logger: { warn() {}, info() {} },
+  });
+  await bridge.accept(message('open-menu', '/m'));
+  assert.equal(cards.length, 1);
+  assert.deepEqual(cards[0].data.session_options.map(x => x.text.zh_CN), ['新会话', 'Existing session']);
+  assert.equal(cards[0].data.model_index, 0);
+  const callback = {
+    outTrackId: 'menu-one', userId: 'staff-approved',
+    content: JSON.stringify({ cardPrivateData: { actionIds: ['session'], params: {
+      revision: cards[0].data.revision, session: { index: 1, value: '1' },
+    } } }),
+  };
+  await bridge.acceptCard({ ...callback, userId: 'another-user' }, 'wrong-user');
+  await bridge.acceptCard({ ...callback, content: '{' }, 'malformed');
+  assert.equal(updates.length, 0);
+  await bridge.acceptCard(callback, 'select-session');
+  assert.equal(updates.length, 1);
+  assert.equal(updates[0].cardInstanceId, 'menu-one');
+  assert.equal(fixture.state.sessionFor('p2p:staff-approved'), 'session-a');
+  assert.equal(updates[0].data.session_index, 1);
+  assert.equal(cards.length, 1);
+  assert.equal(sent.length, 0);
+  await bridge.acceptCard(callback, 'select-session');
+  await bridge.acceptCard(callback, 'stale-revision');
+  assert.equal(updates.length, 1);
+
+  const freshCallback = (action) => ({ ...callback, content: JSON.stringify({ cardPrivateData: {
+    actionIds: [action], params: { revision: updates.at(-1).data.revision },
+  } }) });
+  fixture.sessions.set('p2p:staff-approved', 'session-changed-elsewhere');
+  await bridge.acceptCard(freshCallback('new'), 'changed-session');
+  assert.equal(fixture.state.sessionFor('p2p:staff-approved'), 'session-changed-elsewhere');
+  assert.match(updates.at(-1).data.notice, /菜单已刷新/);
+
+  await bridge.accept(message('start-batch', '/batch'));
+  await bridge.acceptCard(freshCallback('new'), 'busy-batch');
+  assert.equal(fixture.state.sessionFor('p2p:staff-approved'), 'session-changed-elsewhere');
+  assert.match(updates.at(-1).data.notice, /当前任务尚未结束/);
+  await bridge.accept(message('cancel-batch', '/cancel'));
+
+  accessPolicy.getSettings().direct.allowlist.users[0].canExecuteCommands = false;
+  await bridge.acceptCard(freshCallback('new'), 'revoked-permission');
+  assert.equal(fixture.state.sessionFor('p2p:staff-approved'), 'session-changed-elsewhere');
+  assert.deepEqual(updates.at(-1).data, { notice: COMMAND_PERMISSION_DENIED_MESSAGE });
 });

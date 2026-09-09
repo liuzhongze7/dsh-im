@@ -2,6 +2,7 @@ import * as React from 'react';
 
 import { WecomLogoGlyph } from '../../channel-logos.js';
 import { CredentialActionIcon, CredentialBindingPanel, QrActionIcon } from '../../credential-binding.js';
+import { CollapsibleAccountSection } from '../shared/collapsible-account.js';
 import { h } from '../../i18n.js';
 import { WorkspaceEditor } from '../../workspace-editor.js';
 import { ContextEnhancementEditor } from '../../context-enhancement.js';
@@ -10,6 +11,11 @@ import {
   AgentPresetEditor,
   EMPTY_AGENT_PRESET_CATALOG,
 } from '../../agent-preset.js';
+import {
+  EMPTY_MODEL_CATALOG,
+  ModelCatalogContext,
+  ModelEditor,
+} from '../../model-setting.js';
 import { useWorkspaceSnapshotFence } from '../../workspace-snapshot-fence.js';
 import {
   BotSettingsButton,
@@ -166,6 +172,7 @@ export function AccountCard({
   removing,
   onReconnect,
   onWorkspaceSave,
+  onModelSave,
   onAgentPresetSave,
   onContextEnhancementSave,
   onRequestRemove,
@@ -177,12 +184,19 @@ export function AccountCard({
   const summary = account.error?.message ?? (account.connected ? null : account.health.summary);
   return h('article', { className: 'ddt-card dim-botCard', 'data-bot-id': account.botId },
     h('div', { className: 'ddt-cardBody dim-botCardBody' },
-      h('div', { className: 'ddt-accountTop dim-botCardTop' },
+      h(CollapsibleAccountSection, {
+        id: `wec-settings-${account.botId.replace(/[^a-zA-Z0-9_-]/g, '-')}`,
+        header: h('div', { className: 'ddt-accountTop dim-botCardTop' },
         h('div', { className: 'ddt-accountIdentity dim-botIdentity' },
           h('div', { className: 'ddt-avatar dim-botAvatar dwecom-avatar', 'aria-hidden': 'true' }, h(WecomLogoGlyph, { size: 29 })),
           h('div', { className: 'dim-botName' },
             h('h3', null, account.bot.name), h('p', null, account.bot.appIdMasked))),
-        h('div', { className: 'dim-botCardTools' },
+        h('div', {
+            className: 'dim-botCardTools',
+            // The header is the collapse toggle; keep inner controls clickable.
+            onClick: (event) => { event.stopPropagation(); },
+            onKeyDown: (event) => { if (event.key === 'Enter' || event.key === ' ') event.stopPropagation(); },
+          },
           h(BotStatusMeta, {
             className: 'ddt-health',
             dotClassName: 'ddt-dot',
@@ -197,11 +211,17 @@ export function AccountCard({
             botName: account.bot.name,
             connected: account.connected,
             accessPolicy: account.accessPolicy,
-          }))),
-      h(WorkspaceEditor, {
+          })))
+      },
+        h(WorkspaceEditor, {
         workspace: account.workspace,
         disabled: Boolean(busy),
         onSave: onWorkspaceSave,
+      }),
+      h(ModelEditor, {
+        model: account.model,
+        disabled: Boolean(busy),
+        onSave: onModelSave,
       }),
       h(AgentPresetEditor, {
         agentPreset: account.agentPreset,
@@ -227,7 +247,9 @@ export function AccountCard({
             className: 'ddt-summary dim-cardFeedback',
             role: 'status',
             'aria-live': 'polite',
-          }, feedback) : null))),
+          }, feedback) : null)),
+      ),
+    ),
     removing ? h(RemoveConfirmation, {
       account, busy: busy === 'delete', onConfirm: onConfirmRemove, onCancel: onCancelRemove,
     }) : null);
@@ -237,6 +259,7 @@ export function WecomSettingsTab({ rpcCall }) {
   const [model, setModel] = React.useState({
     phase: 'loading', bots: [], totals: { configured: 0, connected: 0 }, error: null,
     agentPresetCatalog: EMPTY_AGENT_PRESET_CATALOG,
+    modelCatalog: EMPTY_MODEL_CATALOG,
   });
   const [provision, setProvision] = React.useState(null);
   const [busy, setBusy] = React.useState(false);
@@ -298,6 +321,7 @@ export function WecomSettingsTab({ rpcCall }) {
       setModel({
         phase: 'ready', bots: snapshot.bots, totals: snapshot.totals, error: null,
         agentPresetCatalog: snapshot.agentPresetCatalog ?? EMPTY_AGENT_PRESET_CATALOG,
+        modelCatalog: snapshot.modelCatalog ?? EMPTY_MODEL_CATALOG,
       });
       if (restore && snapshot.provisioning) setProvision({
         ...snapshot.provisioning,
@@ -365,6 +389,7 @@ export function WecomSettingsTab({ rpcCall }) {
         setModel({
           phase: 'ready', bots: snapshot.bots, totals: snapshot.totals, error: null,
           agentPresetCatalog: snapshot.agentPresetCatalog ?? EMPTY_AGENT_PRESET_CATALOG,
+          modelCatalog: snapshot.modelCatalog ?? EMPTY_MODEL_CATALOG,
         });
       }
       setCredentialOpen(false);
@@ -428,6 +453,7 @@ export function WecomSettingsTab({ rpcCall }) {
         setModel({
           phase: 'ready', bots: snapshot.bots, totals: snapshot.totals, error: null,
           agentPresetCatalog: snapshot.agentPresetCatalog ?? EMPTY_AGENT_PRESET_CATALOG,
+          modelCatalog: snapshot.modelCatalog ?? EMPTY_MODEL_CATALOG,
         });
       }
       return snapshot;
@@ -509,6 +535,12 @@ export function WecomSettingsTab({ rpcCall }) {
               WECOM_ENDPOINTS.setWorkspace,
               { botId: account.botId, workspace },
             ),
+            onModelSave: (selectedModel) => botAction(
+              account,
+              'model',
+              WECOM_ENDPOINTS.setModel,
+              { botId: account.botId, model: selectedModel },
+            ),
             onAgentPresetSave: (agentPreset) => botAction(
               account,
               'preset',
@@ -544,7 +576,9 @@ export function WecomSettingsTab({ rpcCall }) {
       })
     : null;
 
-  return h(AgentPresetCatalogContext.Provider, {
+  return h(ModelCatalogContext.Provider, {
+    value: model.modelCatalog ?? EMPTY_MODEL_CATALOG,
+  }, h(AgentPresetCatalogContext.Provider, {
     value: model.agentPresetCatalog ?? EMPTY_AGENT_PRESET_CATALOG,
   }, h('section', { className: 'ddt-page dwecom-page dim-channelPage', 'aria-label': '企业微信设置' },
     h(Heading, {
@@ -565,5 +599,5 @@ export function WecomSettingsTab({ rpcCall }) {
             provisionView,
             model.bots.length === 0 && !provision && !credentialOpen
               ? h(EmptyView, { busy, onStart: () => void startProvisioning() }) : null,
-            botList)));
+            botList))));
 }

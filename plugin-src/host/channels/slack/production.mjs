@@ -13,12 +13,17 @@ import {
   observeBotWorkspaceRemovals,
 } from '../../../../src/channels/shared/bot-workspace-store.mjs';
 import { listAgentPresetCatalog } from '../../../../src/channels/shared/agent-preset.mjs';
+import { listModelCatalog } from '../../../../src/channels/shared/model-setting.mjs';
 import { createDeliveryAdapter } from '../../delivery-adapter.mjs';
 import { createTokenConnectionSupervisor } from '../shared/connection-supervisor.mjs';
 import { pluginPaths } from '../shared/production.mjs';
 import { createHarnessCommandExecutor } from '../../harness-command-executor.mjs';
 import { harnessConnection } from '../../harness-connection.mjs';
 import { createHarnessSessionExecutors } from '../../harness-session-coordinator.mjs';
+import {
+  getInboundTtlRuntime,
+  registerInboundTtlWorkspaces,
+} from '../../inbound-ttl-runtime.mjs';
 import {
   accessPolicyProvider,
   initialAccessPolicyFor,
@@ -63,10 +68,18 @@ export async function createProductionController(ctx, config = {}, internals = {
     return state;
   };
   const commandExecutor = createHarnessCommandExecutor(ctx, internals.commandExecutor);
+  const inboundTtl = internals.inboundTtl ?? getInboundTtlRuntime(ctx, config);
+  const inboundTtlService = inboundTtl?.service ?? inboundTtl;
+  registerInboundTtlWorkspaces(ctx, inboundTtlService, {
+    workspaces,
+    configStore: observedConfigStore,
+    defaultWorkspace,
+  });
   const { controlExecutor, sessionMaintenanceExecutor, fileIngressExecutor } = createHarnessSessionExecutors(ctx, {
     controlExecutor: internals.controlExecutor,
     sessionMaintenanceExecutor: internals.sessionMaintenanceExecutor,
     fileIngressExecutor: internals.fileIngressExecutor,
+    inboundTtlService,
   });
   const harness = new ResolvedHarness({
     ...connection,
@@ -78,6 +91,7 @@ export async function createProductionController(ctx, config = {}, internals = {
     ...(sessionMaintenanceExecutor ? { sessionMaintenanceExecutor } : {}),
     ...(fileIngressExecutor ? { fileIngressExecutor } : {}),
   });
+  const modelCatalog = () => listModelCatalog(harness);
   const coreController = new ResolvedController({
     credentials: ctx.credentials,
     configStore: observedConfigStore,
@@ -130,6 +144,7 @@ export async function createProductionController(ctx, config = {}, internals = {
     workspaces,
     stateFor,
     agentPresetCatalog,
+    modelCatalog,
   });
   const supervisor = createSupervisor({
     channel: 'slack',

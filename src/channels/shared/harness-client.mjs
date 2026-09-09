@@ -24,6 +24,8 @@ import { watchHarnessMux } from './harness-mux.mjs';
 const interactionRegistries = new Map();
 const hostInteractionRegistries = new WeakMap();
 const MAX_ERROR_CLASSIFICATION_BYTES = 64;
+const IM_INPUT_ORIGIN_TTL_MS = 30 * 60 * 1000;
+const MAX_IM_INPUT_ORIGINS = 4096;
 
 async function smallResponseText(response) {
   const stream = response?.body;
@@ -91,11 +93,40 @@ function interactionRegistry(scope) {
       ownerships: new Map(),
       claims: new Map(),
       controls: new WeakMap(),
+      imInputOrigins: new Map(),
       nextOrder: 0,
     };
     registries.set(scope, registry);
   }
   return registry;
+}
+
+function pruneImInputOrigins(origins, now = Date.now()) {
+  for (const [rpcId, expiresAt] of origins) {
+    if (expiresAt > now) continue;
+    origins.delete(rpcId);
+  }
+  while (origins.size > MAX_IM_INPUT_ORIGINS) {
+    origins.delete(origins.keys().next().value);
+  }
+}
+
+function registerImInputOrigin(registry, rpcId) {
+  const origins = registry.imInputOrigins;
+  pruneImInputOrigins(origins);
+  origins.delete(rpcId);
+  origins.set(rpcId, Date.now() + IM_INPUT_ORIGIN_TTL_MS);
+  pruneImInputOrigins(origins);
+  return () => origins.delete(rpcId);
+}
+
+/** Consume a dsh-im prompt id while handling its durable user/message event. */
+export function consumeDshImInputOrigin(scope, rpcId) {
+  if (!scope || !['object', 'function', 'string'].includes(typeof scope)
+    || typeof rpcId !== 'string' || !rpcId) return false;
+  const origins = interactionRegistry(scope).imInputOrigins;
+  pruneImInputOrigins(origins);
+  return origins.delete(rpcId);
 }
 
 // A Host RPC may not accept cancellation itself. Bound the caller's wait
@@ -311,12 +342,57 @@ function sleep(ms, signal) {
   });
 }
 
-function assistantMessageText(event) {
-  return (event?.data?.message?.content ?? [])
-    .filter((part) => part.type === 'text' && typeof part.text === 'string')
+/** Join only visible text blocks from one Harness message payload. */
+export function textFromHarnessContent(content) {
+  return (Array.isArray(content) ? content : [])
+    .filter((part) => part?.type === 'text' && typeof part.text === 'string')
     .map((part) => part.text)
     .join('\n')
     .trim();
+}
+
+function assistantMessageText(event) {
+  return textFromHarnessContent(event?.data?.message?.content);
+}
+
+/** Aggregate assistant text in stable step/index order for one Harness Turn. */
+export class AssistantTextAccumulator {
+  #steps = new Map();
+  #legacyText = '';
+
+  appendDelta(step, index, text) {
+    if (typeof text !== 'string' || !text) return;
+    const stepNumber = Number.isSafeInteger(step) ? step : 0;
+    const partIndex = Number.isSafeInteger(index) ? index : 0;
+    this.#legacyText = '';
+    const parts = this.#steps.get(stepNumber) ?? new Map();
+    parts.set(partIndex, (parts.get(partIndex) ?? '') + text);
+    this.#steps.set(stepNumber, parts);
+  }
+
+  setCanonical(step, text) {
+    if (typeof text !== 'string' || !text.trim()) return;
+    if (!Number.isSafeInteger(step)) {
+      this.#steps.clear();
+      this.#legacyText = text.trim();
+      return;
+    }
+    this.#legacyText = '';
+    this.#steps.set(step, new Map([[0, text.trim()]]));
+  }
+
+  get text() {
+    if (this.#steps.size === 0) return this.#legacyText;
+    return [...this.#steps.entries()]
+      .sort(([left], [right]) => left - right)
+      .map(([, parts]) => [...parts.entries()]
+        .sort(([left], [right]) => left - right)
+        .map(([, text]) => text)
+        .join('\n')
+        .trim())
+      .filter(Boolean)
+      .join('\n\n');
+  }
 }
 
 function nonEmptyText(value) {
@@ -418,7 +494,7 @@ export class HarnessReplyTracker {
   #lastSeq;
   #openTurn = null;
   #targetTurn = null;
-  #stepText = new Map();
+  #assistantText = new AssistantTextAccumulator();
   #latestText = '';
   #finished = false;
   #reason = null;
@@ -432,6 +508,11 @@ export class HarnessReplyTracker {
 
   get finished() {
     return this.#finished;
+  }
+
+  /** The highest event seq consumed so far; advances as the turn produces events. */
+  get lastSeq() {
+    return this.#lastSeq;
   }
 
   get answer() {
@@ -448,6 +529,12 @@ export class HarnessReplyTracker {
 
   get turn() {
     return this.#targetTurn;
+  }
+
+  #commitText(text, pushUpdate) {
+    if (!text || text === this.#latestText) return;
+    this.#latestText = text;
+    pushUpdate({ type: 'text', text });
   }
 
   consumeAll(entries) {
@@ -494,28 +581,19 @@ export class HarnessReplyTracker {
       if (event.type === 'assistant/chunk' && event.data?.chunk?.type === 'text-delta') {
         const step = event.data?.step ?? 0;
         const index = event.data.chunk.index ?? 0;
-        const key = `${step}:${index}`;
-        this.#stepText.set(key, (this.#stepText.get(key) ?? '') + event.data.chunk.text);
-        const prefix = `${step}:`;
-        const text = [...this.#stepText.entries()]
-          .filter(([partKey]) => partKey.startsWith(prefix))
-          .sort(([left], [right]) => Number(left.split(':')[1]) - Number(right.split(':')[1]))
-          .map(([, part]) => part)
-          .join('\n')
-          .trim();
-        if (text && text !== this.#latestText) {
-          this.#latestText = text;
-          pushUpdate({ type: 'text', text });
-        }
+        this.#assistantText.appendDelta(step, index, event.data.chunk.text);
+        this.#commitText(this.#assistantText.text, pushUpdate);
         continue;
       }
 
       if (event.type === 'assistant/message') {
         const text = assistantMessageText(event);
-        if (text && text !== this.#latestText) {
-          this.#latestText = text;
-          pushUpdate({ type: 'text', text });
-        }
+        const step = Number.isSafeInteger(event.data?.step) ? event.data.step : null;
+        this.#assistantText.setCanonical(step, text);
+        // canonical 定稿且非空时按 step 透出，供分步推送消费方使用；
+        // 先于 commitText 透出，保持 text 更新作为批次末尾的既有语义。
+        if (text) pushUpdate({ type: 'assistant-message', step, text });
+        this.#commitText(this.#assistantText.text, pushUpdate);
         continue;
       }
 
@@ -525,7 +603,19 @@ export class HarnessReplyTracker {
           ?? nonEmptyText(event.data?.subCallId);
         if (callId) this.#toolNames.set(callId, name);
         this.#lastToolName = name;
-        pushUpdate({ type: 'tool', name, ...(callId ? { callId } : {}) });
+        let argsText = null;
+        if (event.data?.arguments !== undefined && event.data?.arguments !== null) {
+          if (typeof event.data.arguments === 'string') {
+            argsText = event.data.arguments;
+          } else {
+            try {
+              argsText = JSON.stringify(event.data.arguments);
+            } catch {
+              argsText = undefined;
+            }
+          }
+        }
+        pushUpdate({ type: 'tool', name, ...(argsText ? { arguments: argsText } : {}), ...(callId ? { callId } : {}) });
       } else if (event.type === 'tool/result') {
         const callId = nonEmptyText(event.data?.message?.source?.callId)
           ?? nonEmptyText(event.data?.callId)
@@ -1131,6 +1221,23 @@ export class HarnessClient {
     return Boolean(await this.#refreshControlOwnership(sessionId, control, options));
   }
 
+  /** Cancel only the persisted prompt's exact live turn, in the host's JS tick.
+   * HTTP session.cancel cannot express this precondition, so never fall back to it.
+   */
+  stopDeferredTurn(sessionId, { turn, promptRpcId } = {}, { signal, isCurrent } = {}) {
+    signal?.throwIfAborted();
+    if (typeof sessionId !== 'string' || !sessionId
+      || !Number.isSafeInteger(turn) || turn < 0
+      || typeof promptRpcId !== 'string' || !promptRpcId
+      || typeof this.#controlExecutor !== 'function') return false;
+    if (isCurrent && !isCurrent()) return false;
+    const accepted = this.#controlExecutor({ sessionId, expectedTurn: turn, promptRpcId, action: 'stop' });
+    if (accepted && typeof accepted.then === 'function') {
+      throw new TypeError('controlExecutor must return synchronously');
+    }
+    return accepted === true;
+  }
+
   async stopActiveTurn(sessionId, control, options = {}) {
     if (typeof sessionId !== 'string' || !sessionId) throw new TypeError('sessionId is required');
     const ownership = await this.#refreshControlOwnership(sessionId, control, options);
@@ -1183,31 +1290,40 @@ export class HarnessClient {
     const ownership = await this.#refreshControlOwnership(sessionId, control, options);
     if (!ownership || ownership.stopRequested) return false;
     if (this.#activeControlOwnership(sessionId, control) !== ownership) return false;
-    if (this.#controlExecutor) {
-      const accepted = this.#controlExecutor({
-        sessionId,
-        expectedTurn: ownership.turn,
-        promptRpcId: ownership.promptRpcId,
-        action: 'steer',
-        text,
-      });
-      if (accepted && typeof accepted.then === 'function') {
-        throw new TypeError('controlExecutor must return synchronously');
-      }
-      if (accepted !== undefined) {
-        if (typeof accepted !== 'boolean') {
-          throw new TypeError('controlExecutor must return a boolean or undefined');
+    const inputRpcId = `${this.#rpcIdPrefix}-steer-${randomUUID()}`;
+    const releaseInputOrigin = registerImInputOrigin(this.#interactionRegistry, inputRpcId);
+    try {
+      if (this.#controlExecutor) {
+        const accepted = this.#controlExecutor({
+          sessionId,
+          expectedTurn: ownership.turn,
+          promptRpcId: ownership.promptRpcId,
+          inputRpcId,
+          action: 'steer',
+          text,
+        });
+        if (accepted && typeof accepted.then === 'function') {
+          throw new TypeError('controlExecutor must return synchronously');
         }
-        return accepted;
+        if (accepted !== undefined) {
+          if (typeof accepted !== 'boolean') {
+            throw new TypeError('controlExecutor must return a boolean or undefined');
+          }
+          if (!accepted) releaseInputOrigin();
+          return accepted;
+        }
       }
+      await this.rpc('session.prompt', {
+        sessionId,
+        mode: 'steer',
+        content: [{ type: 'text', text }],
+        clientTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      }, 30_000, { ...options, rpcId: inputRpcId });
+      return true;
+    } catch (error) {
+      releaseInputOrigin();
+      throw error;
     }
-    await this.rpc('session.prompt', {
-      sessionId,
-      mode: 'steer',
-      content: [{ type: 'text', text }],
-      clientTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-    }, 30_000, options);
-    return true;
   }
 
   #consumeInteractionOwnerships(sessionId, entries) {
@@ -1297,6 +1413,7 @@ export class HarnessClient {
     );
     const baselineSeq = Math.max(-1, ...(before.events ?? []).map(({ event }) => event.seq ?? -1));
     const promptRpcId = `${this.#rpcIdPrefix}-${randomUUID()}`;
+    const releasePromptInputOrigin = registerImInputOrigin(this.#interactionRegistry, promptRpcId);
     const tracker = new HarnessReplyTracker({ promptRpcId, afterSeq: baselineSeq });
     const interactionController = onInteraction || onInteractionResolved
       ? new AbortController()
@@ -1435,8 +1552,14 @@ export class HarnessClient {
       promptAccepted = true;
 
       try {
-        const deadline = Date.now() + timeoutMs;
-        while (Date.now() < deadline) {
+        // Treat timeoutMs as a stall window rather than a hard runtime limit.
+        // Durable events are direct progress. Once a full quiet window elapses,
+        // confirm the Session is still running before renewing the wait.
+        // Interaction ownership is intentionally not a liveness signal: it stays
+        // active until turn/end and can therefore outlive a stalled turn.
+        let lastProgressAt = Date.now();
+        let lastPollSeq = tracker.lastSeq;
+        while (true) {
           await sleep(300, signal);
           const history = await this.rpc(
             'session.history',
@@ -1450,8 +1573,15 @@ export class HarnessClient {
             if (!wasActive && ownership.active) ownership.reconnect?.();
           }
           const updates = tracker.consumeAll(history.events ?? []);
+          const seqAdvanced = tracker.lastSeq > lastPollSeq;
+          lastPollSeq = tracker.lastSeq;
+          if (seqAdvanced) lastProgressAt = Date.now();
           if (onUpdate) {
-            const visibleUpdates = progressMode === 'all' ? updates : updates.slice(-1);
+            // latest 模式只投递一条最新进展；assistant-message 是分步推送专用更新，
+            // 且 canonical 去重后可能成为批次唯一变化，绝不能冒充进度投给全部渠道。
+            const visibleUpdates = progressMode === 'all'
+              ? updates
+              : updates.filter((update) => update.type !== 'assistant-message').slice(-1);
             for (const update of visibleUpdates) {
               try {
                 await onUpdate(update);
@@ -1460,24 +1590,42 @@ export class HarnessClient {
               }
             }
           }
-          if (!tracker.finished) continue;
-          turnFinished = true;
-          if (!ownership?.stopRequested && !harnessTurnSucceeded(tracker.reason)) {
+          if (tracker.finished) {
+            turnFinished = true;
+            if (!ownership?.stopRequested && !harnessTurnSucceeded(tracker.reason)) {
+              throw harnessTurnError(tracker.reason);
+            }
+            // An accepted /stop revokes attachment delivery even when Harness
+            // preserved a useful partial text answer for the existing UX.
+            const artifactCount = ownership?.stopRequested
+              ? 0
+              : await deliverArtifacts();
+            if (tracker.answer) {
+              return tracker.answer;
+            }
+            if (artifactCount > 0) return '';
+            if (ownership?.stopRequested) throw turnStoppedError();
             throw harnessTurnError(tracker.reason);
           }
-          // An accepted /stop revokes attachment delivery even when Harness
-          // preserved a useful partial text answer for the existing UX.
-          const artifactCount = ownership?.stopRequested
-            ? 0
-            : await deliverArtifacts();
-          if (tracker.answer) {
-            return tracker.answer;
+
+          if (Date.now() - lastProgressAt < timeoutMs) continue;
+
+          let running = false;
+          try {
+            running = await this.isSessionRunning(sessionId, { signal });
+          } catch (error) {
+            if (signal?.aborted) throw signal.reason ?? error;
+            // A failed liveness probe is not evidence of progress.
           }
-          if (artifactCount > 0) return '';
-          if (ownership?.stopRequested) throw turnStoppedError();
-          throw harnessTurnError(tracker.reason);
+          if (running) {
+            lastProgressAt = Date.now();
+            continue;
+          }
+          const timeoutError = new HarnessTurnError('harness-reply-timeout');
+          // Data-only context for deferred delivery; timeout semantics unchanged.
+          timeoutError.details = { sessionId, promptRpcId, baselineSeq, turn: tracker.turn, lastSeq: tracker.lastSeq };
+          throw timeoutError;
         }
-        throw new HarnessTurnError('harness-reply-timeout');
       } catch (error) {
         // Once cancellation was accepted, transport/poll failures and timeouts
         // describe the convergence of that stop, not an unrelated ask failure.
@@ -1489,6 +1637,7 @@ export class HarnessClient {
         throw turnStoppedError();
       }
     } finally {
+      releasePromptInputOrigin();
       if (!promptAccepted || turnFinished) {
         for (const staged of stagedBatches) {
           try {

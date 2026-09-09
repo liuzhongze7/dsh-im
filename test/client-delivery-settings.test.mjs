@@ -15,8 +15,11 @@ import {
   DELIVERY_ENDPOINTS,
   DELIVERY_RPC_CHANNEL,
   DeliveryTargetSettingsPage,
+  FEISHU_BOT_SETTINGS_TABS,
+  botSettingsTabsForChannel,
 } from '../plugin-src/client/delivery-settings.js';
 import { en, setImTranslator } from '../plugin-src/client/i18n.js';
+import { FEISHU_ENDPOINTS } from '../plugin-src/client/channels/feishu/api.js';
 import { BotCard as FeishuBotCard } from '../plugin-src/client/channels/feishu/index.js';
 import { AccountCard as WeixinAccountCard } from '../plugin-src/client/channels/weixin/index.js';
 import { AccountCard as DingtalkAccountCard } from '../plugin-src/client/channels/dingtalk/index.js';
@@ -98,14 +101,22 @@ const connectedAccount = Object.freeze({
   }),
 });
 
-test('delivery settings define only the nine supported IM channel routes', () => {
+test('delivery settings define only the ten supported IM channel routes', () => {
   assert.deepEqual(BOT_SETTINGS_TABS, [
     { id: 'delivery', label: '投递设置' },
     { id: 'access', label: '访问设置' },
   ]);
+  assert.deepEqual(FEISHU_BOT_SETTINGS_TABS, [
+    { id: 'delivery', label: '投递设置' },
+    { id: 'access', label: '访问设置' },
+    { id: 'group', label: '群聊' },
+  ]);
+  assert.equal(botSettingsTabsForChannel('weixin'), BOT_SETTINGS_TABS);
+  assert.equal(botSettingsTabsForChannel('dingtalk'), BOT_SETTINGS_TABS);
+  assert.equal(botSettingsTabsForChannel('feishu'), FEISHU_BOT_SETTINGS_TABS);
   assert.equal(DELIVERY_RPC_CHANNEL, '/dsh-im-delivery');
   assert.deepEqual(Object.keys(DELIVERY_CHANNEL_DEFINITIONS), [
-    'weixin', 'feishu', 'dingtalk', 'wecom', 'qq',
+    'weixin', 'feishu', 'dingtalk', 'wecom', 'wecomApp', 'qq',
     'slack', 'telegram', 'discord', 'whatsapp',
   ]);
   assert.deepEqual(
@@ -261,6 +272,81 @@ test('the card gear opens a bot-scoped page in the current channel panel and ret
   assert.equal(renderer.root.findByProps({ id: 'dim-tab-weixin' }).props['aria-selected'], true);
 });
 
+test('only Feishu adds a group tab and it contains only the two migrated controls', async (t) => {
+  const previousWindow = globalThis.window;
+  globalThis.window = {
+    setInterval() { return 1; },
+    clearInterval() {},
+    setTimeout() { return 1; },
+    clearTimeout() {},
+    requestAnimationFrame(callback) { callback(); return 1; },
+    cancelAnimationFrame() {},
+  };
+  t.after(() => {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  });
+
+  const bot = {
+    botId: 'feishu_group_settings',
+    connected: true,
+    configured: true,
+    state: 'connected',
+    groupResponseMode: 'all',
+    groupTopicReply: true,
+    groupMessagePermissionGranted: true,
+    bot: { name: '群聊设置机器人', appIdMasked: 'cli_group••••test' },
+    health: { status: 'healthy', summary: '长连接运行正常', lastCheckedAt: Date.now() },
+  };
+  const status = { schemaVersion: 2, revision: 1, state: 'connected', bots: [bot] };
+  let renderer;
+  await act(async () => {
+    renderer = create(React.createElement(IMSettingsTab, {
+      browserLocation: { href: 'http://localhost:9527/settings' },
+      weixinRpcCall: async () => ({ ok: true, value: { revision: 1, bots: [] } }),
+      feishuRpcCall: async (endpoint) => {
+        assert.equal(endpoint, FEISHU_ENDPOINTS.status);
+        return { ok: true, value: status };
+      },
+      deliveryRpcCall: async () => ({ ok: true, value: { targets: [] } }),
+      updateRpcCall: async () => ({
+        ok: true,
+        value: { runningVersion: '4.0.1', canInstall: false },
+      }),
+    }));
+    await flush();
+  });
+  t.after(async () => {
+    await act(async () => { renderer.unmount(); await flush(); });
+  });
+
+  await act(async () => {
+    renderer.root.findByProps({ id: 'dim-tab-feishu' }).props.onClick();
+    await flush();
+    await flush();
+  });
+  await act(async () => {
+    renderer.root.findByProps({ 'aria-label': '更多机器人设置' }).props.onClick();
+    await flush();
+  });
+
+  const page = renderer.root.findByProps({ className: 'dim-deliveryPage' });
+  assert.deepEqual(page.findAllByProps({ role: 'tab' }).map(textOf), [
+    '投递设置', '访问设置', '群聊',
+  ]);
+  await act(async () => {
+    button(page, '群聊').props.onClick();
+    await flush();
+  });
+
+  const groupSettings = renderer.root.findByProps({ className: 'dim-feishuGroupSettings' });
+  assert.equal(groupSettings.findAllByProps({ className: 'dim-feishuGroupControl' }).length, 2);
+  assert.equal(groupSettings.findAllByType('h2').length, 0);
+  assert.doesNotMatch(textOf(groupSettings), /这些设置只影响|刷新群聊设置/);
+  assert.equal(groupSettings.findByProps({ 'aria-label': '群聊响应方式' }).props.value, 'all');
+  assert.equal(groupSettings.findByProps({ 'aria-label': '群聊以话题方式回复' }).props.value, 'on');
+});
+
 test('access settings preserve independent mode drafts and save direct and group atomically', async (t) => {
   const calls = [];
   const renderer = await mount(t, {
@@ -286,7 +372,7 @@ test('access settings preserve independent mode drafts and save direct and group
     await flush();
   });
 
-  assert.equal(renderer.root.findAllByProps({ role: 'tab' }).length, 2);
+  assert.equal(renderer.root.findAllByProps({ role: 'tab' }).length, 3);
   assert.equal(renderer.root.findAllByProps({ className: 'dim-accessScene' }).length, 2);
   assert.equal(renderer.root.findAllByProps({ className: 'dim-accessOwnerNotice' }).length, 0);
   assert.equal(accessHelpButtons(renderer.root).length, 2);
@@ -592,6 +678,62 @@ test('each saved target tests only its own botId and targetId and keeps row-loca
   }
 });
 
+test('saved private targets toggle Session sync while unavailable targets stay disabled', async (t) => {
+  const calls = [];
+  let targets = [{
+    targetId: 'alice',
+    name: 'Alice',
+    kind: 'user',
+    route: { openId: 'ou_alice' },
+    sessionSync: { enabled: false, state: 'off' },
+  }, {
+    targetId: 'group',
+    name: '项目群',
+    kind: 'group',
+    route: { chatId: 'oc_group' },
+    sessionSync: { enabled: false, state: 'unavailable' },
+  }];
+  const rpcCall = async (endpoint, payload) => {
+    calls.push({ endpoint, payload });
+    if (endpoint === DELIVERY_ENDPOINTS.list) {
+      return { ok: true, value: { targets: structuredClone(targets) } };
+    }
+    if (endpoint === DELIVERY_ENDPOINTS.sessionSync) {
+      targets = targets.map((target) => target.targetId === payload.targetId
+        ? { ...target, sessionSync: { enabled: payload.enabled, state: payload.enabled ? 'active' : 'off' } }
+        : target);
+      return { ok: true, value: targets[0].sessionSync };
+    }
+    throw new Error(`unexpected endpoint ${endpoint}`);
+  };
+  const renderer = await mount(t, {
+    channel: 'feishu', account: connectedAccount, rpcCall, onBack() {},
+  });
+  let privateRow = renderer.root.findByProps({ 'data-target-id': 'alice' });
+  const groupRow = renderer.root.findByProps({ 'data-target-id': 'group' });
+  const privateToggle = privateRow.findByProps({ 'aria-label': '会话双向同步' });
+  assert.equal(privateToggle.props.checked, false);
+  assert.equal(privateToggle.props.disabled, false);
+  assert.match(textOf(privateRow), /关闭时不发送 DSH 会话消息/);
+  assert.equal(groupRow.findByProps({ 'aria-label': '会话双向同步' }).props.disabled, true);
+
+  await act(async () => {
+    privateToggle.props.onChange({ target: { checked: true } });
+    await flush();
+    await flush();
+  });
+  assert.deepEqual(calls.find((call) => call.endpoint === DELIVERY_ENDPOINTS.sessionSync), {
+    endpoint: DELIVERY_ENDPOINTS.sessionSync,
+    payload: { botId: 'bot_feishu_01', targetId: 'alice', enabled: true },
+  });
+  privateRow = renderer.root.findByProps({ 'data-target-id': 'alice' });
+  assert.equal(privateRow.findByProps({ 'aria-label': '会话双向同步' }).props.checked, true);
+  assert.match(textOf(privateRow), /自动跟随该私聊的当前会话/);
+
+  await act(async () => { button(privateRow, '编辑').props.onClick(); });
+  assert.match(textOf(renderer.root.findByType('form')), /修改接收位置会关闭会话双向同步/);
+});
+
 test('new target defaults to recent conversations and selection creates an editable unsaved draft', async (t) => {
   const calls = [];
   let targets = [
@@ -777,7 +919,7 @@ test('recent conversation names remain platform data in the English UI', async (
   );
   assert.deepEqual(
     renderer.root.findAllByProps({ role: 'tab' }).map(textOf),
-    ['Delivery settings', 'Access settings'],
+    ['Delivery settings', 'Access settings', 'Group'],
   );
 });
 

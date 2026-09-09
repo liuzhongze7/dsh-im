@@ -3,6 +3,7 @@ import { FeishuHarnessBridge } from './bridge.mjs';
 import { cardActionProbeCard } from './feishu-cards.mjs';
 import { VerifiedFeishuChannel } from './feishu-channel.mjs';
 import { normalizeFeishuGroupResponseMode } from './group-response-mode.mjs';
+import { normalizeFeishuStepPushMode } from './step-push-mode.mjs';
 import {
   registerSlashCommands,
   SLASH_COMMAND_MANIFEST,
@@ -110,6 +111,9 @@ export class FeishuRuntime {
   #domain;
   #botOpenId;
   #groupResponseMode;
+  #groupTopicReply;
+  #stepPush;
+  #stepPushMode;
   #ownerOpenIds;
   #harness;
   #state;
@@ -139,6 +143,9 @@ export class FeishuRuntime {
     domain = 'feishu',
     botOpenId,
     groupResponseMode,
+    groupTopicReply = false,
+    stepPush = false,
+    stepPushMode = 'post',
     ownerOpenId,
     ownerOpenIds,
     harness,
@@ -174,6 +181,9 @@ export class FeishuRuntime {
     this.#domain = domain;
     this.#botOpenId = nonEmptyString(botOpenId);
     this.#groupResponseMode = normalizeFeishuGroupResponseMode(groupResponseMode);
+    this.#groupTopicReply = groupTopicReply === true;
+    this.#stepPush = stepPush === true;
+    this.#stepPushMode = normalizeFeishuStepPushMode(stepPushMode);
     this.#ownerOpenIds = normalizedOwners;
     this.#harness = harness;
     this.#state = state;
@@ -196,6 +206,21 @@ export class FeishuRuntime {
   setGroupResponseMode(value) {
     this.#groupResponseMode = normalizeFeishuGroupResponseMode(value);
     this.#bridge?.setGroupResponseMode(this.#groupResponseMode);
+  }
+
+  setGroupTopicReply(value) {
+    this.#groupTopicReply = value === true;
+    this.#bridge?.setGroupTopicReply(this.#groupTopicReply);
+  }
+
+  setStepPush(value) {
+    this.#stepPush = value === true;
+    this.#bridge?.setStepPush(this.#stepPush);
+  }
+
+  setStepPushMode(value) {
+    this.#stepPushMode = normalizeFeishuStepPushMode(value);
+    this.#bridge?.setStepPushMode(this.#stepPushMode);
   }
 
   async start() {
@@ -286,8 +311,16 @@ export class FeishuRuntime {
         appId: this.#appId,
         botOpenId: this.#botOpenId,
         groupResponseMode: this.#groupResponseMode,
+        groupTopicReply: this.#groupTopicReply,
+        stepPush: this.#stepPush,
+        stepPushMode: this.#stepPushMode,
         repair: this.#repair,
         replyTimeoutMs: this.#replyTimeoutMs,
+        // Interaction cards (approval/question buttons) are on by default.
+        // Set DSH_IM_INTERACTION_CARDS=0 to fall back to plain-text replies.
+        interactionCards: !['0', 'false', 'no', 'off'].includes(
+          String(process.env.DSH_IM_INTERACTION_CARDS ?? '').trim().toLowerCase(),
+        ),
         signal,
         logger: this.#logger,
       });

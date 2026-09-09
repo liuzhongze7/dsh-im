@@ -6,6 +6,269 @@ This file records the notable changes in each dsh-im release. Its format follows
 
 ## [Unreleased]
 
+## [4.17.1] - 2026-09-09
+
+### Fixed / 修复
+
+- 修复原版 DSH `0.1.5-alpha.1` 的 IM 管理接口兼容性，统一通过 Connection 的公开 `/api` Fetch 接口承载十个 IM 渠道、Office、更新、入站 TTL 和主动投递管理，无需修改或重新编译 DSH；继续兼容已支持的四个原版 DSH 版本。
+  Fixed IM management compatibility with unmodified DSH `0.1.5-alpha.1`. Ten IM channels, Office, updates, inbound TTL, and proactive-delivery management now share Connection's public `/api` Fetch interface without modifying or rebuilding DSH, while retaining compatibility with the four previously supported DSH releases.
+- 保留原生请求关联、取消信号和业务错误，并补全旧处理器缺少的错误详情。管理接口继续执行默认回环访问限制；`trusted-host` 复用 DSH 的浏览器认证与 Host／Origin 检查，更新和入站 TTL 管理始终仅允许回环访问。
+  Preserved native request correlation, cancellation, and business errors, filling in error details omitted by older handlers. Management access remains loopback-only by default; `trusted-host` relies on DSH browser authentication and Host/Origin checks, while update and inbound-TTL management always remain loopback-only.
+
+### Documentation / 文档
+
+- 更新中英文兼容说明和元数据，记录五个原版 DSH Web profile 的兼容矩阵，以及飞书、钉钉、企业微信和 Telegram 的真实收发验证。升级插件后需重启 Host 并刷新设置页，使两端加载同一版插件。
+  Updated bilingual compatibility guidance and metadata, documenting the five-version compatibility matrix for unmodified DSH Web profiles and real-message checks for Feishu, DingTalk, WeCom, and Telegram. Restart the Host and refresh settings after upgrading so both sides load the same plugin version.
+
+## [4.17.0] - 2026-09-09
+
+### Added / 新增
+
+- 飞书新增实时过程卡，将任务步骤和最终答案在卡片内更新，工具摘要与过程说明可折叠；支持长答案续卡、交互前换卡和停止状态。任务过程展示可选不显示过程、实时过程卡或逐步直播；新接入机器人默认实时过程卡。
+  Feishu gains process cards with in-place progress and answers, collapsible tool summaries and notes, long-answer continuation cards, interaction rotation, and stopped status. Users can choose no process, a live process card, or per-step messages; new bots default to the process card.
+
+### Fixed / 修复
+
+- 修复已有过程卡收尾时末块覆盖首块，长答案按顺序完整投递；卡片封存或续卡发送失败时沿用完整 post 答案兜底。
+  Preserve every answer chunk in order when completing an existing process card. Failed sealing or continuation creation falls back to the complete post answer.
+
+- 旧机器人缺少呈现模式时保留逐条消息行为，明确保存的模式及关闭状态不变；扫码和手动凭据新接入采用一致默认值。
+  Existing bots without a stored mode retain per-step posts, preserving explicit modes and disabled settings. QR and manual-credential onboarding use the same new-bot defaults.
+
+## [4.16.1] - 2026-09-09
+
+### Fixed / 修复
+
+- 钉钉 AI Card 改为在创建并投放时同时写入可见的思考提示，避免先出现空白卡片；首次流式更新失败时保留已显示的卡片，后续仍可原位完成。
+  DingTalk AI Cards now include visible thinking text in the combined create-and-deliver request, avoiding an initially blank card. A failed initial streaming update keeps the visible card available for later in-place completion.
+
+- 修复钉钉 AI Card 完成后正文消失或继续显示处理中：先结束流式组件，再将完整回答和完成状态持久化到模板实际使用的 `msgContent` 字段，保持正文可见。
+  Fix DingTalk AI Cards losing their answer or remaining in the processing state after completion. The stream is finalized first, then the full answer and completed state are persisted in the template's visible `msgContent` field.
+
+- 钉钉卡片创建、流式更新或最终状态写入失败时，恢复完整文字回答和安全错误提示的兜底投递，避免卡片失败被误记为已成功送达而丢失结果。
+  Restore full-text answers and safe error-message fallback when DingTalk card creation, streaming updates, or final-state persistence fail, preventing failed cards from being treated as successful delivery and losing the result.
+
+## [4.16.0] - 2026-09-09
+
+### Added / 新增
+
+- 新增实验性企业微信自建应用渠道（`wecom-app`），成为第十个 IM 渠道：通过加密 HTTP 回调接收消息，支持多应用独立配置、私聊流式回复、图片输入、结果文件回传与主动投递目标。成员关注企业的微信插件后可在微信中对话，微信端自动降级为分段文字；接入需要公网回调与企业可信 IP 配置。回调监听按需启动，移除最后一个应用后关闭。接入步骤见[中文指南](docs/企业微信自建应用接入.md)和[英文指南](docs/企业微信自建应用接入.en.md)。
+  Adds the experimental WeCom self-built app channel (`wecom-app`) as the tenth IM channel, with encrypted HTTP callbacks, independent multi-app configuration, private-chat streaming, image input, result files, and proactive delivery targets. Members can chat from WeChat through the enterprise's WeChat plugin, with segmented-text fallback there. Setup requires a public callback route and trusted IP configuration. The callback listener starts on demand and stops when the last app is removed. See the linked Chinese and English setup guides.
+
+- 机器人设置新增显式的「思考强度」选择，档位、说明和默认值来自 DSH 当前模型；每个机器人独立保存，切换模型时恢复新模型默认强度，仅影响之后新建的会话，不改变已有会话或进行中的回答。
+  Bot settings now expose reasoning-effort choices using the current model's levels, descriptions, and defaults from DSH. Each bot saves its own override; changing models restores the new model's default effort. Changes apply only to future Sessions, leaving existing Sessions and in-progress replies unchanged.
+
+- 飞书分步直推在静默 20 秒后显示「正在思考中」及运行时长，并原位定时更新。出现实际进度、问题或审批，以及回合结束时会尝试撤回；撤回失败最多重试三次，迟到的状态消息也会清理，避免重复状态和残留提示。
+  Feishu Step Push shows a thinking-status message with elapsed time after 20 seconds of silence and periodically updates it in place. Real progress, questions, approvals, and turn completion trigger cleanup. Failed recalls allow up to three attempts, and late-arriving status messages are also cleaned up to prevent duplicates and stale notices.
+
+- 飞书提问卡片新增自定义答案入口，提交后将原卡片更新为已回答状态并展示选择结果；重复或过期点击会提示已回答，避免重复提交。
+  Feishu question cards add a custom-answer entry and update the original card with its answered state and selected result after submission. Repeated or stale clicks report that the question was already answered instead of submitting again.
+
+### Changed / 变更
+
+- Telegram 原生命令菜单与文字帮助改为共用命令目录，启动和重连时生成本地化完整菜单，自动纳入历史、推理等级等命令及别名；删除的命令不再残留，空目录会清空旧菜单。菜单同步失败不会阻止机器人连接。
+  Telegram's native command menu and text help now share one command catalog. Startup and reconnection generate the complete localized menu, including history, reasoning commands, and aliases. Removed commands no longer linger, an empty catalog clears the previous menu, and synchronization failures do not block connection.
+
+### Fixed / 修复
+
+- 修复飞书提问或审批前后的流式消息顺序：卡片写入串行化，交互卡片展示后才继续后续回复，并按已展示正文去重；临时工具状态不再混入固定正文，最终卡片使用最新正文快照，避免旧过程重播、重复回答和正文丢失。
+  Feishu serializes streaming-card writes and resumes subsequent replies only after a question or approval is presented, deduplicating already displayed text. Transient tool statuses stay out of the frozen answer prefix, and final cards use the latest text snapshot, preventing replayed progress, duplicate answers, and lost text.
+
+- 各渠道与 AI Office 在初始化期间或启动失败后仍保留管理 RPC，返回可读、脱敏的初始化或失败信息，并清理部分启动的资源，避免设置页因处理器未注册而只显示 404。
+  All channels and AI Office retain their management RPC during initialization and after startup failure, returning readable, sanitized status or error information and cleaning up partially initialized resources instead of leaving settings requests with an unregistered-handler 404.
+
+- 企业微信菜单发送错误现在区分权限、限流、断连与结果不确定等情况；仅在明确且可降级的卡片拒绝后回退文字，结果不确定时保留卡片操作状态并避免重复发送。菜单恢复成功后清除对应旧错误，不覆盖模型错误或并发请求的新错误。
+  WeCom menu delivery now distinguishes permission, rate-limit, disconnection, and uncertain-outcome errors. Only definite, eligible card rejections fall back to text; uncertain delivery retains card interaction state without duplicate sends. Successful menu recovery clears its own previous error without overwriting model failures or newer concurrent errors.
+
+- 设置页恢复显示完整渠道导航列表，并将飞书分步直推说明移入帮助提示，减少设置项拥挤。
+  Settings show the complete channel navigation list again, and Feishu Step Push guidance moves into its help tooltip to reduce clutter.
+
+## [4.15.0] - 2026-09-08
+
+### Added / 新增
+
+- 本机 Host 的九个 IM 渠道与 AI Office 会话自动追加渠道前缀（如「微信 · 标题」），保留自动标题的来源与后续生成能力；不会调用手动重命名接口锁定标题，重复生成和重启不会叠加前缀。已有会话在加载时补齐；显式连接远程 `harnessBaseUrl` 时需在目标 Host 上安装插件。
+  Sessions from all nine IM channels and AI Office on the local Host automatically receive channel prefixes such as “WeChat · Title”, preserving automatic title provenance and later generation. Prefixes do not use manual rename or pin titles, and do not stack across regeneration or restarts. Existing Sessions are decorated when loaded; explicit remote `harnessBaseUrl` connections require the plugin on the destination Host.
+
+- Web 会话列表和搜索结果将渠道文字前缀显示为现有渠道 Logo，无需修改 DSH。浏览器适配保留原始文字节点、读屏信息和行操作；不兼容的页面结构或图标加载失败时保留文字前缀，插件卸载后恢复原始显示。
+  Web Session lists and search results show existing channel logos in place of textual prefixes, without modifying DSH. The browser adapter preserves original text nodes, accessible names, and row actions, keeps text on incompatible page structures or image-load failures, and restores the original display on unload.
+
+- 飞书群聊默认接收其他机器人明确 @ 当前机器人的消息，无需新增开关；仍遵守群聊白名单、命令权限与消息去重规则，未 @、自发和机器人私聊消息继续忽略。扫码新建应用与“补全权限”/`/repair` 流程同时申请接收机器人 @ 消息所需的飞书权限。
+  Feishu group chats accept explicit mentions from other bots by default, while preserving group allowlists, command permissions, and deduplication. Unaddressed messages, self-sent messages, and bot DMs remain ignored. New-app QR onboarding and Complete permissions / `/repair` request the required Feishu bot-mention scope.
+
+### Fixed / 修复
+
+- 修正渠道标题监听器的 Host 启动回调返回值，避免 DSH 将其判为无效 effect 并卸载监听器，导致真实飞书等会话不显示渠道标识；回归验证覆盖完整插件启动流程及先命名、后接收 IM 消息的会话。
+  Correct the channel-title observer's Host startup return value so DSH does not reject it as an invalid effect and unload the observer. Regression checks cover full plugin activation and Sessions titled before their first IM message.
+
+## [4.14.0] - 2026-09-08
+
+### Added / 新增
+
+- 飞书机器人新增默认关闭的「分步直推」设置，支持按机器人独立开启并即时应用，无需重连。开启后，以独立富文本消息逐步推送工具调用及参数摘要、过程说明和已完成的助手消息，最终回答以支持 Markdown 的富文本投递；包含发送节流与单轮过程消息上限，达到上限仍会投递最终回答，关闭时保留原有流式卡片体验。
+  Feishu bots gain an opt-in Step Push setting that applies per bot without reconnecting. It delivers tool calls with argument excerpts, progress notes, and completed assistant messages as separate rich-text posts, followed by a Markdown-capable final answer. Throttling and a per-turn progress-message cap limit traffic without suppressing the final answer; disabling the setting preserves the existing streaming-card experience.
+
+### Fixed / 修复
+
+- 飞书分步直推的长回答按富文本 JSON 编码后的字节数分段，兼顾中文、转义字符与 emoji 边界；中途投递失败时仅从失败分段恢复，避免重复已成功发送的内容。补齐限流重试、富文本到文字的降级和失败状态记录，防止最终回答未送达却被标记为成功。
+  Feishu Step Push splits long answers by encoded rich-text JSON bytes, accounting for CJK text, escaped characters, and emoji boundaries. Delivery resumes at a failed chunk without repeating the successful prefix. Rate-limit retries, rich-text-to-text fallbacks, and failure reporting prevent undelivered final answers from being marked successful.
+
+- 飞书已有话题内的回复现在按实际会话结构留在原话题，不再受「群聊以话题方式回复」开关影响；该开关仅控制是否为普通群聊消息自动创建话题。
+  Replies in existing Feishu topics now stay in their original thread based on the conversation structure, regardless of the group-topic reply switch. That switch only controls automatic topic creation for ordinary group messages.
+
+- `dsh_im_return_file` 在新版 DSH Session 使用 `snapshotEvents()` 时，现在可以再次识别当前 Turn 并回传文件；同时保留旧 `session.events` 路径。
+  `dsh_im_return_file` once again recognizes the current turn and returns files when running against modern DSH Sessions that expose `snapshotEvents()`, while retaining the legacy `session.events` path.
+
+- 兼容旧版持久化投递目标中重复保存的 `targetId`，修复微信等渠道旧配置的加载；仅在该字段与目标映射键一致时归一化，标识不一致的损坏记录仍会被拒绝。
+  Legacy delivery targets with a redundantly stored `targetId` now load correctly for WeChat and other channels. Normalization is limited to IDs matching the target map key; inconsistent or corrupted records remain rejected.
+
+## [4.13.0] - 2026-09-06
+
+### Added / 新增
+
+- 九个 IM 渠道新增统一的超时任务结果补发：前台等待超时后继续跟踪原 Harness 回合，完成后向原聊天或线程补发最终文字或终态通知，支持 Host 重启和连接恢复后继续检查。`/stop` 可精确停止当前聊天的待完成回合，换绑会话后不再补发旧结果；明确发送失败最多尝试三次，结果不确定时停止自动重试。此机制不重放文件产物、问题或审批，仍受平台发送权限与配额限制。
+  All nine IM channels now share deferred task delivery: after the foreground reply wait times out, the original Harness turn remains tracked and its final text or terminal notification is delivered to the original chat or thread, including after Host restarts or reconnection. `/stop` can precisely cancel the chat's pending turn, and rebinding the Session prevents delivery of old results. Definite send failures allow up to three attempts; uncertain outcomes stop automatic retries. Files, questions, and approvals are not replayed, and platform permissions and quotas still apply.
+
+- 钉钉新增 `/m`、`/menu` 原生下拉菜单，支持会话、工作区、Agent 预设和模型选择，以及新会话、历史、停止、压缩、状态与帮助按钮；选择后立即生效并更新原卡片。使用插件内置共享模板，无需为每个机器人配置模板；菜单 30 分钟或 Host 重启后失效。
+  DingTalk adds native `/m` and `/menu` dropdown menus for Sessions, workspaces, Agent Presets, and models, with New, History, Stop, Compact, Status, and Help buttons. Selections apply immediately and update the original card. The bundled shared template requires no per-bot template configuration; menus expire after 30 minutes or a Host restart.
+
+- QQ 新增 `/m`、`/menu` 按钮与数字菜单，覆盖会话、工作区、模式／预设、模型、新会话、停止、压缩、补充指令、归档显示切换、状态与帮助。长列表按快照分页，菜单按聊天和操作者隔离并沿用命令权限；按钮被平台明确拒绝时回退数字选择。旧菜单、重复点击和已变化的会话／工作区不会执行操作，审批、提问和批量输入保留原有优先级。
+  QQ adds `/m` and `/menu` button and numbered menus for sessions, workspaces, modes/presets, models, new sessions, stop, compact, steering, archived-session visibility, status and help. Lists paginate over stable snapshots; menus are scoped to the chat and actor and use existing command permissions. Definite platform rejections fall back to numbered text. Stale menus, repeated clicks and changed session/workspace contexts cannot execute actions; questions, approvals and batch input retain priority.
+
+### Fixed / 修复
+
+- 兼容新版 Harness 命令接口的 `submittedAttachments` 参数，修复 QQ 菜单实测中发现的压缩失败；保留旧版无附件参数及 `images` 接口，仅在明确的调用前参数校验失败时适配重试。
+  Support the newer Harness command descriptor's `submittedAttachments` argument, fixing compaction discovered during QQ menu testing. Older argument-free and `images` descriptors remain supported; adaptation retries only exact argument validation failures before command dispatch.
+
+- 微信主动投递、连接测试和延迟任务结果现在复用对应用户最近的 `context_token`，并在 Host 重启后恢复；上下文按机器人登录与用户隔离，更换登录凭据后清理，补齐原先遗漏的会话上下文。主动发送失败会在账号状态中保留脱敏诊断与恢复建议，健康轮询不会覆盖发送错误。升级后需收到一次用户消息建立缓存，此修复不能解除 iLink 的发送额度和会话时效限制。
+  WeChat proactive delivery, connection tests, and deferred task results now reuse the recipient's latest `context_token` and restore it after Host restarts. Context is isolated by bot login and recipient and cleared when login credentials change, supplying conversation context that was previously omitted. Proactive failures retain sanitized diagnostics and recovery guidance in account status, even while polling remains healthy. An inbound user message is needed to populate the cache after upgrading; this does not remove iLink sending quotas or conversation lifetime limits.
+
+- 企业微信流式回复在完成、停止或失败后会清除临时思考与工具进度文字，保留最终回答或结果提示。
+  Enterprise WeChat clears transient thinking and tool-progress text when a streamed reply completes, stops, or fails, preserving the final answer or outcome message.
+
+- 机器人账号卡片收起时，标题栏的帮助提示不再被卡片边缘裁切。
+  Help tooltips in collapsed bot-card headers are no longer clipped by the card edges.
+
+## [4.12.0] - 2026-09-06
+
+### Added / 新增
+
+- 企业微信新增 `/menu`、`/m` 原生交互菜单，可通过下拉框选择会话、模型、Agent 预设和工作区，并使用新会话、停止、压缩、状态与帮助按钮；长列表支持分页，收到平台每日进入单聊事件时也会展示菜单。菜单操作沿用文字命令权限，30 分钟或插件重启后过期，卡片无法投递时提供文字命令降级。
+  Enterprise WeChat adds native `/menu` and `/m` menus with dropdowns for Sessions, models, Agent Presets, and workspaces, plus New, Stop, Compact, Status, and Help buttons. Long lists support pagination, and the platform's daily direct-chat entry event also opens the menu. Actions use existing text-command permissions; menus expire after 30 minutes or a plugin restart, with text-command fallback when cards cannot be delivered.
+
+- 九个 IM 渠道的账号卡片现在默认收起详细设置，点击账号标题或使用 Enter／空格即可展开与收起，便于管理多个机器人；折叠区域的控件不会继续占用键盘焦点，并尊重系统的减少动画设置。
+  Account cards across all nine IM channels now collapse their detailed settings by default. Click the account header or press Enter/Space to toggle them for easier multi-bot management. Collapsed controls are excluded from keyboard focus, and animations respect reduced-motion preferences.
+
+### Changed / 变更
+
+- WhatsApp 回复改为每秒编辑同一条消息，逐步显示工具进度和生成中的回答；最终回复原位定稿，长回复自动分段。创建或完成流式消息失败时回退为完整文字回复，断开机器人时会取消待发送的预览。
+  WhatsApp now edits the same message at one-second intervals to show tool progress and generated text, finalizes the answer in place, and splits long replies. Failed stream creation or finalization falls back to a complete text reply, and disconnecting the bot cancels queued previews.
+
+### Fixed / 修复
+
+- 删除首个账号后，其余账号的折叠样式与展开／收起操作现在会正常保留。
+  Removing the first account no longer removes the shared collapse styles or disrupts toggling for the remaining accounts.
+
+## [4.11.0] - 2026-09-05
+
+### Added / 新增
+
+- 已保存的私聊投递目标新增默认关闭的「会话双向同步」开关。开启后，DSH Web／CLI 在该私聊当前 Session 中提交的用户文字和完成后的助手文字会通过原机器人同步回私聊；IM 自身输入不会重复投递。九个 IM 渠道共用同一实现，自动跟随 `/session`、`/new` 和工作区切换后的当前会话；首版仅支持当前 Host 的私聊文字，不支持显式远程 `harnessBaseUrl`、群聊、Topic 或 Thread。
+  Saved direct-message delivery targets now have an opt-in **Two-way Session sync** switch. When enabled, user text submitted from DSH Web/CLI and the completed assistant text in that DM's current Session are mirrored through the original bot, while IM-originated input is never duplicated. One shared implementation covers all nine IM channels and follows the current Session across `/session`, `/new`, and workspace changes. The first version supports text DMs on the current Host only, excluding explicit remote `harnessBaseUrl` connections, groups, Topics, and Threads.
+
+- 九个 IM 渠道的每个机器人新增独立模型设置，可从 Host 当前可用模型中选择或跟随默认；设置只影响之后新建的 Session，已有 Session 与正在生成的回复不变。
+  Every bot across all nine IM channels now has an independent model setting, selectable from the Host's current model catalog or left to follow the default. The setting applies only to newly created Sessions and does not alter existing Sessions or in-progress replies.
+
+### Changed / 变更
+
+- npm 包元数据新增已验证兼容 DSH `0.1.3-alpha.1`；兼容测试使用官方发布提交 `d347e70`，并完成九渠道各一台机器人的真实主动投递与双向同步冒烟。
+  npm package metadata now declares verified compatibility with DSH `0.1.3-alpha.1`. Compatibility testing used official release commit `d347e70` and completed real proactive-delivery and two-way-sync smoke tests with one bot on each of the nine channels.
+
+- 飞书的「群聊响应方式」与「群聊以话题方式回复」已从机器人卡片主页移入该机器人的设置页，使卡片布局与其他渠道保持一致。
+  Feishu's “Group response mode” and “Reply to group chats as topics” controls have moved from the bot-card overview into that bot's settings page, aligning the card layout with the other channels.
+
+### Fixed / 修复
+
+- 九个 IM 渠道现在会按 step 顺序保留同一 Turn 的全部助手正文，并用定稿消息替换同 step 的流式草稿；多 step 回答不再在最终投递或进入新 step 时只剩最后一段。
+  All nine IM channels now retain every assistant text step in turn order and replace each step's streamed draft with its canonical message, preventing multi-step replies from collapsing to the final fragment during streaming or final delivery.
+
+## [4.10.0] - 2026-09-05
+
+### Added / 新增
+
+- 入站附件改为按时间戳目录持久落盘，并新增全局保留时长（TTL）设置：`-1` 永久保留、`0` 每轮对话结束后立即删除、`1-8760` 整数小时后自动清理，默认 `168` 小时（7 天）；清理在进程启动、每 30 分钟及设置页手动触发时执行，进行中对话的目录会被跳过。通用设置通过顶部 GitHub 按钮右侧的齿轮进入，附件保留功能位于首个「附件」Tab；取值说明收纳在标题右侧的问号中，修改后通过「保存」按钮明确提交。清扫会拒绝位于工作区外的符号链接附件目录。历史 `turn-` 目录及无法解析的目录不参与清理，需要手动删除。清扫仅覆盖各渠道当前配置的工作区；Bot 通过 `/workspace` 切换工作区后，旧工作区中已持久化的附件目录不再参与自动清理，需手动删除。
+  Inbound attachments now persist under timestamped directories with a global retention (TTL) setting: `-1` keeps them forever, `0` deletes each directory right after its turn ends, and whole hours `1-8760` clean them automatically, defaulting to `168` hours (7 days). Sweeps run at process startup, every 30 minutes, and on demand from the settings page, always skipping directories owned by in-flight turns. General settings open from the gear beside the top GitHub button, with attachment retention under the first “Attachments” tab. Sweeps refuse symlinked attachment roots outside the workspace. Legacy `turn-` directories and unparseable names are never touched and must be removed manually. Sweeping only covers each channel's currently configured workspaces; after a bot switches its workspace via `/workspace`, persisted attachment directories left in the previous workspace are no longer swept and must be removed manually.
+
+- 飞书机器人设置新增「群聊以话题方式回复」开关：开启后，群聊中向机器人提问会自动开启一条独立的飞书话题，回答落在话题内；每个话题是 dsh 会话列表里的一条独立会话，上下文互不串。私聊不受影响。可分别对每个机器人开启或关闭。
+  Feishu bots gain a “Reply to group chats as Feishu topics” switch. When enabled, a question addressed to the bot in a group auto-opens a dedicated Feishu topic and replies stay inside it; each topic is an independent conversation in dsh with its own context. Private chats are unaffected. The switch is configured per bot.
+
+- 同 Host 插件的 `ctx.dshIm` 服务新增 `listBots()`，可发现已配置机器人的公开 `botId` 与渠道类型，再配合现有 `listTargets()` 和 `send()` 完成主动投递；返回值不包含凭据、平台路由或目标内容。
+  The same-Host `ctx.dshIm` service now exposes `listBots()`, allowing plugins to discover each configured bot's public `botId` and channel before using the existing `listTargets()` and `send()` APIs for proactive delivery. Results contain no credentials, provider routes, or target content.
+
+### Changed / 变更
+
+- npm 包元数据现在声明已验证兼容 DSH `0.1.2-alpha.4`、`0.1.2-alpha.5` 与 `0.1.2-rc.1` 的 Web profile。
+  npm package metadata now declares verified Web-profile compatibility with DSH `0.1.2-alpha.4`, `0.1.2-alpha.5`, and `0.1.2-rc.1`.
+
+### Fixed / 修复
+
+- 新版 DSH Session 使用 `snapshotEvents()` 时，IM 的 `/stop` 现在可以再次识别并停止当前所属 Turn。
+  IM `/stop` once again recognizes and cancels the currently owned turn when running against modern DSH Sessions that expose `snapshotEvents()`.
+
+- 飞书在 DSH v2 生成回复期间会重新接收并转发实时 assistant chunk，流式卡片不再等到最终消息落盘后才显示整段回答。
+  Feishu now receives and forwards live assistant chunks while DSH v2 is generating, so streaming cards no longer wait for the final durable message before displaying the full reply.
+
+## [4.9.1] - 2026-09-04
+
+### Fixed / 修复
+
+- 九个 IM 渠道的 Harness 结构化问题与审批现在兼容新 DSH Session 的 `snapshotEvents()` 接口，同时保留旧 `session.events` 与旧 Host `apiProxy` 路径；交互不再只停留在 DSH Web，IM 用户回答或审批后原 Turn 可继续完成。
+  Harness structured questions and approvals across all nine IM channels now support the new DSH Session `snapshotEvents()` API while retaining the legacy `session.events` and Host `apiProxy` paths. Interactions no longer remain visible only in DSH Web, and the originating turn can continue after the IM user answers or decides.
+
+- 钉钉机器人连接失败时现在会按 Harness、凭据、超时、DNS、TLS、代理、SDK 与依赖兼容性等原因提供脱敏且可操作的诊断，并用参考号关联设置页提示与 Host 日志；已保存但尚未连通的机器人也会保留在设置页供排查。
+  DingTalk connection failures now provide redacted, actionable diagnostics for Harness, credential, timeout, DNS, TLS, proxy, SDK, and dependency-compatibility causes, with a reference ID linking settings feedback to Host logs. Saved bots that are not yet connected also remain available in settings for troubleshooting.
+
+## [4.9.0] - 2026-09-03
+
+### Added / 新增
+
+- 飞书的 Harness 审批与单选问题默认使用带按钮的交互卡片；审批人和答题人会绑定到发起者，多题场景会拒绝过期卡片，并在卡片不可用时保留纯文本降级流程。可通过 `DSH_IM_INTERACTION_CARDS=0` 或 `interactionCards=false` 继续使用纯文本交互。
+  Harness approvals and single-choice questions in Feishu now use interactive cards with buttons by default. Decisions are bound to the initiating actor, stale cards are rejected in multi-question flows, and plain-text fallback remains available when cards cannot be used. Set `DSH_IM_INTERACTION_CARDS=0` or `interactionCards=false` to keep the plain-text interaction flow.
+
+- 九个渠道的工作区命令新增快捷别名：`/ws` 等价于 `/workspace`，`/workspaces` 与 `/wsl` 等价于 `/workspacelist`。
+  Workspace commands across all nine channels now have shortcuts: `/ws` aliases `/workspace`, while `/workspaces` and `/wsl` alias `/workspacelist`.
+
+### Fixed / 修复
+
+- Harness 回复等待改为按活动续期：持续产生事件或 Harness 明确报告 Session 仍在运行的长任务不再被固定 10 分钟上限误报超时；已开始但停止推进且不再运行的任务仍会按停滞窗口超时。
+  Harness reply waits now renew from activity: long-running turns that keep producing events or are still reported as running no longer hit a fixed ten-minute timeout, while started turns that stop progressing and are no longer running still time out after the stall window.
+
+- 引用消息注入 Harness 时不再携带内部消息 ID、作者 ID、空附件数组及默认 `truncated: false`，减少与回答无关的元数据，同时保留作者名称、正文、有效附件及不可用原因。
+  Quoted-message context sent to Harness no longer includes internal message IDs, author IDs, empty attachment arrays, or the default `truncated: false`, reducing irrelevant metadata while preserving the author name, content, useful attachments, and unavailable reason.
+
+- 飞书交互卡片现在保持引用回复语义，避免问题或审批卡片脱离触发它的消息上下文。
+  Feishu interaction cards now preserve reply semantics so question and approval cards stay attached to the message context that triggered them.
+
+- 上下文增强设置中的字段帮助提示会按左右栏定位，不再被设置面板边缘裁切。
+  Field-help tooltips in Context enhancement settings now align to their column instead of being clipped by the settings-panel edge.
+
+### Documentation / 文档
+
+- 中英文 README 的详细安装、命令、访问模式与上下文增强说明已拆分到独立指南，并补充主动投递 Webhook 方案等文档。
+  Detailed installation, command, access-mode, and Context enhancement material has moved from the Chinese and English READMEs into focused guides, with additional documentation for proactive-delivery webhooks and related workflows.
+
+## [4.8.0] - 2026-09-02
+
+### Added / 新增
+
+- 上下文增强新增两个来源字段：`chatId`（会话标识，用于区分群组或私聊）与 `threadId`（话题标识，飞书话题群会带上 `thread_id`，用于区分同一群组内的不同话题）。九个渠道均可勾选；飞书群聊直接提供群 ID，Slack/Telegram 话题、Discord 频道等渠道也按各自事件补齐。仍只发送当前消息中已有的值，不查询平台 API。
+  Context enhancement adds two source fields: `chatId` (the chat ID that distinguishes groups or direct chats) and `threadId` (the topic ID; Feishu topic chats carry `thread_id`, telling different topics inside the same group apart). All nine channels can select them; Feishu group chats provide the group ID directly, and Slack/Telegram topics, Discord channels, and other channels are wired per their own events. Only values already present in the current message are sent; no platform APIs are queried.
+
+### Fixed / 修复
+
+- 机器人工作区目录选择器现在同时识别新版 DSH 的 `directory-picker/*` 错误码与旧版连字符错误码；native 后端会正确回退到系统目录选择器，已失效的保存路径也会回退到 Host 主目录。
+  The bot workspace directory picker now recognizes both current DSH `directory-picker/*` error codes and legacy hyphenated codes, restoring the native system-picker fallback and the Host-home fallback for stale saved paths.
+
 ## [4.7.0] - 2026-09-02
 
 ### Added / 新增
@@ -589,7 +852,20 @@ This file records the notable changes in each dsh-im release. Its format follows
 - 改进 npm 发布包结构，保留 CLI 入口并避免安装脚本拦截。
   Improved npm package contents to preserve the CLI entry point and avoid install-script blocking.
 
-[Unreleased]: https://github.com/xmanrui/dsh-im/compare/v4.7.0...HEAD
+[Unreleased]: https://github.com/xmanrui/dsh-im/compare/v4.17.1...HEAD
+[4.17.1]: https://github.com/xmanrui/dsh-im/compare/v4.17.0...v4.17.1
+[4.17.0]: https://github.com/xmanrui/dsh-im/compare/v4.16.1...v4.17.0
+[4.16.1]: https://github.com/xmanrui/dsh-im/compare/v4.16.0...v4.16.1
+[4.16.0]: https://github.com/xmanrui/dsh-im/compare/v4.15.0...v4.16.0
+[4.15.0]: https://github.com/xmanrui/dsh-im/compare/v4.14.0...v4.15.0
+[4.14.0]: https://github.com/xmanrui/dsh-im/compare/v4.13.0...v4.14.0
+[4.13.0]: https://github.com/xmanrui/dsh-im/compare/v4.12.0...v4.13.0
+[4.12.0]: https://github.com/xmanrui/dsh-im/compare/v4.11.0...v4.12.0
+[4.11.0]: https://github.com/xmanrui/dsh-im/compare/v4.10.0...v4.11.0
+[4.10.0]: https://github.com/xmanrui/dsh-im/compare/v4.9.1...v4.10.0
+[4.9.1]: https://github.com/xmanrui/dsh-im/compare/v4.9.0...v4.9.1
+[4.9.0]: https://github.com/xmanrui/dsh-im/compare/v4.8.0...v4.9.0
+[4.8.0]: https://github.com/xmanrui/dsh-im/compare/v4.7.0...v4.8.0
 [4.7.0]: https://github.com/xmanrui/dsh-im/compare/v4.6.0...v4.7.0
 [4.6.0]: https://github.com/xmanrui/dsh-im/compare/v4.5.0...v4.6.0
 [4.5.0]: https://github.com/xmanrui/dsh-im/compare/v4.4.0...v4.5.0

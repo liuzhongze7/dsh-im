@@ -5,6 +5,7 @@ import test from 'node:test';
 import { transform } from 'esbuild';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import TestRenderer from 'react-test-renderer';
 
 import {
   apply as applyClient,
@@ -14,6 +15,8 @@ import {
 } from '../plugin-src/client/index.js';
 import { CredentialBindingPanel } from '../plugin-src/client/credential-binding.js';
 import { ChannelListHeading } from '../plugin-src/client/channel-card-meta.js';
+import { installImStyles } from '../plugin-src/client/styles.js';
+import { FEISHU_ENDPOINTS } from '../plugin-src/client/channels/feishu/api.js';
 import { DINGTALK_ENDPOINTS } from '../plugin-src/client/channels/dingtalk/api.js';
 import {
   AccountCard as DingtalkAccountCard,
@@ -31,6 +34,7 @@ import {
   AccountCard as WecomAccountCard,
   WecomSettingsTab,
 } from '../plugin-src/client/channels/wecom/index.js';
+import { WecomAppSettingsTab } from '../plugin-src/client/channels/wecom-app/index.js';
 import {
   AccountCard as QqAccountCard,
   QqSettingsTab,
@@ -58,6 +62,10 @@ import {
   setImTranslator,
   zh,
 } from '../plugin-src/client/i18n.js';
+import {
+  GLOBAL_SETTINGS_RPC_CHANNEL,
+  GlobalSettingsPanel,
+} from '../plugin-src/client/global-settings.js';
 
 const STYLES_URL = new URL('../plugin-src/client/styles.js', import.meta.url);
 const FEISHU_STYLES_URL = new URL(
@@ -99,7 +107,82 @@ const QQ_SOURCE_URL = new URL(
   import.meta.url,
 );
 
-test('IM settings renders nine IM channels plus the AI Office connector', async () => {
+const { act, create } = TestRenderer;
+
+async function flushMicrotasks() {
+  for (let index = 0; index < 6; index += 1) await Promise.resolve();
+}
+
+// Drains every pending microtask and timer callback, like the Feishu channel
+// tests use, so multi-hop save chains settle before assertions.
+const flushTasks = () => new Promise((resolve) => setImmediate(resolve));
+
+function nodeText(node) {
+  if (typeof node === 'string' || typeof node === 'number') return String(node);
+  if (!node) return '';
+  const children = Array.isArray(node) ? node : node.children;
+  return Array.isArray(children) ? children.map(nodeText).join('') : nodeText(children);
+}
+
+function findButton(renderer, label) {
+  const button = renderer.root.findAllByType('button')
+    .find((candidate) => nodeText(candidate) === label);
+  assert.ok(button, `missing button: ${label}`);
+  return button;
+}
+
+test('removing the first account preserves collapse styles and toggling for remaining accounts', () => {
+  const previousDocument = globalThis.document;
+  const styles = new Set();
+  globalThis.document = {
+    querySelector: (selector) => [...styles].find((style) =>
+      selector === `style[data-plugin-css="${style.dataset.pluginCss}"]`) ?? null,
+    createElement: () => {
+      const style = { dataset: {}, textContent: '', remove: () => styles.delete(style) };
+      return style;
+    },
+    head: { appendChild: (style) => styles.add(style) },
+  };
+  const cards = (ids) => React.createElement(React.Fragment, null, ids.map((botId) =>
+    React.createElement(QqAccountCard, {
+      key: botId,
+      account: {
+        botId, connected: true, state: 'connected',
+        bot: { name: botId, appIdMasked: '123••456' },
+        health: { summary: 'Connected', lastCheckedAt: null },
+      },
+    })));
+  const collapseStyles = () => [...styles].find((style) =>
+    style.textContent.includes('.dim-collapsibleAccount:not(.is-open)'));
+  let renderer;
+  let disposeStyles;
+  try {
+    disposeStyles = installImStyles();
+    act(() => { renderer = create(cards(['first', 'second'])); });
+    const stylesheet = collapseStyles();
+    assert.ok(stylesheet);
+
+    act(() => renderer.update(cards(['second'])));
+    assert.equal(collapseStyles(), stylesheet, 'remaining cards still need the shared collapse CSS');
+    const header = () => renderer.root.findByProps({ className: 'dim-collapsibleHead' });
+    assert.equal(header().props['aria-expanded'], 'false');
+    act(() => header().props.onClick());
+    assert.equal(header().props['aria-expanded'], 'true');
+    act(() => header().props.onClick());
+    assert.equal(header().props['aria-expanded'], 'false');
+
+    act(() => renderer.unmount());
+    disposeStyles();
+    assert.equal(styles.size, 0, 'disposing the settings styles still cleans up the document');
+  } finally {
+    act(() => renderer?.unmount());
+    disposeStyles?.();
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
+test('IM settings renders ten IM channels plus the AI Office connector', async () => {
   const { default: packageMetadata } = await import('../package.json', {
     with: { type: 'json' },
   });
@@ -110,6 +193,7 @@ test('IM settings renders nine IM channels plus the AI Office connector', async 
     weixinRpcCall: async () => ({ ok: true, value: {} }),
     dingtalkRpcCall: async () => ({ ok: true, value: {} }),
     wecomRpcCall: async () => ({ ok: true, value: {} }),
+    wecomAppRpcCall: async () => ({ ok: true, value: {} }),
     qqRpcCall: async () => ({ ok: true, value: {} }),
     slackRpcCall: async () => ({ ok: true, value: {} }),
     telegramRpcCall: async () => ({ ok: true, value: {} }),
@@ -133,8 +217,18 @@ test('IM settings renders nine IM channels plus the AI Office connector', async 
   assert.match(markup, /aria-label="dsh-im GitHub"/);
   assert.match(markup, /dim-updateTrigger[^>]*aria-haspopup="dialog"[^>]*>检查更新</);
   assert.ok(markup.indexOf('dim-updateTrigger') < markup.indexOf('dim-githubAction'));
+  assert.ok(markup.indexOf('dim-githubAction') < markup.indexOf('dim-generalSettingsAction'));
   assert.match(markup, /aria-describedby="[^"]+"/);
   assert.match(markup, /role="tooltip"[^>]*>帮助与反馈 · 前往 GitHub</);
+  assert.match(markup, /id="dim-general-settings-trigger"/);
+  assert.match(markup, /aria-label="通用设置"/);
+  assert.doesNotMatch(markup, /aria-current="page"/);
+  assert.match(markup, /role="tooltip"[^>]*>通用设置<\/span>/);
+  const settingsButtonMarkup = markup.match(
+    /<button[^>]*id="dim-general-settings-trigger"[^>]*>(.*?)<\/button>/,
+  )?.[1] ?? '';
+  assert.match(settingsButtonMarkup, /data-im-icon="global-settings"/);
+  assert.doesNotMatch(settingsButtonMarkup, /通用设置/);
   assert.match(styles, /\.dim-title \{[^}]*margin: 0 0 18px;/);
   assert.match(styles, /\.dim-title p \{[^}]*color: var\(--dsw-alias-label-secondary, #646a73\);[^}]*font-size: 12px;[^}]*font-weight: 500;/);
   assert.match(styles, /\.dim-brand \{[^}]*display: flex;[^}]*flex-direction: column;[^}]*align-items: flex-start;[^}]*gap: 1px;/);
@@ -146,11 +240,22 @@ test('IM settings renders nine IM channels plus the AI Office connector', async 
   assert.match(styles, /\.dim-githubLink \{[^}]*border: 1px solid var\(--dsw-alias-border-l2, #dfe1e5\);[^}]*text-decoration: none;/);
   assert.match(styles, /\.dim-githubTooltip \{[^}]*top: calc\(100% \+ 8px\);[^}]*transform: translateY\(-3px\);/);
   assert.match(styles, /\.dim-githubAction:hover \.dim-githubTooltip, \.dim-githubAction:focus-within \.dim-githubTooltip \{[^}]*opacity: 1;[^}]*visibility: visible;/);
+  assert.match(styles, /\.dim-generalSettingsButton \{[^}]*width: 30px;[^}]*height: 30px;[^}]*display: grid;[^}]*border: 1px solid var\(--dsw-alias-border-l2, #dfe1e5\);/);
+  assert.match(styles, /\.dim-generalSettingsTooltip \{[^}]*top: calc\(100% \+ 8px\);[^}]*transform: translateY\(-3px\);/);
+  assert.match(styles, /\.dim-generalSettingsAction:hover \.dim-generalSettingsTooltip, \.dim-generalSettingsButton:focus-visible \+ \.dim-generalSettingsTooltip \{[^}]*opacity: 1;[^}]*visibility: visible;/);
+  assert.match(styles, /\.dim-generalSettingsButton\[aria-current="page"\] \+ \.dim-generalSettingsTooltip \{[^}]*opacity: 0;[^}]*visibility: hidden;/);
+  assert.doesNotMatch(styles, /\.dim-generalSettingsAction:focus-within \.dim-generalSettingsTooltip/);
+  assert.match(styles, /\.dim-globalTtlTooltip \{[^}]*position: absolute;[^}]*opacity: 0;[^}]*visibility: hidden;/);
+  assert.match(styles, /\.dim-globalTtlHelp:hover \.dim-globalTtlTooltip, \.dim-globalTtlHelpButton:focus-visible \+ \.dim-globalTtlTooltip \{[^}]*opacity: 1;[^}]*visibility: visible;/);
+  assert.doesNotMatch(styles, /\.dim-globalTtlHelp:focus-within \.dim-globalTtlTooltip/);
+  assert.match(styles, /\.dim-globalSweepAction \{[^}]*position: relative;[^}]*margin-left: auto;/);
+  assert.match(styles, /\.dim-globalSweepConfirm \{[^}]*position: absolute;[^}]*top: calc\(100% \+ 8px\);[^}]*right: 0;/);
   assert.doesNotMatch(markup, /\d+ 个渠道|dim-channelCount/);
   assert.match(markup, />微信</);
   assert.match(markup, />飞书</);
   assert.match(markup, />钉钉</);
   assert.match(markup, />企业微信</);
+  assert.match(markup, />企业微信应用</);
   assert.match(markup, />QQ</);
   assert.match(markup, />Slack</);
   assert.match(markup, />Telegram</);
@@ -168,11 +273,218 @@ test('IM settings renders nine IM channels plus the AI Office connector', async 
   assert.match(markup, /dim-logoWhatsapp/);
   assert.match(markup, /dim-logoOffice/);
   assert.match(styles, /\.dim-logoFeishu svg \{ width: 28px; height: 28px; \}/);
-  assert.equal((markup.match(/role="tab"/g) ?? []).length, 10);
+  assert.equal((markup.match(/role="tab"/g) ?? []).length, 11);
   assert.equal((markup.match(/aria-selected="true"/g) ?? []).length, 1);
   assert.doesNotMatch(markup, /role="switch"|type="checkbox"/);
   assert.doesNotMatch(markup, /dim-chevron|扫码绑定<\/small>|扫码接入<\/small>/);
   assert.doesNotMatch(markup, />INSTANT MESSAGING<|>Channel<|>微信设置</);
+});
+
+test('the general settings gear sits to the right of GitHub and outside the channel rail', () => {
+  const markup = renderToStaticMarkup(React.createElement(IMSettingsTab, {
+    globalSettingsRpcCall: async () => ({ ok: true, value: { ttlHours: 0 } }),
+    weixinRpcCall: async () => ({ ok: true, value: {} }),
+  }));
+
+  assert.match(markup, /id="dim-general-settings-trigger"/);
+  assert.match(markup, /aria-controls="dim-panel-global-settings"/);
+  assert.match(markup, /class="dim-generalSettingsAction"/);
+  assert.match(markup, /data-im-icon="global-settings"/);
+  assert.ok(markup.indexOf('dim-githubAction') < markup.indexOf('dim-generalSettingsAction'));
+  assert.ok(markup.indexOf('dim-generalSettingsAction') < markup.indexOf('dim-layout'));
+  assert.doesNotMatch(markup, /id="dim-tab-global-settings"/);
+  assert.doesNotMatch(markup, /dim-channelGlobal|dim-logoGlobal/);
+  assert.match(markup, /aria-label="IM 设置导航"/);
+  // The general panel only mounts once its header action is selected; the
+  // action must not steal the initial selection from the first channel.
+  assert.doesNotMatch(markup, /id="dim-panel-global-settings"/);
+});
+
+test('the general settings page uses an Attachments tab with contextual help and an explicit save button', () => {
+  const markup = renderToStaticMarkup(React.createElement(GlobalSettingsPanel, {
+    rpcCall: async () => ({ ok: true, value: { ttlHours: 24 } }),
+  }));
+
+  assert.match(markup, /aria-label="通用设置"/);
+  assert.match(markup, /<h2>通用设置<\/h2>/);
+  assert.match(markup, /role="tablist" aria-label="通用设置分类"/);
+  assert.match(markup, /id="dim-general-settings-tab-attachments"[^>]*role="tab"[^>]*aria-selected="true"[^>]*>附件<\/button>/);
+  assert.match(markup, /id="dim-general-settings-panel-attachments"[^>]*role="tabpanel"[^>]*aria-labelledby="dim-general-settings-tab-attachments"/);
+  assert.equal((markup.match(/role="tab"/g) ?? []).length, 1);
+  // No label wrapper: the input takes its accessible name from the heading.
+  assert.doesNotMatch(markup, /<label/);
+  assert.match(markup, /<input[^>]*aria-labelledby="dim-globalTtlTitle"/);
+  assert.match(markup, /aria-label="查看附件保留时长说明"/);
+  assert.match(markup, /class="dim-globalTtlTooltip" role="tooltip"/);
+  assert.match(markup, /<code>1~8760<\/code>/);
+  assert.match(markup, /正在读取通用设置…/);
+  // Field actions share one row; the heading stays dedicated to its label and help.
+  const ttlFormMarkup = markup.match(/<form class="dim-globalTtlRow"[^]*?<\/form>/)?.[0] ?? '';
+  assert.doesNotMatch(markup, /dim-globalHeadActions/);
+  assert.match(ttlFormMarkup, />清理过期附件<\/button>/);
+  assert.ok(ttlFormMarkup.indexOf('保存') < ttlFormMarkup.indexOf('清理过期附件'));
+  assert.match(ttlFormMarkup, /aria-haspopup="dialog"/);
+  assert.match(ttlFormMarkup, /aria-expanded="false"/);
+  assert.doesNotMatch(ttlFormMarkup, /role="alertdialog"|>确认清理<\/button>/);
+  assert.match(markup, /<button[^>]*type="submit"[^>]*disabled=""[^>]*data-kind="primary"[^>]*>保存<\/button>/);
+});
+
+test('the sweep action opens a separate confirmation popover and supports cancel', async () => {
+  const calls = [];
+  const rpcCall = async (endpoint, payload) => {
+    calls.push({ endpoint, payload });
+    if (endpoint === 'settings.inbound-ttl.get') return { ok: true, value: { ttlHours: 24 } };
+    if (endpoint === 'settings.inbound-ttl.sweep') {
+      return { ok: true, value: { deletedDirectories: 2, sweptWorkspaces: 5 } };
+    }
+    throw new Error(`unexpected endpoint: ${endpoint}`);
+  };
+
+  let renderer;
+  await act(async () => {
+    renderer = create(React.createElement(GlobalSettingsPanel, { rpcCall }));
+    await flushMicrotasks();
+  });
+
+  await act(async () => {
+    findButton(renderer, '清理过期附件').props.onClick();
+  });
+  const trigger = findButton(renderer, '清理过期附件');
+  const confirmButton = findButton(renderer, '确认清理');
+  const confirmDialog = renderer.root.findByProps({ role: 'alertdialog' });
+  assert.equal(nodeText(trigger), '清理过期附件');
+  assert.equal(trigger.props['aria-expanded'], true);
+  assert.equal(confirmButton.props['data-kind'], 'danger');
+  assert.equal(confirmDialog.props['aria-label'], '确认清理过期附件');
+  assert.match(nodeText(confirmDialog), /确认清理当前已过期的附件？取消确认清理/);
+
+  // Cancel closes the popover without running the sweep.
+  await act(async () => {
+    findButton(renderer, '取消').props.onClick();
+  });
+  assert.equal(renderer.root.findAllByProps({ role: 'alertdialog' }).length, 0);
+  assert.equal(findButton(renderer, '清理过期附件').props['aria-expanded'], false);
+  assert.equal(calls.filter((call) => call.endpoint === 'settings.inbound-ttl.sweep').length, 0);
+
+  await act(async () => {
+    findButton(renderer, '清理过期附件').props.onClick();
+  });
+
+  // Confirming still runs the sweep RPC, silently and without result text.
+  await act(async () => {
+    findButton(renderer, '确认清理').props.onClick();
+    await flushMicrotasks();
+  });
+  assert.equal(calls.filter((call) => call.endpoint === 'settings.inbound-ttl.sweep').length, 1);
+  assert.deepEqual(
+    renderer.root.findAllByProps({ className: 'dim-globalFeedback' }),
+    [],
+  );
+  assert.ok(findButton(renderer, '清理过期附件'));
+  act(() => renderer.unmount());
+});
+
+test('the TTL input saves explicitly, preserves invalid text for correction, and disables save when unchanged', async () => {
+  const calls = [];
+  const rpcCall = async (endpoint, payload) => {
+    calls.push({ endpoint, payload });
+    if (endpoint === 'settings.inbound-ttl.get') return { ok: true, value: { ttlHours: 24 } };
+    if (endpoint === 'settings.inbound-ttl.set') {
+      return { ok: true, value: { ttlHours: payload.ttlHours } };
+    }
+    throw new Error(`unexpected endpoint: ${endpoint}`);
+  };
+
+  let renderer;
+  await act(async () => {
+    renderer = create(React.createElement(GlobalSettingsPanel, { rpcCall }));
+    await flushMicrotasks();
+  });
+  const input = () => renderer.root.findByProps({ id: 'dim-globalTtlInput' });
+  const form = () => renderer.root.findByProps({ className: 'dim-globalTtlRow' });
+  const saveButton = () => findButton(renderer, '保存');
+  const inlineNote = () => renderer.root.findAllByProps({ className: 'dim-globalInline' })
+    .at(-1);
+  assert.equal(input().props.value, '24');
+  assert.equal(input().props.disabled, false);
+  assert.equal(saveButton().props.disabled, true);
+
+  // A valid changed value is not persisted until the user explicitly saves.
+  await act(async () => {
+    input().props.onChange({ target: { value: '48' } });
+  });
+  await act(async () => {
+    input().props.onBlur();
+  });
+  assert.equal(calls.filter((call) => call.endpoint === 'settings.inbound-ttl.set').length, 0);
+  assert.equal(saveButton().props.disabled, false);
+  await act(async () => {
+    form().props.onSubmit({ preventDefault() {} });
+    await flushMicrotasks();
+  });
+  assert.deepEqual(calls.at(-1), { endpoint: 'settings.inbound-ttl.set', payload: { ttlHours: 48 } });
+  assert.equal(input().props.value, '48');
+  assert.equal(nodeText(inlineNote()), '已保存');
+  assert.equal(saveButton().props.disabled, true);
+
+  // Invalid input stays available for correction and cannot be submitted.
+  await act(async () => {
+    input().props.onChange({ target: { value: 'abc' } });
+  });
+  await act(async () => {
+    input().props.onBlur();
+    await flushMicrotasks();
+  });
+  assert.equal(calls.filter((call) => call.endpoint === 'settings.inbound-ttl.set').length, 1);
+  assert.equal(input().props.value, 'abc');
+  assert.equal(input().props['aria-invalid'], 'true');
+  assert.equal(saveButton().props.disabled, true);
+  assert.equal(nodeText(inlineNote()), '请输入 -1、0 或 1~8760 之间的整数。');
+
+  // Restoring the saved value clears the error and keeps Save disabled.
+  await act(async () => {
+    input().props.onChange({ target: { value: '48' } });
+  });
+  await act(async () => {
+    input().props.onBlur();
+    await flushMicrotasks();
+  });
+  assert.equal(calls.filter((call) => call.endpoint === 'settings.inbound-ttl.set').length, 1);
+  assert.equal(input().props['aria-invalid'], undefined);
+  assert.equal(saveButton().props.disabled, true);
+  act(() => renderer.unmount());
+});
+
+test('a failed explicit save keeps the input enabled with the error inline', async () => {
+  const rpcCall = async (endpoint) => {
+    if (endpoint === 'settings.inbound-ttl.get') return { ok: true, value: { ttlHours: 24 } };
+    if (endpoint === 'settings.inbound-ttl.set') {
+      return { ok: false, error: { code: 'store-unavailable', message: '无法写入设置存储。' } };
+    }
+    throw new Error(`unexpected endpoint: ${endpoint}`);
+  };
+
+  let renderer;
+  await act(async () => {
+    renderer = create(React.createElement(GlobalSettingsPanel, { rpcCall }));
+    await flushMicrotasks();
+  });
+  const input = () => renderer.root.findByProps({ id: 'dim-globalTtlInput' });
+  const form = () => renderer.root.findByProps({ className: 'dim-globalTtlRow' });
+
+  await act(async () => {
+    input().props.onChange({ target: { value: '72' } });
+  });
+  await act(async () => {
+    form().props.onSubmit({ preventDefault() {} });
+    await flushMicrotasks();
+  });
+  assert.equal(input().props.disabled, false);
+  assert.equal(input().props.value, '72');
+  const note = renderer.root.findAllByProps({ className: 'dim-globalInline' }).at(-1);
+  assert.equal(nodeText(note), '无法写入设置存储。');
+  assert.equal(note.props.role, 'alert');
+  act(() => renderer.unmount());
 });
 
 test('all channel styles use the current Harness theme tokens', async () => {
@@ -273,6 +585,135 @@ test('Feishu keeps its heading controls on one row without a plus icon', async (
   assert.match(styles, /\.bxf-headingTools \{[^}]*justify-content: space-between;[^}]*flex-wrap: nowrap;/);
   assert.match(styles, /@container \(max-width: 620px\)[^]*\.bxf-headingTools \{ gap: 6px; \}/);
   assert.doesNotMatch(styles, /\.bxf-headingTools \.bxf-button \{ margin-left: auto; \}/);
+});
+
+test('Feishu bot settings render one step-push select with three presentations', async (t) => {
+  const previousWindow = globalThis.window;
+  let nextTimer = 0;
+  const frames = new Map();
+  globalThis.window = {
+    setInterval() { return ++nextTimer; },
+    clearInterval() {},
+    setTimeout() { return ++nextTimer; },
+    clearTimeout() {},
+    requestAnimationFrame(callback) {
+      const id = ++nextTimer;
+      frames.set(id, callback);
+      queueMicrotask(() => {
+        const pending = frames.get(id);
+        if (!pending) return;
+        frames.delete(id);
+        pending();
+      });
+      return id;
+    },
+    cancelAnimationFrame(id) { frames.delete(id); },
+  };
+  t.after(() => {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  });
+
+  let stepPush = false;
+  let stepPushMode = 'post';
+  const calls = [];
+  const snapshot = () => ({
+    schemaVersion: 2,
+    revision: calls.length + 1,
+    state: 'connected',
+    bots: [{
+      botId: 'bot_step_push',
+      state: 'connected',
+      connected: true,
+      groupResponseMode: 'mention',
+      groupTopicReply: false,
+      stepPush,
+      stepPushMode,
+      bot: { name: '分步直推机器人', appIdMasked: 'cli_step••••push' },
+      health: { status: 'healthy', summary: '长连接运行正常' },
+    }],
+  });
+  const rpcCall = async (endpoint, payload) => {
+    calls.push({ endpoint, payload });
+    if (endpoint === FEISHU_ENDPOINTS.status) return { ok: true, value: snapshot() };
+    if (endpoint === FEISHU_ENDPOINTS.setStepPush) {
+      stepPush = payload.stepPush;
+      return { ok: true, value: snapshot() };
+    }
+    if (endpoint === FEISHU_ENDPOINTS.setStepPushMode) {
+      stepPushMode = payload.stepPushMode;
+      return { ok: true, value: snapshot() };
+    }
+    throw new Error(`Unexpected endpoint: ${endpoint}`);
+  };
+
+  let renderer;
+  await act(async () => {
+    renderer = create(React.createElement(FeishuSettingsTab, { rpcCall }));
+    await flushTasks();
+  });
+
+  // Rendering: one select with the three presentations, defaulting to off.
+  const stepPushSelect = () => renderer.root.findByProps({ 'aria-label': '任务过程展示' });
+  assert.equal(stepPushSelect().type, 'select');
+  assert.equal(stepPushSelect().props.value, 'off');
+  assert.ok(renderer.root.findAllByType('h3')
+    .some((heading) => nodeText(heading) === '任务过程展示'));
+  assert.deepEqual(
+    stepPushSelect().findAllByType('option').map((option) => option.props.value),
+    ['off', 'streaming_card', 'post'],
+  );
+  const helpNodes = renderer.root.findAll(
+    (node) => node.props?.className === 'dim-feishuGroupHelp',
+  );
+  assert.equal(helpNodes.length, 1);
+  assert.match(nodeText(helpNodes[0]), /只回复最终结果/);
+
+  // off -> streaming_card: the flag write must land before the mode write so
+  // the runtime never sees a mode without step push enabled.
+  await act(async () => {
+    stepPushSelect().props.onChange({ target: { value: 'streaming_card' } });
+    await flushTasks();
+  });
+  const flagIndex = calls.findIndex(({ endpoint, payload }) => (
+    endpoint === FEISHU_ENDPOINTS.setStepPush
+      && payload.botId === 'bot_step_push'
+      && payload.stepPush === true
+  ));
+  const modeIndex = calls.findIndex(({ endpoint, payload }) => (
+    endpoint === FEISHU_ENDPOINTS.setStepPushMode
+      && payload.botId === 'bot_step_push'
+      && payload.stepPushMode === 'streaming_card'
+  ));
+  assert.ok(flagIndex >= 0, 'the enable flag is saved');
+  assert.ok(modeIndex >= 0, 'the presentation mode is saved');
+  assert.ok(flagIndex < modeIndex, 'the flag must be saved before the mode');
+  assert.equal(stepPushSelect().props.value, 'streaming_card');
+
+  // streaming_card -> post: only the mode endpoint is called.
+  const afterEnable = calls.length;
+  await act(async () => {
+    stepPushSelect().props.onChange({ target: { value: 'post' } });
+    await flushTasks();
+  });
+  const postCalls = calls.slice(afterEnable);
+  assert.equal(postCalls.filter(({ endpoint }) => endpoint === FEISHU_ENDPOINTS.setStepPushMode).length, 1);
+  assert.equal(postCalls.filter(({ endpoint }) => endpoint === FEISHU_ENDPOINTS.setStepPush).length, 0);
+  assert.equal(stepPushSelect().props.value, 'post');
+
+  // post -> off: only the flag endpoint is called, with false.
+  const afterPost = calls.length;
+  await act(async () => {
+    stepPushSelect().props.onChange({ target: { value: 'off' } });
+    await flushTasks();
+  });
+  const offCalls = calls.slice(afterPost);
+  assert.equal(offCalls.filter(({ endpoint, payload }) => (
+    endpoint === FEISHU_ENDPOINTS.setStepPush && payload.stepPush === false
+  )).length, 1);
+  assert.equal(offCalls.filter(({ endpoint }) => endpoint === FEISHU_ENDPOINTS.setStepPushMode).length, 0);
+  assert.equal(stepPushSelect().props.value, 'off');
+  await act(async () => renderer.unmount());
 });
 
 test('credential binding is a distinct secondary action beside QR binding in four channels', async () => {
@@ -528,6 +969,34 @@ test('DingTalk bot cards omit the redundant received and replied metric', () => 
   assert.doesNotMatch(markup, /收到 \/ 回复/);
 });
 
+test('DingTalk connection failures show actionable guidance and a log reference', () => {
+  const markup = renderToStaticMarkup(React.createElement(DingtalkAccountCard, {
+    account: {
+      botId: 'bot-dingtalk-failed',
+      state: 'error',
+      connected: false,
+      bot: { name: '钉钉机器人', clientIdMasked: 'ding••••fail' },
+      health: { summary: '连接失败', lastCheckedAt: null },
+      error: {
+        code: 'stream-proxy-dependency-incompatible',
+        message: '钉钉 Stream 连接失败：检测到代理依赖 agent-base 6.0.0。',
+        hint: '请将 agent-base@6 固定为 6.0.2 后重新安装依赖。',
+        referenceId: 'DT-CONN-DEADBEEF',
+      },
+    },
+    onReconnect() {},
+    onRequestRemove() {},
+    onConfirmRemove() {},
+    onCancelRemove() {},
+  }));
+
+  assert.match(markup, /agent-base 6\.0\.0/);
+  assert.match(markup, /agent-base@6 固定为 6\.0\.2/);
+  assert.match(markup, /stream-proxy-dependency-incompatible/);
+  assert.match(markup, /DT-CONN-DEADBEEF/);
+  assert.match(markup, /class="ddt-errorDiagnostic"/);
+});
+
 test('all IM channel cards keep localized actions visible above full-width feedback', async () => {
   const [imStyles, feishuStyles, weixinStyles, dingtalkStyles] = await Promise.all([
     readFile(STYLES_URL, 'utf8'),
@@ -763,7 +1232,11 @@ test('client registers one top-level bilingual IM settings section with a direct
     const injected = registrations[0].options.inject();
     const signal = new AbortController().signal;
     await injected.updateRpcCall('update.status', {}, signal);
-    assert.deepEqual(rpcCalls, [['/dsh-im', 'update.status', {}, signal]]);
+    await injected.globalSettingsRpcCall('settings.inbound-ttl.get', {}, signal);
+    assert.deepEqual(rpcCalls, [
+      ['/api', 'dsh-im/dsh-im', { method: 'update.status', payload: {} }, signal],
+      ['/api', `dsh-im${GLOBAL_SETTINGS_RPC_CHANNEL}`, { method: 'settings.inbound-ttl.get', payload: {} }, signal],
+    ]);
     assert.deepEqual(
       await injected.workspaceDirectoryPicker.listDirectory('/workspace/current', signal),
       { path: '/workspace/current', entries: [] },
@@ -783,6 +1256,7 @@ test('client registers one top-level bilingual IM settings section with a direct
       `class="dim-brandVersion">v${IM_PLUGIN_VERSION.replaceAll('.', '\\.')}<\\/span>`,
     ));
     assert.match(markup, /Help &amp; feedback · Open GitHub/);
+    assert.match(markup, /General settings/);
     assert.match(markup, />WeChat<|>Feishu<|>DingTalk<|>WeCom</);
     assert.match(markup, />QQ<[^]*>Slack<[^]*>Telegram<[^]*>Discord<[^]*>WhatsApp</);
     assert.match(markup, />AI Office<\/strong><small class="dim-channelNote">\(Experimental\)<\/small>/);
@@ -877,11 +1351,22 @@ test('all nine channel settings and connected cards render English copy', () => 
 
   setImTranslator((key) => en[key] ?? key);
   try {
+    const globalMarkup = renderToStaticMarkup(React.createElement(GlobalSettingsPanel, {
+      rpcCall: async () => ({ ok: true, value: { ttlHours: 24 } }),
+    }));
+    assert.match(globalMarkup, /General settings/);
+    assert.match(globalMarkup, />Attachments<\/button>/);
+    assert.match(globalMarkup, /Attachment retention \(hours\)/);
+    assert.match(globalMarkup, /Clean up expired attachments/);
+    assert.match(globalMarkup, /Loading general settings…/);
+    assert.doesNotMatch(globalMarkup, /[\p{Script=Han}]/u);
+
     const pages = [
       WeixinSettingsTab,
       FeishuSettingsTab,
       DingtalkSettingsTab,
       WecomSettingsTab,
+      WecomAppSettingsTab,
       QqSettingsTab,
       SlackSettingsTab,
       TelegramSettingsTab,
@@ -896,6 +1381,7 @@ test('all nine channel settings and connected cards render English copy', () => 
     assert.match(pageMarkup, /Loading Feishu bots/);
     assert.match(pageMarkup, /Loading DingTalk connection status/);
     assert.match(pageMarkup, /Loading WeCom bot status/);
+    assert.match(pageMarkup, /Loading WeCom app status/);
     assert.match(pageMarkup, /Loading QQ bot status/);
     assert.match(pageMarkup, /Loading Slack bot status/);
     assert.match(pageMarkup, /Loading Telegram bot status/);
