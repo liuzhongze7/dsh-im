@@ -19,7 +19,9 @@ export async function apply(ctx, config = {}) {
   // account + gids from the per-session run context bound by the YouDu bridge;
   // absent a bound context it fails closed (YOUDU_IM_CONTEXT_REQUIRED).
   if (typeof ctx?.inject === 'function') {
-    ctx.inject(['tools', 'systemPrompt'], (toolCtx) => installYouduKbTool(toolCtx));
+    ctx.inject(['tools', 'systemPrompt'], (toolCtx) => {
+      installYouduKbTool(toolCtx);
+    });
   } else {
     installYouduKbTool(ctx);
   }
