@@ -359,6 +359,10 @@ export function contentWithoutImages(content) {
 
 /** Whether an error is the Host rejecting image input for a non-vision model. */
 export function isModelImageRejection(error) {
-  return isAttachmentRejection(error)
-    && error?.details?.reason === 'MODEL_DOES_NOT_SUPPORT_IMAGES';
+  if (!isAttachmentRejection(error)) return false;
+  const reason = error?.details?.reason;
+  // Some Host/API layers forward only code+message, so a missing reason still
+  // counts: staging the bytes as workspace files is the best-effort path for
+  // any attachment rejection that reached us with image content.
+  return reason === undefined || reason === 'MODEL_DOES_NOT_SUPPORT_IMAGES';
 }

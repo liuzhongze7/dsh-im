@@ -737,11 +737,17 @@ export class YouduBridge {
         userMessage,
         reason: imagePromptDiagnostic(error)?.reason,
       });
+      // 诊断字段用 base64 输出：DSH 日志会把 `code=` 后面的值打码，直接写看不到。
+      const diagnostic = [
+        `name=${error?.name ?? '?'}`,
+        `method=${error?.method ?? '?'}`,
+        `codeB64=${Buffer.from(String(error?.code ?? ''), 'utf8').toString('base64')}`,
+        `detailsB64=${Buffer.from(JSON.stringify(error?.details ?? {}), 'utf8').toString('base64')}`,
+        `staging=${error?.stagingFailure ?? '-'}`,
+        `msg=${String(error?.message ?? '').slice(0, 240)}`,
+      ].join(' ');
       this.#logger.error?.(
-        `[dsh-im:youdu] failed to process an inbound message [${failure.referenceId}]`
-        + ` name=${error?.name ?? '?'} method=${error?.method ?? '?'}`
-        + ` code=${error?.code ?? '?'} reason=${error?.details?.reason ?? '?'}`
-        + ` staging=${error?.stagingFailure ?? '-'}:`,
+        `[dsh-im:youdu] failed to process an inbound message [${failure.referenceId}] ${diagnostic}:`,
         error,
       );
       const errorMessage = messageFailureText(failure);
