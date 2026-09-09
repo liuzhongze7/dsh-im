@@ -75,46 +75,52 @@ export class YouduController {
     return this.status();
   }
 
+  /**
+   * 接入或更新一个有度机器人。同一 sourceBotId 派生同一 botId，因此再次提交即"编辑连接信息"：
+   * secret / wsHost 省略表示保持原值，createdAt 保留；ownerUserId 省略保持原值，显式传空串表示清回 '*'。
+   */
   async attachBot({ botId, secret, wsHost, ownerUserId }) {
-    this.#logger.info?.('[dsh-im-youdu] attachBot called:', botId, wsHost);
+    this.#logger.info?.('[dsh-im-youdu] attachBot called:', botId);
     if (this.#closed) throw new Error('Youdu controller is closed');
     const sourceBotId = cleanString(botId);
-    const normalizedSecret = cleanString(secret);
-    const normalizedHost = cleanString(wsHost);
-    if (!sourceBotId || !normalizedSecret || !normalizedHost) {
-      throw new TypeError('Youdu bot id, secret and WebSocket host are required');
-    }
+    if (!sourceBotId) throw new TypeError('Youdu bot id is required');
     const identity = deriveYouduBotIdentity(sourceBotId);
     await this.#withBotTransition(identity.botId, async () => {
       if (this.#closed) throw new Error('Youdu controller is closed');
+      const existing = this.#configStore.get(identity.botId);
+      const normalizedSecret = cleanString(secret)
+        ?? (existing ? await this.#resolveSecret(existing.secretRef) : null);
+      const normalizedHost = cleanString(wsHost) ?? existing?.wsHost ?? null;
+      if (!normalizedSecret || !normalizedHost) {
+        throw new TypeError('Youdu bot secret and WebSocket host are required');
+      }
+      const normalizedOwner = ownerUserId === undefined
+        ? (existing?.ownerUserId ?? '*')
+        : (cleanString(ownerUserId) ?? '*');
       const previousSecret = await this.#credentials.resolve(identity.secretRef).catch(() => undefined);
+      const now = new Date().toISOString();
       const config = {
         botId: identity.botId,
         sourceBotId,
         secretRef: identity.secretRef,
         wsHost: normalizedHost,
-        ownerUserId: cleanString(ownerUserId) ?? '*',
-        createdAt: new Date().toISOString(),
-        connectedAt: new Date().toISOString(),
+        ownerUserId: normalizedOwner,
+        createdAt: existing?.createdAt ?? now,
+        connectedAt: now,
       };
       await this.#credentials.set(identity.secretRef, normalizedSecret);
-      this.#logger.info?.('[dsh-im-youdu] secret stored at', identity.secretRef);
       try {
         await this.#configStore.save(config);
-        this.#logger.info?.('[dsh-im-youdu] config saved');
       } catch (error) {
         await this.#restoreCredential(identity.secretRef, previousSecret);
         throw error;
       }
       try {
-        this.#logger.info?.('[dsh-im-youdu] starting runtime');
         await this.#startRuntime(config, normalizedSecret);
         this.#errors.delete(identity.botId);
-        this.#logger.info?.('[dsh-im-youdu] runtime started, ready=', this.#runtimes.get(identity.botId)?.status?.ready);
       } catch (error) {
         this.#errors.set(identity.botId, safeError('connection-failed', t('有度机器人已接入，消息连接暂未就绪。')));
         this.#logger.warn?.(`[dsh-im:youdu] bot ${identity.botId} credential connection failed:`, error);
-        this.#logger.warn?.('[dsh-im-youdu] startRuntime failed:', error?.message);
       }
       this.#touch();
     });
@@ -206,6 +212,8 @@ export class YouduController {
             ? 'error' : 'offline';
       return {
         botId: config.botId,
+        sourceBotId: config.sourceBotId,
+        ownerUserId: config.ownerUserId,
         state,
         connected,
         configured: true,

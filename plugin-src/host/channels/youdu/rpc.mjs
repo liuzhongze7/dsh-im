@@ -76,10 +76,15 @@ export function createYouduRpcHandler(controller, options = {}) {
       if (endpoint === YOUDU_ENDPOINTS.status) {
         value = await publicStatus(controller.status(), cachedEncode);
       } else if (endpoint === YOUDU_ENDPOINTS.attachBot) {
-        if (!validSourceBotId(payload?.botId)
-          || !validCredential(payload?.secret, 512)
-          || !validWsHost(payload?.wsHost)) {
-          throw new TypeError('Youdu bot id, secret and WebSocket host are required');
+        if (!validSourceBotId(payload?.botId)) {
+          throw new TypeError('有度机器人 botId 无效。');
+        }
+        // 编辑既有接入时 secret / wsHost 可省略（表示保持不变）；仅在提供时校验格式。
+        if (payload?.secret !== undefined && !validCredential(payload.secret, 512)) {
+          throw new TypeError('有度机器人 secret 无效。');
+        }
+        if (payload?.wsHost !== undefined && !validWsHost(payload.wsHost)) {
+          throw new TypeError('有度服务器地址无效。');
         }
         value = await publicStatus(await controller.attachBot({
           botId: payload?.botId,

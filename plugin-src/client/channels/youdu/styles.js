@@ -45,6 +45,16 @@ const CSS = String.raw`
   margin-top: 12px; padding-top: 12px;
   border-top: 1px solid var(--dim-border, rgba(0,0,0,0.08));
 }
+.ydt-connectionPanel {
+  border: 1px solid var(--dim-border, rgba(0,0,0,0.08));
+  border-radius: 12px;
+  background: var(--dim-surface-raised, #fff);
+  padding: 12px 14px;
+  margin: 4px 0 12px;
+}
+.ydt-connectionTitle { margin: 0 0 10px; font-size: 13px; font-weight: 600; }
+.ydt-connectionEditor { display: grid; gap: 10px; }
+.ydt-connectionEditor input[readonly] { opacity: 0.65; }
 `;
 
 export function installYouduStyles() {

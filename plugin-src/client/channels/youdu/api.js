@@ -50,6 +50,9 @@ function normalizeBot(value) {
   const state = BOT_STATES.has(value.state) ? value.state : 'offline';
   return {
     botId: id(value.botId),
+    sourceBotId: typeof value.sourceBotId === 'string' && value.sourceBotId.trim()
+      ? value.sourceBotId.trim() : undefined,
+    ownerUserId: typeof value.ownerUserId === 'string' ? value.ownerUserId : undefined,
     connected,
     state: connected ? 'connected' : state,
     bot: {

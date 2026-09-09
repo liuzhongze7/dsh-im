@@ -116,6 +116,78 @@ function AccessPolicyInlineEditor({ account, rpcCall, onSaved, disabled }) {
       : null);
 }
 
+/**
+ * 编辑既有接入的连接信息。botId 由接入时确定、不可修改；服务器地址与 secret 留空表示保持不变，
+ * 便于在连接失败（地址/密钥填错）时直接修正，而不必删除后重新接入。
+ */
+function ConnectionEditor({ account, disabled, onSave, onCancel }) {
+  const [host, setHost] = React.useState('');
+  const [secret, setSecret] = React.useState('');
+  const [owner, setOwner] = React.useState(account?.ownerUserId ?? '');
+  const [error, setError] = React.useState(null);
+  const [saving, setSaving] = React.useState(false);
+  const submit = async (event) => {
+    event.preventDefault();
+    if (saving) return;
+    setError(null);
+    setSaving(true);
+    try {
+      await onSave({
+        sourceBotId: account.sourceBotId,
+        ...(secret.trim() ? { secret: secret.trim() } : {}),
+        ...(host.trim() ? { wsHost: host.trim() } : {}),
+        ownerUserId: owner.trim(),
+      });
+      onCancel?.();
+    } catch (cause) {
+      setError(presentError(cause));
+    } finally {
+      setSaving(false);
+    }
+  };
+  const masked = account?.bot?.wsHostMasked ?? '已保存';
+  return h('form', { className: 'ydt-connectionEditor', onSubmit: submit },
+    field('机器人 botId（不可修改）', {
+      value: account?.sourceBotId ?? '',
+      readOnly: true,
+      disabled: true,
+    }),
+    field('服务器地址', {
+      value: host,
+      onChange: (e) => setHost(e.target.value),
+      placeholder: `留空表示不修改（当前 ${masked}）`,
+      maxLength: 256,
+    }),
+    field('机器人 secret', {
+      type: 'password',
+      value: secret,
+      onChange: (e) => setSecret(e.target.value),
+      placeholder: '留空表示不修改',
+      maxLength: 1024,
+    }),
+    field('允许的私聊用户 ID (可选)', {
+      value: owner,
+      onChange: (e) => setOwner(e.target.value),
+      placeholder: '留空表示不限制（*）',
+      maxLength: 128,
+    }),
+    error ? h('p', { className: 'dim-credentialError', role: 'alert' },
+      error.message ?? String(error)) : null,
+    h('div', { className: 'dim-credentialActions dim-viewActions' },
+      h('button', {
+        type: 'submit',
+        className: 'ddt-button',
+        'data-kind': 'primary',
+        disabled: saving || disabled,
+      }, saving ? '正在保存…' : '保存连接信息'),
+      h('button', {
+        type: 'button',
+        className: 'ddt-button',
+        onClick: onCancel,
+        disabled: saving,
+      }, '取消')));
+}
+
 function BrandMark() {
   return h('div', { className: 'ydt-brandMark', 'aria-hidden': 'true' },
     h('img', { src: youduLogo, alt: '', width: 64, height: 64 }));
@@ -181,10 +253,12 @@ function AccountCard({
   onAgentPresetSave,
   onContextEnhancementSave,
   onAccessPolicySaved,
+  onConnectionSave,
   onRequestRemove,
   onConfirmRemove,
   onCancelRemove,
 }) {
+  const [editingConnection, setEditingConnection] = React.useState(false);
   const tone = account.connected ? 'success' : account.state === 'error' ? 'error' : 'warning';
   const stateLabel = account.connected ? '运行正常' : account.state === 'connecting' ? '正在连接' : '连接未就绪';
   const summary = account.error?.message ?? (account.connected ? null : account.health.summary);
@@ -227,10 +301,26 @@ function AccountCard({
         disabled,
         onSave: onContextEnhancementSave,
       }),
+      editingConnection
+        ? h('div', { className: 'ydt-connectionPanel' },
+            h('h4', { className: 'ydt-connectionTitle' }, '编辑连接信息'),
+            h(ConnectionEditor, {
+              account,
+              disabled,
+              onSave: (payload) => onConnectionSave?.(payload),
+              onCancel: () => setEditingConnection(false),
+            }))
+        : null,
       h('div', { className: 'ddt-accountFooter dim-cardFooter' },
         h('div', { className: 'dim-cardFooterLayout' },
           h('div', { className: 'ddt-actions dim-cardActions' },
             h(Button, { className: 'dim-cardAction', onClick: onReconnect, disabled }, busy === 'reconnect' ? '检查中…' : account.connected ? '检查连接' : '重试连接'),
+            h(Button, {
+              className: 'dim-cardAction',
+              onClick: () => setEditingConnection((value) => !value),
+              disabled,
+              'aria-expanded': editingConnection,
+            }, editingConnection ? '收起编辑' : '编辑连接'),
             h(Button, { className: 'dim-cardAction', kind: 'danger', onClick: onRequestRemove, disabled }, '移除接入')),
           summary ? h('div', { className: 'ddt-summary dim-cardSummary' }, summary) : null,
           account.lastMessageError ? h(LastMessageErrorSummary, {
@@ -386,6 +476,24 @@ export function YouduSettingsTab({ rpcCall }) {
     setFeedbackByBot((current) => ({ ...current, [botId]: '已保存。' }));
   };
 
+  // 编辑既有接入的连接信息：地址/secret 留空表示不修改（host 侧 upsert 保持原值）。
+  // 失败时抛出，由卡片内联表单展示错误，不整页报错。
+  const saveConnection = async (bot, payload) => {
+    setBusyFor(bot.botId, 'connection');
+    try {
+      const snapshot = normalizeSnapshot(await invoke(YOUDU_ENDPOINTS.attachBot, {
+        botId: payload.sourceBotId,
+        ...(payload.secret ? { secret: payload.secret } : {}),
+        ...(payload.wsHost ? { wsHost: payload.wsHost } : {}),
+        ownerUserId: payload.ownerUserId,
+      }));
+      setModel((current) => ({ ...current, ...snapshot, phase: 'ready' }));
+      setFeedbackByBot((current) => ({ ...current, [bot.botId]: '连接信息已保存。' }));
+    } finally {
+      setBusyFor(bot.botId, false);
+    }
+  };
+
   const content = model.phase === 'loading'
     ? h(LoadingView)
     : pageError
@@ -405,6 +513,7 @@ export function YouduSettingsTab({ rpcCall }) {
                 onAgentPresetSave: (agentPreset) => saveBotSetting(YOUDU_ENDPOINTS.setAgentPreset, bot, { agentPreset }, 'preset'),
                 onContextEnhancementSave: (config) => saveBotSetting(YOUDU_ENDPOINTS.setContextEnhancement, bot, { config }, 'context'),
                 onAccessPolicySaved: (policy) => updateBotAccessPolicy(bot.botId, policy),
+                onConnectionSave: (payload) => saveConnection(bot, payload),
                 onRequestRemove: () => setRemoveTarget(bot.botId),
                 onConfirmRemove: () => runBotAction(YOUDU_ENDPOINTS.deleteBot, bot),
                 onCancelRemove: () => setRemoveTarget(null),
