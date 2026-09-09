@@ -737,7 +737,13 @@ export class YouduBridge {
         userMessage,
         reason: imagePromptDiagnostic(error)?.reason,
       });
-      this.#logger.error?.(`[dsh-im:youdu] failed to process an inbound message [${failure.referenceId}]:`, error);
+      this.#logger.error?.(
+        `[dsh-im:youdu] failed to process an inbound message [${failure.referenceId}]`
+        + ` name=${error?.name ?? '?'} method=${error?.method ?? '?'}`
+        + ` code=${error?.code ?? '?'} reason=${error?.details?.reason ?? '?'}`
+        + ` staging=${error?.stagingFailure ?? '-'}:`,
+        error,
+      );
       const errorMessage = messageFailureText(failure);
       await this.#bot.sendReply(
         target,
