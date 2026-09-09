@@ -243,3 +243,32 @@ test('batch collect then /send submits a combined prompt to the session', async 
   assert.match(asks[0], /第二条/);
   assert.deepEqual(await submission, undefined);
 });
+
+// 入站图片走「自己下载 + 落盘成工作区文件」，不把图片块交给宿主（非视觉模型会拒收）。
+test('inbound image is handed to the file pipeline with an analysis hint', async () => {
+  const { state } = stateFixture();
+  const sent = [];
+  const calls = [];
+  const harness = baseHarness({
+    ask: async (_sessionId, content, options) => {
+      calls.push({ content, options });
+      return 'ok';
+    },
+  });
+  const bridge = new YouduBridge({ bot: makeBot(sent), harness, state, ownerUserId: '*' });
+
+  await bridge.accept(frame('img-1', '', {
+    msgType: 'image',
+    image: { mediaId: 'media-1', name: 'shot.png', size: 4096 },
+    media: [{ mediaId: 'media-1', name: 'shot.png', size: 4096 }],
+  }));
+
+  assert.equal(calls.length, 1);
+  const { content, options } = calls[0];
+  assert.equal(options?.images, undefined, 'images must not be sent to the Harness');
+  assert.equal(Array.isArray(options?.files), true, 'the image must travel as an inbound file');
+  assert.equal(options.files.length, 1);
+  assert.equal(options.files[0].name, 'shot.png');
+  assert.equal(typeof options.files[0].load, 'function');
+  assert.match(String(content), /图片/);
+});

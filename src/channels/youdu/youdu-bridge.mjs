@@ -1070,26 +1070,37 @@ function placeholderForMedia(media) {
   return `[${label}${name}]`;
 }
 
-/** 把有度入站媒体转成 dsh-im 认可的 images/files（带 load 下载函数）。 */
+/**
+ * 有度渠道统一走「自己下载 + 落盘成工作区文件」：图片同样按文件处理，不把图片块交给宿主。
+ *
+ * 原因：宿主对非视觉模型会在 session.prompt 阶段拒收图片块，而且经插件 API 只回传错误文案
+ * （code/details 丢失），回退链路不可靠。这里改成 openclaw 插件的做法——用有度
+ * `/cgi/bot/file/download` 自己取字节，交给入站文件管线写进会话工作区，模型用工具读取分析。
+ */
 function buildPromptMessage(message, bot) {
-  const images = [];
   const files = [];
+  let imageCount = 0;
   for (const media of message.media ?? []) {
-    const source = {
+    files.push({
       name: media.name ?? (media.kind === 'image' ? 'image' : 'file'),
       ...(media.contentType ? { mediaType: media.contentType } : {}),
       ...(media.size !== undefined ? { size: media.size } : {}),
       load: ({ signal, maxBytes } = {}) => bot.downloadMedia(media, { signal, maxBytes }),
-    };
-    if (media.kind === 'image') images.push(source);
-    else files.push(source);
+    });
+    if (media.kind === 'image') imageCount += 1;
   }
+  const text = typeof message.text === 'string' ? message.text : '';
+  const content = imageCount > 0
+    ? [text, t(INBOUND_IMAGE_HINT_TEXT)].filter(Boolean).join('\n\n')
+    : text;
   return {
-    content: message.text,
-    ...(images.length ? { images } : {}),
+    content,
     ...(files.length ? { files } : {}),
   };
 }
+
+const INBOUND_IMAGE_HINT_TEXT = '本次消息包含图片，已下载保存为工作区文件（见下方文件清单）；'
+  + '请用工具读取这些图片文件后回答，不要假设自己能直接看到图片内容。';
 
 function helpText() {
   return [
