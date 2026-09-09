@@ -10,6 +10,7 @@ import {
   createYouduBridgeStatus,
   YouduBridge,
 } from './youdu-bridge.mjs';
+import { buildYouduTlsOptions, createYouduTransport } from './youdu-tls.mjs';
 
 function timeoutError() {
   const error = new Error('Youdu WebSocket did not become ready in time');
@@ -47,6 +48,7 @@ export class YouduRuntime {
   #bridge = null;
   #abortController = null;
   #starting = null;
+  #mediaTransport = null;
 
   constructor({
     config,
@@ -100,6 +102,10 @@ export class YouduRuntime {
 
     const wsHost = normalizeWsHost(this.#config.wsHost);
     if (!wsHost) throw new TypeError('Youdu WebSocket host is missing');
+    // 对齐 openclaw：加载自带 CA，并在 IP 直连时跳过 hostname 匹配（仍校验证书链）。
+    const tlsOptions = buildYouduTlsOptions(wsHost);
+    const mediaTransport = createYouduTransport(tlsOptions);
+    this.#mediaTransport = mediaTransport;
     const controller = new AbortController();
     this.#abortController = controller;
 
@@ -113,6 +119,7 @@ export class YouduRuntime {
       wsUrl: wsHost,
       botId: this.#config.sourceBotId,
       secret: this.#secret,
+      tlsOptions,
       logger,
     });
     this.#socket = socket;
@@ -136,6 +143,7 @@ export class YouduRuntime {
             mediaId: attachment.mediaId ?? '',
             maxBytes,
             signal,
+            transport: mediaTransport,
           });
           return buffer;
         },
@@ -148,6 +156,7 @@ export class YouduRuntime {
             contentType: file?.mediaType,
             content: file?.bytes,
             kind,
+            transport: mediaTransport,
           });
           const body = buildMediaMessageBody(media);
           return socket.sendReply(target.reqId, body);
@@ -274,12 +283,15 @@ export class YouduRuntime {
   async stop() {
     const socket = this.#socket;
     const bridge = this.#bridge;
+    const mediaTransport = this.#mediaTransport;
+    this.#mediaTransport = null;
     this.#abortController?.abort();
     this.#abortController = null;
     this.#socket = null;
     this.#bridge = null;
     await bridge?.waitForIdle().catch(() => undefined);
     socket?.disconnect();
+    await mediaTransport?.close?.().catch(() => undefined);
     this.#status.ready = false;
     this.#status.youduConnectionState = 'idle';
     return this.status;
