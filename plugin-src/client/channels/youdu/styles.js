@@ -25,6 +25,26 @@ const CSS = String.raw`
 }
 .ydt-accessMode span { opacity: 0.65; font-size: 13px; }
 .ydt-accessMode strong { font-weight: 600; }
+.ydt-accessInline {
+  border: 1px solid var(--dim-border, rgba(0,0,0,0.08));
+  border-radius: 12px;
+  background: var(--dim-surface-raised, #fff);
+  padding: 12px 14px;
+  margin: 4px 0 12px;
+}
+.ydt-accessInlineHead {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+}
+.ydt-accessInlineSummary { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.ydt-accessInlineLabel { opacity: 0.65; font-size: 12px; }
+.ydt-accessInlineSummary strong { font-size: 13px; font-weight: 600; line-height: 1.35; word-break: break-word; }
+.ydt-accessInlineToggle {
+  flex-shrink: 0; white-space: nowrap;
+}
+.ydt-accessInlineBody {
+  margin-top: 12px; padding-top: 12px;
+  border-top: 1px solid var(--dim-border, rgba(0,0,0,0.08));
+}
 `;
 
 export function installYouduStyles() {

@@ -4,7 +4,6 @@ import { h } from '../../i18n.js';
 import youduLogo from './youdu_logo.png';
 import { CredentialActionIcon } from '../../credential-binding.js';
 import {
-  BotSettingsButton,
   BotStatusMeta,
   ChannelListHeading,
   LastMessageErrorSummary,
@@ -12,6 +11,8 @@ import {
 import { WorkspaceEditor } from '../../workspace-editor.js';
 import { AgentPresetEditor } from '../../agent-preset.js';
 import { ContextEnhancementEditor } from '../../context-enhancement.js';
+import { AccessPolicySettingsPage } from '../../access-policy-settings.js';
+import { normalizeAccessPolicy } from '../../../../src/channels/shared/access-policy.mjs';
 import {
   connectionTestFeedback,
   normalizeSnapshot,
@@ -58,13 +59,61 @@ function checkedTime(value) {
   }
 }
 
-function accessModeLabel(account) {
-  const policy = account.accessPolicy ?? {};
-  const mode = policy.direct?.mode ?? 'open';
-  const commands = policy.direct?.open?.defaultCanExecuteCommands === false
-    ? '命令默认关闭'
-    : '命令默认开启';
-  return mode === 'allowlist' ? `白名单模式（${commands}）` : `开放模式（${commands}）`;
+// 开放模式、命令默认关闭的编辑基线：当 bot 尚未配置访问策略时，用作编辑器初始值，
+// 使页面可直接展开编辑（与服务端未配置时的闭合默认保持一致）。
+const ACCESS_EDITOR_BASELINE = Object.freeze({
+  direct: Object.freeze({
+    mode: 'open',
+    open: Object.freeze({ defaultCanExecuteCommands: false, commandPermissionOverrides: Object.freeze([]) }),
+    allowlist: Object.freeze({ users: Object.freeze([]) }),
+  }),
+  group: Object.freeze({
+    mode: 'open',
+    open: Object.freeze({ defaultCanExecuteCommands: false, commandPermissionOverrides: Object.freeze([]) }),
+    allowlist: Object.freeze({ users: Object.freeze([]) }),
+  }),
+});
+
+function accessSceneSummary(sceneValue, sceneLabel) {
+  const mode = sceneValue?.mode === 'allowlist' ? '白名单' : '开放';
+  const users = sceneValue?.mode === 'allowlist'
+    ? (sceneValue?.allowlist?.users ?? [])
+    : (sceneValue?.open?.commandPermissionOverrides ?? []);
+  const command = sceneValue?.mode === 'allowlist'
+    ? (users.length === 0 ? '仅白名单用户可发消息' : `${users.length} 个白名单用户`)
+    : (sceneValue?.open?.defaultCanExecuteCommands === false ? '命令默认关闭' : '命令默认开启');
+  return `${sceneLabel}：${mode}（${command}）`;
+}
+
+function accessSummaryText(policy) {
+  if (!policy) return '未配置（默认：开放模式，命令默认关闭）';
+  return `${accessSceneSummary(policy.direct, '私聊')} | ${accessSceneSummary(policy.group, '群聊')}`;
+}
+
+function AccessPolicyInlineEditor({ account, rpcCall, onSaved, disabled }) {
+  const [expanded, setExpanded] = React.useState(false);
+  const policy = normalizeAccessPolicy(account?.accessPolicy);
+  return h('div', { className: 'ydt-accessInline' },
+    h('div', { className: 'ydt-accessInlineHead' },
+      h('div', { className: 'ydt-accessInlineSummary' },
+        h('span', { className: 'ydt-accessInlineLabel' }, '访问策略'),
+        h('strong', null, accessSummaryText(policy))),
+      h('button', {
+        type: 'button',
+        className: 'dim-deliveryButton ydt-accessInlineToggle',
+        disabled,
+        'aria-expanded': expanded,
+        onClick: () => setExpanded((value) => !value),
+      }, expanded ? '收起' : '编辑')),
+    expanded
+      ? h('div', { className: 'ydt-accessInlineBody' },
+          h(AccessPolicySettingsPage, {
+            channel: 'youdu',
+            account: { ...account, accessPolicy: policy ?? ACCESS_EDITOR_BASELINE },
+            rpcCall,
+            onSaved: (saved) => onSaved?.(saved),
+          }))
+      : null);
 }
 
 function BrandMark() {
@@ -126,10 +175,12 @@ function AccountCard({
   busy,
   feedback,
   removing,
+  rpcCall,
   onReconnect,
   onWorkspaceSave,
   onAgentPresetSave,
   onContextEnhancementSave,
+  onAccessPolicySaved,
   onRequestRemove,
   onConfirmRemove,
   onCancelRemove,
@@ -154,17 +205,13 @@ function AccountCard({
             stateLabel,
             lastCheckedAt: account.health.lastCheckedAt,
             formatCheckedTime: checkedTime,
-          }),
-          h(BotSettingsButton, {
-            channel: 'youdu',
-            botId: account.botId,
-            botName: account.bot.name,
-            connected: account.connected,
-            accessPolicy: account.accessPolicy,
           }))),
-      h('div', { className: 'ydt-accessMode dim-botAccessMode' },
-        h('span', null, '访问模式'),
-        h('strong', null, accessModeLabel(account))),
+      h(AccessPolicyInlineEditor, {
+        account,
+        rpcCall,
+        disabled,
+        onSaved: onAccessPolicySaved,
+      }),
       h(WorkspaceEditor, {
         workspace: account.workspace,
         disabled,
@@ -331,6 +378,14 @@ export function YouduSettingsTab({ rpcCall }) {
     setCredentialError(null);
   };
 
+  const updateBotAccessPolicy = (botId, policy) => {
+    setModel((current) => ({
+      ...current,
+      bots: current.bots.map((bot) => (bot.botId === botId ? { ...bot, accessPolicy: policy } : bot)),
+    }));
+    setFeedbackByBot((current) => ({ ...current, [botId]: '已保存。' }));
+  };
+
   const content = model.phase === 'loading'
     ? h(LoadingView)
     : pageError
@@ -344,10 +399,12 @@ export function YouduSettingsTab({ rpcCall }) {
                 busy: busyByBot[bot.botId] ?? false,
                 feedback: feedbackByBot[bot.botId],
                 removing: removeTarget === bot.botId,
+                rpcCall: invoke,
                 onReconnect: () => runBotAction(YOUDU_ENDPOINTS.reconnectBot, bot),
                 onWorkspaceSave: (workspace) => saveBotSetting(YOUDU_ENDPOINTS.setWorkspace, bot, { workspace }, 'workspace'),
                 onAgentPresetSave: (agentPreset) => saveBotSetting(YOUDU_ENDPOINTS.setAgentPreset, bot, { agentPreset }, 'preset'),
                 onContextEnhancementSave: (config) => saveBotSetting(YOUDU_ENDPOINTS.setContextEnhancement, bot, { config }, 'context'),
+                onAccessPolicySaved: (policy) => updateBotAccessPolicy(bot.botId, policy),
                 onRequestRemove: () => setRemoveTarget(bot.botId),
                 onConfirmRemove: () => runBotAction(YOUDU_ENDPOINTS.deleteBot, bot),
                 onCancelRemove: () => setRemoveTarget(null),
