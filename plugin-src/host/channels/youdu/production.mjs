@@ -17,6 +17,11 @@ import {
 } from '../../../../src/channels/shared/context-enhancement.mjs';
 import { createConnectionSupervisor } from './connection-supervisor.mjs';
 import { harnessConnection } from '../../harness-connection.mjs';
+import { createHarnessSessionExecutors } from '../../harness-session-coordinator.mjs';
+import {
+  getInboundTtlRuntime,
+  registerInboundTtlWorkspaces,
+} from '../../inbound-ttl-runtime.mjs';
 
 /** 从设置存储读取访问策略；未配置时：owner='*'（未配置）→ 命令开放，配置了具体 owner → 仅该 owner 可执行命令。 */
 function createYouduAccessPolicy(settingsStore, botId, botConfig, groupResponseMode = 'mention') {
@@ -131,11 +136,25 @@ export async function createProductionController(ctx, config = {}, internals = {
     resolve(paths.bots, 'settings.json'),
     { defaultWorkspace, defaultAgentPreset: config.agentPreset },
   ).load();
+  // 入站附件（图片/文件）经同进程 fileIngressExecutor 落到会话工作区；
+  // 缺少它时 HarnessClient 会抛 "Harness file ingress is unavailable"。
+  const inboundTtl = internals.inboundTtl ?? getInboundTtlRuntime(ctx, config);
+  const inboundTtlService = inboundTtl?.service ?? inboundTtl;
+  registerInboundTtlWorkspaces(ctx, inboundTtlService, {
+    workspaces: settingsStore,
+    configStore,
+    defaultWorkspace,
+  });
+  const { fileIngressExecutor } = createHarnessSessionExecutors(ctx, {
+    fileIngressExecutor: internals.fileIngressExecutor,
+    inboundTtlService,
+  });
   const harness = new Harness({
     ...connection,
     workspace: defaultWorkspace,
     autostart: false,
     dshBin: config.dshBin ?? 'dsh',
+    ...(fileIngressExecutor ? { fileIngressExecutor } : {}),
   });
   log.info('[dsh-im-youdu] harness created');
   const stateStores = new Map();
