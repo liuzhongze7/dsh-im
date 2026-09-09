@@ -17,6 +17,7 @@ export class YouduController {
   #settingsStore;
   #deleteState;
   #clearSessions;
+  #knownGroupsFor;
   #logger;
   #runtimes = new Map();
   #errors = new Map();
@@ -31,6 +32,7 @@ export class YouduController {
     settingsStore,
     deleteState = async () => {},
     clearSessions = async () => {},
+    knownGroupsFor = null,
     logger = console,
   }) {
     if (!credentials || typeof credentials.resolve !== 'function'
@@ -48,6 +50,7 @@ export class YouduController {
     this.#settingsStore = settingsStore ?? null;
     this.#deleteState = deleteState;
     this.#clearSessions = clearSessions;
+    this.#knownGroupsFor = typeof knownGroupsFor === 'function' ? knownGroupsFor : null;
     this.#logger = logger;
   }
 
@@ -231,6 +234,7 @@ export class YouduController {
         },
         lastMessageError: publicMessageFailure(runtimeStatus?.lastMessageError),
         error: structuredClone(this.#errors.get(config.botId) ?? null),
+        knownGroups: this.knownGroups(config.botId),
       };
     });
     const connectedCount = bots.filter((bot) => bot.connected).length;
@@ -244,6 +248,28 @@ export class YouduController {
       totals: { configured: bots.length, connected: connectedCount },
     };
     return this.#settingsStore ? this.#settingsStore.decorateStatus(base) : base;
+  }
+
+  /** 更新机器人按群访问设置（null 表示全部沿用群聊访问设置）。 */
+  async updateGroupAccess(botId, groupAccess, projectStatus) {
+    this.#assertBot(botId);
+    if (!this.#settingsStore) throw new TypeError('Youdu settings store is required');
+    const result = await this.#settingsStore.setGroupAccess(botId, groupAccess);
+    this.#revision += 1;
+    return typeof projectStatus === 'function'
+      ? projectStatus(this.status())
+      : result;
+  }
+
+  /** 观察到的群（供设置页选择），按最近活跃排序。 */
+  knownGroups(botId) {
+    if (!this.#knownGroupsFor) return [];
+    try {
+      const groups = this.#knownGroupsFor(botId);
+      return Array.isArray(groups) ? groups : [];
+    } catch {
+      return [];
+    }
   }
 
   /** 更新机器人工作区（轻量 config-backed）：写入后清空该 bot 已绑定会话，使下条消息在新工作区新建会话。 */

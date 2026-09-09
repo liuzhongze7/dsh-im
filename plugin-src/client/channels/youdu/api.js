@@ -1,3 +1,8 @@
+import {
+  normalizeGroupAccess,
+  resolveGroupAccessRule,
+} from '../../../../src/channels/youdu/group-access.mjs';
+
 export const YOUDU_RPC_CHANNEL = '/youdu';
 
 export const YOUDU_ENDPOINTS = Object.freeze({
@@ -10,6 +15,7 @@ export const YOUDU_ENDPOINTS = Object.freeze({
   setAgentPreset: 'bot.preset.set',
   setContextEnhancement: 'bot.context-enhancement.set',
   setAccessPolicy: 'bot.access-policy.set',
+  setGroupAccess: 'bot.group-access.set',
 });
 
 const BOT_STATES = new Set(['connected', 'connecting', 'offline', 'error']);
@@ -75,7 +81,23 @@ function normalizeBot(value) {
     agentPreset: value.agentPreset ?? undefined,
     contextEnhancement: isRecord(value.contextEnhancement) ? value.contextEnhancement : undefined,
     accessPolicy: isRecord(value.accessPolicy) ? value.accessPolicy : undefined,
+    groupAccess: normalizeGroupAccess(value.groupAccess),
+    knownGroups: Array.isArray(value.knownGroups)
+      ? value.knownGroups
+        .map((group) => ({
+          chatId: text(group?.chatId, '', 256),
+          lastSeenAt: timestamp(group?.lastSeenAt),
+          messages: Number.isSafeInteger(group?.messages) && group.messages > 0 ? group.messages : 0,
+        }))
+        .filter((group) => group.chatId)
+      : [],
   };
+}
+
+/** 每个群当前生效的访问模式（未配置 → inherit）。 */
+export function groupRuleFor(account, chatId) {
+  const rule = resolveGroupAccessRule(account?.groupAccess, chatId);
+  return rule?.mode ?? 'inherit';
 }
 
 function normalizeTestMessage(value) {

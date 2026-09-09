@@ -55,6 +55,25 @@ const CSS = String.raw`
 .ydt-connectionTitle { margin: 0 0 10px; font-size: 13px; font-weight: 600; }
 .ydt-connectionEditor { display: grid; gap: 10px; }
 .ydt-connectionEditor input[readonly] { opacity: 0.65; }
+.ydt-groupAccess { display: grid; gap: 10px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--dim-border, rgba(0,0,0,0.08)); }
+.ydt-groupAccessHint { margin: 0; font-size: 12px; line-height: 1.5; opacity: 0.7; }
+.ydt-groupAccessList { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.ydt-groupAccessRow {
+  display: grid; grid-template-columns: minmax(0, 1.4fr) 150px minmax(0, 1fr) auto;
+  align-items: center; gap: 8px;
+}
+.ydt-groupAccessId { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.ydt-groupAccessId code { font-size: 12px; word-break: break-all; }
+.ydt-groupAccessMeta { font-size: 11px; opacity: 0.65; }
+.ydt-groupAccessMode, .ydt-groupAccessUsers {
+  min-width: 0; padding: 6px 8px; border-radius: 8px;
+  border: 1px solid var(--dim-border, rgba(0,0,0,0.12));
+  background: var(--dim-surface, #fff); color: inherit; font: inherit; font-size: 12px;
+}
+.ydt-groupAccessAdd { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+@media (max-width: 720px) {
+  .ydt-groupAccessRow { grid-template-columns: minmax(0, 1fr); }
+}
 `;
 
 export function installYouduStyles() {

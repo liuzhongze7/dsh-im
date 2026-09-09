@@ -1,7 +1,24 @@
 import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
-const EMPTY_STATE = Object.freeze({ version: 1, sessions: {}, seenMessageIds: [] });
+const EMPTY_STATE = Object.freeze({ version: 1, sessions: {}, seenMessageIds: [], groups: {} });
+const MAX_GROUPS = 200;
+/** Persist at most one lastSeenAt update per group per hour. */
+const GROUP_TOUCH_INTERVAL_MS = 3_600_000;
+
+function normalizeGroups(value) {
+  const groups = {};
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return groups;
+  for (const [chatId, entry] of Object.entries(value)) {
+    if (typeof chatId !== 'string' || !chatId.trim()) continue;
+    const lastSeenAt = typeof entry?.lastSeenAt === 'string' ? entry.lastSeenAt : null;
+    const messages = Number.isSafeInteger(entry?.messages) && entry.messages > 0
+      ? entry.messages
+      : 0;
+    groups[chatId] = { lastSeenAt, messages };
+  }
+  return groups;
+}
 
 function normalizeState(value) {
   if (!value || typeof value !== 'object') return structuredClone(EMPTY_STATE);
@@ -19,6 +36,7 @@ function normalizeState(value) {
     seenMessageIds: Array.isArray(value.seenMessageIds)
       ? value.seenMessageIds.filter((id) => typeof id === 'string').slice(-1_000)
       : [],
+    groups: normalizeGroups(value.groups),
   };
 }
 
@@ -76,6 +94,47 @@ export class YouduStateStore {
 
   snapshot() {
     return structuredClone(this.#state);
+  }
+
+  /**
+   * Remember a group the bot has seen so the settings page can offer it.
+   * Message counters update in memory on every hit; `lastSeenAt` is persisted
+   * at most once per hour per group to keep the state file write rate low.
+   */
+  async recordGroup(chatId, { now = () => new Date() } = {}) {
+    const id = typeof chatId === 'string' ? chatId.trim() : '';
+    if (!id) return null;
+    const existing = this.#state.groups[id];
+    const seenAt = now();
+    const messages = (existing?.messages ?? 0) + 1;
+    const previous = existing?.lastSeenAt ? Date.parse(existing.lastSeenAt) : Number.NaN;
+    const fresh = !Number.isFinite(previous) || seenAt.getTime() - previous >= GROUP_TOUCH_INTERVAL_MS;
+    this.#state.groups[id] = {
+      lastSeenAt: fresh ? seenAt.toISOString() : existing.lastSeenAt,
+      messages,
+    };
+    if (fresh) {
+      const entries = Object.entries(this.#state.groups);
+      if (entries.length > MAX_GROUPS) {
+        entries.sort((left, right) => (Date.parse(right[1].lastSeenAt ?? 0) || 0)
+          - (Date.parse(left[1].lastSeenAt ?? 0) || 0));
+        this.#state.groups = Object.fromEntries(entries.slice(0, MAX_GROUPS));
+      }
+      await this.#persist();
+    }
+    return structuredClone(this.#state.groups[id]);
+  }
+
+  /** Observed groups, most recently active first. */
+  groupsSnapshot() {
+    return Object.entries(this.#state.groups)
+      .map(([chatId, entry]) => ({
+        chatId,
+        lastSeenAt: entry.lastSeenAt,
+        messages: entry.messages ?? 0,
+      }))
+      .sort((left, right) => (Date.parse(right.lastSeenAt ?? 0) || 0)
+        - (Date.parse(left.lastSeenAt ?? 0) || 0));
   }
 
   async remove() {

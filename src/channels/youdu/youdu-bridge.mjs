@@ -60,6 +60,7 @@ import {
   evaluateInboundAccess,
 } from '../shared/inbound-access.mjs';
 import { isSharedLocalCommand } from '../shared/command-permission.mjs';
+import { evaluateGroupAccess } from './group-access.mjs';
 import { t } from '../shared/i18n.mjs';
 import { prepareMessageBody } from './youdu-protocol/index.js';
 import {
@@ -173,6 +174,8 @@ export class YouduBridge {
   #gid = '';
   #contextEnhancement;
   #accessPolicy;
+  #groupAccess;
+  #onGroupSeen;
   #groupResponseMode;
   #signal;
   #queues = new Map();
@@ -196,6 +199,8 @@ export class YouduBridge {
     kbAccount,
     contextEnhancement,
     accessPolicy,
+    groupAccess,
+    onGroupSeen,
     groupResponseMode = 'mention',
     signal,
   }) {
@@ -216,6 +221,8 @@ export class YouduBridge {
       : null;
     this.#contextEnhancement = contextEnhancement;
     this.#accessPolicy = accessPolicy;
+    this.#groupAccess = groupAccess ?? null;
+    this.#onGroupSeen = typeof onGroupSeen === 'function' ? onGroupSeen : null;
     const resolvedGroupMode = groupResponseMode
       ?? (typeof accessPolicy === 'object' && accessPolicy !== null ? accessPolicy.groupResponseMode : undefined);
     this.#groupResponseMode = resolvedGroupMode === 'all' ? 'all' : 'mention';
@@ -252,6 +259,7 @@ export class YouduBridge {
       return Promise.resolve();
     }
     const key = conversationKey(message);
+    if (message.kind === 'group') this.#recordGroup(message.chatId);
     const addressed = message.kind !== 'group' || this.#isAddressedGroupMessage(message);
 
     if (addressed) {
@@ -420,35 +428,78 @@ export class YouduBridge {
       || (identities.length > 0 && `user:${identities[0]}` === id));
   }
 
-  /** 访问控制：优先 accessPolicy；无 provider 时回退 ownerUserId 白名单（命令仅 owner，群聊普通消息放开）。 */
-  #evaluateAccess(message) {
+  /** 按群规则（设置页配置）：显式配置的群优先于共享的群聊访问设置。 */
+  #evaluateGroupRule(chatId, senderIds) {
+    if (!this.#groupAccess || !chatId) return null;
+    let document;
+    try {
+      document = typeof this.#groupAccess.getSettings === 'function'
+        ? this.#groupAccess.getSettings()
+        : this.#groupAccess;
+    } catch {
+      // 读取失败按“未配置”处理，退回共享策略，绝不因此放宽。
+      return null;
+    }
+    return evaluateGroupAccess(document, {
+      chatId,
+      senderIds,
+      ...(typeof this.#groupAccess.equals === 'function' ? { equals: this.#groupAccess.equals } : {}),
+    });
+  }
+
+  /** 共享访问策略（私聊/群聊 open|allowlist + 命令权限）。 */
+  #evaluateSharedAccess(message, { isCommand }) {
     const text = message.text ?? '';
     const hasImages = hasMediaImages(message.media);
     const hasFiles = hasMediaFiles(message.media);
+    const senderIds = [message.senderId, message.senderAccount].filter(Boolean);
     if (this.#accessPolicy) {
       return evaluateInboundAccess(this.#accessPolicy, {
         conversationType: message.kind === 'group' ? 'group' : 'direct',
         // 发送者身份：数字 userId + 账号名（from.account，如 lewis.liu），两者任一匹配白名单/owner 即放行。
         // 这样设置页里既可用纯数字 ID，也可用账号名（对齐 openclaw 的 senderAccount 语义）。
-        senderIds: [message.senderId, message.senderAccount].filter(Boolean),
+        senderIds,
         text,
         hasImages,
         hasFiles,
-        isCommand: isSharedLocalCommand(text, { hasImages, hasFiles }),
+        isCommand,
       });
     }
     // 无 provider 的保守回退：命令仅允许 owner（或 owner 为 '*' 时放开），
     // 群聊普通消息显式放开避免误拒；群聊命令受 owner 约束（防止任意群成员触发命令）。
-    const isCommand = isSharedLocalCommand(text, { hasImages, hasFiles });
     if (isCommand) {
-      return this.#isSenderAllowed([message.senderId, message.senderAccount].filter(Boolean))
+      return this.#isSenderAllowed(senderIds)
         ? Object.freeze({ allowed: true, reason: 'legacy-owner' })
         : Object.freeze({ allowed: false, reason: 'command-not-allowed' });
     }
     if (message.kind === 'group') return Object.freeze({ allowed: true, reason: 'legacy-group' });
-    return this.#isSenderAllowed([message.senderId, message.senderAccount].filter(Boolean))
+    return this.#isSenderAllowed(senderIds)
       ? Object.freeze({ allowed: true, reason: 'legacy-owner' })
       : Object.freeze({ allowed: false, reason: 'sender-not-allowed' });
+  }
+
+  /** 访问控制：按群规则 → 共享 accessPolicy → owner 回退。 */
+  #evaluateAccess(message) {
+    const text = message.text ?? '';
+    const isCommand = isSharedLocalCommand(text, {
+      hasImages: hasMediaImages(message.media),
+      hasFiles: hasMediaFiles(message.media),
+    });
+    if (message.kind === 'group') {
+      const group = this.#evaluateGroupRule(message.chatId, [message.senderId, message.senderAccount].filter(Boolean));
+      if (group?.matched) {
+        if (!group.allowed) return Object.freeze({ allowed: false, reason: group.reason });
+        // 按群规则只决定“谁能聊”；命令权限仍由共享策略（owner/命令权限）决定。
+        if (!isCommand) return Object.freeze({ allowed: true, reason: group.reason });
+        const command = this.#evaluateSharedAccess(message, { isCommand: true });
+        if (command.allowed) return command;
+        return Object.freeze({
+          allowed: false,
+          reason: command.reason === 'policy-unavailable' ? command.reason : 'command-not-allowed',
+        });
+      }
+    }
+    return this.#evaluateSharedAccess(message, { isCommand });
   }
 
   #finishAccessDecision(message, access) {
@@ -481,6 +532,22 @@ export class YouduBridge {
     });
     this.#commandTasks.add(task);
     return task;
+  }
+
+  /** 记录观察到的群（供设置页按群配置），失败不影响消息处理。 */
+  #recordGroup(chatId) {
+    if (!chatId) return;
+    try {
+      if (this.#onGroupSeen) {
+        this.#onGroupSeen(chatId);
+        return;
+      }
+      if (typeof this.#state.recordGroup === 'function') {
+        void Promise.resolve(this.#state.recordGroup(chatId)).catch(() => undefined);
+      }
+    } catch {
+      // 群记录是辅助信息，任何失败都不应影响入站消息。
+    }
   }
 
   /** 私聊访问控制：ownerUserId 为 '*'（默认）时放开；否则只允许配置的 owner（数字 ID 或账号名任一命中）。 */

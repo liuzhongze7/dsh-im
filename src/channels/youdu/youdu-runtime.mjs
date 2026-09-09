@@ -42,6 +42,8 @@ export class YouduRuntime {
   #botId;
   #contextEnhancement;
   #accessPolicy;
+  #groupAccess;
+  #onGroupSeen;
   #createSocket;
   #status = createYouduRuntimeStatus();
   #socket = null;
@@ -61,6 +63,8 @@ export class YouduRuntime {
     botId = '',
     contextEnhancement,
     accessPolicy,
+    groupAccess,
+    onGroupSeen,
     createSocket = (options) => new YouduSocket(options),
   }) {
     if (!config || !secret || !harness || !state) {
@@ -76,6 +80,8 @@ export class YouduRuntime {
     this.#botId = botId ?? '';
     this.#contextEnhancement = contextEnhancement;
     this.#accessPolicy = accessPolicy;
+    this.#groupAccess = groupAccess ?? null;
+    this.#onGroupSeen = typeof onGroupSeen === 'function' ? onGroupSeen : null;
     this.#createSocket = createSocket;
   }
 
@@ -176,6 +182,8 @@ export class YouduRuntime {
       },
       contextEnhancement: this.#contextEnhancement,
       accessPolicy: this.#accessPolicy,
+      groupAccess: this.#groupAccess,
+      onGroupSeen: this.#onGroupSeen,
       signal: controller.signal,
     });
     this.#bridge = bridge;

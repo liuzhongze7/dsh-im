@@ -1,4 +1,5 @@
 import { resolveRpcAuthority } from '../../rpc-authority.mjs';
+import { normalizeGroupAccess } from '../../../../src/channels/youdu/group-access.mjs';
 import { SET_WORKSPACE_ENDPOINT, validWorkspacePayload } from '../shared/workspace-rpc.mjs';
 import { SET_AGENT_PRESET_ENDPOINT, validAgentPresetPayload } from '../shared/agent-preset-rpc.mjs';
 import { SET_CONTEXT_ENHANCEMENT_ENDPOINT, validContextEnhancementPayload } from '../shared/context-enhancement-rpc.mjs';
@@ -15,6 +16,7 @@ export const YOUDU_ENDPOINTS = Object.freeze({
   setAgentPreset: SET_AGENT_PRESET_ENDPOINT,
   setContextEnhancement: SET_CONTEXT_ENHANCEMENT_ENDPOINT,
   setAccessPolicy: SET_ACCESS_POLICY_ENDPOINT,
+  setGroupAccess: 'bot.group-access.set',
 });
 export const YOUDU_RPC_ENDPOINTS = Object.freeze(Object.values(YOUDU_ENDPOINTS));
 
@@ -126,6 +128,19 @@ export function createYouduRpcHandler(controller, options = {}) {
         value = await controller.updateAccessPolicy(
           payload.botId,
           payload.policy,
+          (status) => publicStatus(status, cachedEncode),
+        );
+      } else if (endpoint === YOUDU_ENDPOINTS.setGroupAccess) {
+        if (!validBotId(payload?.botId)) throw new TypeError('Invalid Youdu bot id');
+        // 省略 / null 等价于清空按群设置（所有群沿用群聊访问设置）。
+        const raw = payload?.groupAccess ?? null;
+        const groupAccess = raw === null ? null : normalizeGroupAccess(raw);
+        if (raw !== null && !groupAccess) {
+          throw new TypeError('群访问设置无效：请检查群标识、访问模式与用户名单。');
+        }
+        value = await controller.updateGroupAccess(
+          payload.botId,
+          groupAccess,
           (status) => publicStatus(status, cachedEncode),
         );
       } else {

@@ -8,12 +8,13 @@ import {
   normalizeAccessPolicy,
 } from '../shared/access-policy.mjs';
 import { validateAgentPresetId } from '../shared/agent-preset.mjs';
+import { normalizeGroupAccess } from './group-access.mjs';
 
 const EMPTY_DOCUMENT = Object.freeze({ version: 1, bots: Object.freeze({}) });
 
 /**
  * 有度(Youdu) 轻量设置存储（文件持久化）：为每个已接入的 bot 保存
- * workspace / agentPreset / contextEnhancement / accessPolicy。
+ * workspace / agentPreset / contextEnhancement / accessPolicy / groupAccess。
  *
  * 这是 youdu 专属持久化（非 bot-workspace-store 完整接线），设置页的 set*
  * 端点写入会在下次读取/重启后保留；bridge/runtime 从这里读取，改动即时生效。
@@ -32,6 +33,7 @@ export class YouduSettingsStore {
       agentPreset: validateAgentPresetId(defaultAgentPreset),
       contextEnhancement: DEFAULT_CONTEXT_ENHANCEMENT_CONFIG,
       accessPolicy: null,
+      groupAccess: null,
     };
   }
 
@@ -48,6 +50,7 @@ export class YouduSettingsStore {
             agentPreset: validateAgentPresetId(value?.agentPreset),
             contextEnhancement: normalizeContextEnhancementConfig(value?.contextEnhancement),
             accessPolicy: normalizeAccessPolicy(value?.accessPolicy),
+            groupAccess: normalizeGroupAccess(value?.groupAccess),
           });
         }
       }
@@ -80,6 +83,10 @@ export class YouduSettingsStore {
     return this.ensure(botId).accessPolicy;
   }
 
+  groupAccessFor(botId) {
+    return this.ensure(botId).groupAccess;
+  }
+
   async setWorkspace(botId, workspace) {
     this.ensure(botId).workspace = resolve(workspace);
     await this.#persist();
@@ -109,6 +116,16 @@ export class YouduSettingsStore {
     return normalized;
   }
 
+  /** 写入按群访问设置；传 null/空文档表示恢复“全部沿用群聊访问设置”。 */
+  async setGroupAccess(botId, groupAccess) {
+    const normalized = groupAccess !== null && groupAccess !== undefined
+      ? normalizeGroupAccess(groupAccess)
+      : null;
+    this.ensure(botId).groupAccess = normalized;
+    await this.#persist();
+    return normalized;
+  }
+
   /** 给 controller.status() 的每个 bot 注入当前设置，供设置页展示。 */
   decorateStatus(status) {
     if (!status || typeof status !== 'object' || !Array.isArray(status.bots)) return status;
@@ -120,6 +137,7 @@ export class YouduSettingsStore {
         agentPreset: this.agentPresetFor(bot.botId),
         contextEnhancement: this.contextEnhancementFor(bot.botId),
         accessPolicy: this.accessPolicyFor(bot.botId),
+        groupAccess: this.groupAccessFor(bot.botId),
       } : bot)),
     };
   }
@@ -132,6 +150,7 @@ export class YouduSettingsStore {
         ...(value.agentPreset ? { agentPreset: value.agentPreset } : {}),
         ...(value.contextEnhancement ? { contextEnhancement: value.contextEnhancement } : {}),
         ...(value.accessPolicy ? { accessPolicy: value.accessPolicy } : {}),
+        ...(value.groupAccess ? { groupAccess: value.groupAccess } : {}),
       };
     }
     return { version: 1, bots };

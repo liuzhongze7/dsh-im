@@ -52,6 +52,14 @@ function createYouduAccessPolicy(settingsStore, botId, botConfig, groupResponseM
   });
 }
 
+/** 按群访问规则的 provider：每次决策都从设置存储读取，改完即时生效。 */
+function createYouduGroupAccess(settingsStore, botId) {
+  return {
+    botId,
+    getSettings: () => settingsStore.groupAccessFor(botId),
+  };
+}
+
 function createYouduContextEnhancement(settingsStore, botId) {
   return {
     botId,
@@ -172,6 +180,10 @@ export async function createProductionController(ctx, config = {}, internals = {
     configStore,
     settingsStore,
     logger,
+    knownGroupsFor: (botId) => {
+      const state = stateStores.get(botId);
+      return state && typeof state.groupsSnapshot === 'function' ? state.groupsSnapshot() : [];
+    },
     createRuntime: async ({ botId, config: botConfig, secret }) => {
       const state = await stateFor(botId);
       settingsStore.ensure(botId);
@@ -185,6 +197,16 @@ export async function createProductionController(ctx, config = {}, internals = {
         botId: botConfig.sourceBotId ?? botConfig.botId ?? botId,
         contextEnhancement: createYouduContextEnhancement(settingsStore, botId),
         accessPolicy: createYouduAccessPolicy(settingsStore, botId, botConfig, config.groupResponseMode ?? 'mention'),
+        groupAccess: createYouduGroupAccess(settingsStore, botId),
+        onGroupSeen: (chatId) => {
+          // 观察到的群写进该 bot 的状态文件，供设置页按群配置时选择。
+          try {
+            const task = state.recordGroup?.(chatId);
+            if (task && typeof task.catch === 'function') task.catch(() => undefined);
+          } catch {
+            // 群记录失败不影响消息处理。
+          }
+        },
         logger: {
           error: (...args) => logger.error?.(`[${botId}]`, ...args),
           warn: (...args) => logger.warn?.(`[${botId}]`, ...args),

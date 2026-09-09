@@ -14,6 +14,12 @@ import { ContextEnhancementEditor } from '../../context-enhancement.js';
 import { AccessPolicySettingsPage } from '../../access-policy-settings.js';
 import { normalizeAccessPolicy } from '../../../../src/channels/shared/access-policy.mjs';
 import {
+  emptyGroupAccess,
+  normalizeGroupAccess,
+  resolveGroupAccessRule,
+  validateGroupAccess,
+} from '../../../../src/channels/youdu/group-access.mjs';
+import {
   connectionTestFeedback,
   normalizeSnapshot,
   presentError,
@@ -110,9 +116,216 @@ function AccessPolicyInlineEditor({ account, rpcCall, onSaved, disabled }) {
           h(AccessPolicySettingsPage, {
             channel: 'youdu',
             account: { ...account, accessPolicy: policy ?? ACCESS_EDITOR_BASELINE },
+            // AccessPolicySettingsPage 自己调用 unwrapRpcResult，必须传未拆包的 rpcCall。
             rpcCall,
             onSaved: (saved) => onSaved?.(saved),
           }))
+      : null);
+}
+
+/**
+ * 按群访问设置：为具体群配置“谁能聊”（对齐 openclaw 的 groups[chatId].allowFrom）。
+ * 未配置的群沿用上面的群聊访问设置，因此默认行为与之前完全一致。
+ */
+const GROUP_ACCESS_MODE_OPTIONS = Object.freeze([
+  { value: 'inherit', label: '沿用群聊访问设置' },
+  { value: 'open', label: '允许所有人' },
+  { value: 'allowlist', label: '仅名单内用户' },
+  { value: 'disabled', label: '忽略该群' },
+]);
+
+const GROUP_ACCESS_MODE_LABELS = Object.freeze(Object.fromEntries(
+  GROUP_ACCESS_MODE_OPTIONS.map((option) => [option.value, option.label]),
+));
+
+function groupAccessRows(account) {
+  const document = normalizeGroupAccess(account?.groupAccess) ?? emptyGroupAccess();
+  const rows = [];
+  const seen = new Set();
+  for (const group of Array.isArray(account?.knownGroups) ? account.knownGroups : []) {
+    const chatId = typeof group?.chatId === 'string' ? group.chatId : '';
+    if (!chatId || seen.has(chatId)) continue;
+    seen.add(chatId);
+    const rule = resolveGroupAccessRule(document, chatId);
+    rows.push({
+      chatId,
+      observed: true,
+      lastSeenAt: typeof group.lastSeenAt === 'number' ? group.lastSeenAt : null,
+      messages: Number.isSafeInteger(group.messages) ? group.messages : 0,
+      mode: rule?.mode ?? 'inherit',
+      users: (rule?.users ?? []).join(', '),
+    });
+  }
+  for (const [chatId, rule] of Object.entries(document.groups)) {
+    if (seen.has(chatId)) continue;
+    seen.add(chatId);
+    rows.push({
+      chatId,
+      observed: false,
+      lastSeenAt: null,
+      messages: 0,
+      mode: rule.mode,
+      users: (rule.users ?? []).join(', '),
+    });
+  }
+  return rows;
+}
+
+function groupAccessSummary(account) {
+  const document = normalizeGroupAccess(account?.groupAccess);
+  const entries = document ? Object.entries(document.groups) : [];
+  if (entries.length === 0) return '未按群配置（所有群沿用群聊访问设置）';
+  const counts = { open: 0, allowlist: 0, disabled: 0, inherit: 0 };
+  for (const [, rule] of entries) counts[rule.mode] = (counts[rule.mode] ?? 0) + 1;
+  const parts = [];
+  if (counts.allowlist) parts.push(`${counts.allowlist} 个群仅名单内用户`);
+  if (counts.open) parts.push(`${counts.open} 个群允许所有人`);
+  if (counts.disabled) parts.push(`${counts.disabled} 个群被忽略`);
+  return parts.length > 0 ? parts.join('，') : '未按群配置（所有群沿用群聊访问设置）';
+}
+
+function GroupAccessEditor({ account, rpcCall, onSaved, disabled }) {
+  const [expanded, setExpanded] = React.useState(false);
+  const [rows, setRows] = React.useState(() => groupAccessRows(account));
+  const [manual, setManual] = React.useState('');
+  const [saving, setSaving] = React.useState(false);
+  const [feedback, setFeedback] = React.useState(null);
+  const accountKey = `${account?.botId ?? ''}:${JSON.stringify(account?.groupAccess ?? null)}:${(account?.knownGroups ?? []).length}`;
+
+  React.useEffect(() => {
+    setRows(groupAccessRows(account));
+  }, [accountKey]);
+
+  const patchRow = (chatId, patch) => {
+    setRows((current) => current.map((row) => (row.chatId === chatId ? { ...row, ...patch } : row)));
+    setFeedback(null);
+  };
+
+  const addManual = () => {
+    const chatId = manual.trim();
+    if (!chatId) return;
+    setRows((current) => (current.some((row) => row.chatId === chatId)
+      ? current
+      : [...current, {
+        chatId, observed: false, lastSeenAt: null, messages: 0, mode: 'allowlist', users: '',
+      }]));
+    setManual('');
+    setFeedback(null);
+  };
+
+  const save = async (event) => {
+    event.preventDefault();
+    if (saving) return;
+    setFeedback(null);
+    setSaving(true);
+    try {
+      const groups = {};
+      for (const row of rows) {
+        const chatId = row.chatId.trim();
+        if (!chatId || row.mode === 'inherit') continue;
+        const users = row.mode === 'allowlist'
+          ? row.users.split(/[,，、\s]+/u).map((value) => value.trim()).filter(Boolean)
+          : [];
+        groups[chatId] = row.mode === 'allowlist' ? { mode: 'allowlist', users } : { mode: row.mode };
+      }
+      const document = validateGroupAccess({ version: 1, groups });
+      if (typeof rpcCall !== 'function') throw new Error('按群访问设置暂不可用。');
+      const snapshot = normalizeSnapshot(await rpcCall(YOUDU_ENDPOINTS.setGroupAccess, {
+        botId: account.botId,
+        groupAccess: Object.keys(groups).length > 0 ? document : null,
+      }));
+      onSaved?.(snapshot);
+      setFeedback({ tone: 'success', message: '按群访问设置已保存。' });
+    } catch (error) {
+      setFeedback({
+        tone: 'error',
+        message: error?.message || '按群访问设置保存失败，请稍后重试。',
+      });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return h('div', { className: 'ydt-accessInline' },
+    h('div', { className: 'ydt-accessInlineHead' },
+      h('div', { className: 'ydt-accessInlineSummary' },
+        h('span', { className: 'ydt-accessInlineLabel' }, '按群访问'),
+        h('strong', null, groupAccessSummary(account))),
+      h('button', {
+        type: 'button',
+        className: 'dim-deliveryButton ydt-accessInlineToggle',
+        disabled,
+        'aria-expanded': expanded,
+        onClick: () => setExpanded((value) => !value),
+      }, expanded ? '收起' : '编辑')),
+    expanded
+      ? h('form', { className: 'ydt-groupAccess', onSubmit: (event) => void save(event) },
+          h('p', { className: 'ydt-groupAccessHint' },
+            '为具体群指定谁能与机器人对话。未单独配置的群沿用上面的「群聊」访问设置；'
+            + '「仅名单内用户」可填有度用户 ID（数字）或账号名（如 lewis.liu），用逗号分隔。'),
+          rows.length === 0
+            ? h('p', { className: 'ydt-groupAccessHint' },
+                '机器人还没有收到过群消息，暂时无法列出群；可以在下面手动填群 ID。')
+            : h('ul', { className: 'ydt-groupAccessList', role: 'list' },
+                rows.map((row) => h('li', { key: row.chatId, className: 'ydt-groupAccessRow' },
+                  h('div', { className: 'ydt-groupAccessId' },
+                    h('code', { title: row.chatId }, row.chatId),
+                    h('span', { className: 'ydt-groupAccessMeta' },
+                      row.observed
+                        ? `${row.messages} 条消息${row.lastSeenAt ? ` · 最近 ${checkedTime(row.lastSeenAt)}` : ''}`
+                        : '手动添加')),
+                  h('select', {
+                    className: 'ydt-groupAccessMode',
+                    value: row.mode,
+                    disabled: saving || disabled,
+                    onChange: (event) => patchRow(row.chatId, { mode: event.target.value }),
+                  }, GROUP_ACCESS_MODE_OPTIONS.map((option) => h('option', {
+                    key: option.value,
+                    value: option.value,
+                  }, option.label))),
+                  row.mode === 'allowlist'
+                    ? h('input', {
+                        className: 'ydt-groupAccessUsers',
+                        value: row.users,
+                        disabled: saving || disabled,
+                        placeholder: '用户 ID 或账号名，逗号分隔',
+                        autoCapitalize: 'none',
+                        autoCorrect: 'off',
+                        spellCheck: false,
+                        onChange: (event) => patchRow(row.chatId, { users: event.target.value }),
+                      })
+                    : h('span', { className: 'ydt-groupAccessMeta' },
+                        GROUP_ACCESS_MODE_LABELS[row.mode] ?? ''),
+                  row.observed
+                    ? null
+                    : h('button', {
+                        type: 'button',
+                        className: 'dim-deliveryButton',
+                        disabled: saving,
+                        onClick: () => setRows((current) => current.filter((item) => item.chatId !== row.chatId)),
+                      }, '删除')))),
+          h('div', { className: 'ydt-groupAccessAdd' },
+            h('input', {
+              className: 'ydt-groupAccessUsers',
+              value: manual,
+              disabled: saving || disabled,
+              placeholder: '群 ID，例如 {0798E01E-...}',
+              autoCapitalize: 'none',
+              autoCorrect: 'off',
+              spellCheck: false,
+              onChange: (event) => setManual(event.target.value),
+            }),
+            h(Button, { onClick: addManual, disabled: saving || disabled || !manual.trim() }, '添加群')),
+          feedback
+            ? h('div', {
+                className: 'ddt-summary dim-cardFeedback',
+                role: 'status',
+                'aria-live': 'polite',
+              }, feedback.message)
+            : null,
+          h('div', { className: 'dim-viewActions' },
+            h(Button, { kind: 'primary', onClick: (event) => void save(event), disabled: saving || disabled },
+              saving ? '正在保存…' : '保存按群设置')))
       : null);
 }
 
@@ -248,11 +461,13 @@ function AccountCard({
   feedback,
   removing,
   rpcCall,
+  rawRpcCall,
   onReconnect,
   onWorkspaceSave,
   onAgentPresetSave,
   onContextEnhancementSave,
   onAccessPolicySaved,
+  onGroupAccessSaved,
   onConnectionSave,
   onRequestRemove,
   onConfirmRemove,
@@ -282,9 +497,15 @@ function AccountCard({
           }))),
       h(AccessPolicyInlineEditor, {
         account,
-        rpcCall,
+        rpcCall: rawRpcCall ?? rpcCall,
         disabled,
         onSaved: onAccessPolicySaved,
+      }),
+      h(GroupAccessEditor, {
+        account,
+        rpcCall,
+        disabled,
+        onSaved: onGroupAccessSaved,
       }),
       h(WorkspaceEditor, {
         workspace: account.workspace,
@@ -361,10 +582,29 @@ export function YouduSettingsTab({ rpcCall }) {
     return unwrapRpcResult(await rpcCall(endpoint, payload, signal));
   }, [rpcCall]);
 
+  // 读取状态加超时：Host 重启后旧页面的 RPC 通道可能已经断开，没有超时会一直转圈。
+  const statusWithTimeout = React.useCallback(async (timeoutMs = 20_000) => {
+    let timer;
+    try {
+      return await Promise.race([
+        invoke(YOUDU_ENDPOINTS.status),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            const error = new Error('读取有度连接状态超时，请刷新页面后重试。');
+            error.code = 'youdu-status-timeout';
+            reject(error);
+          }, timeoutMs);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }, [invoke]);
+
   const refresh = React.useCallback(async ({ silent = true } = {}) => {
     if (!silent) setModel((current) => ({ ...current, phase: 'loading' }));
     try {
-      const snapshot = normalizeSnapshot(await invoke(YOUDU_ENDPOINTS.status));
+      const snapshot = normalizeSnapshot(await statusWithTimeout());
       setModel((current) => ({
         ...current,
         phase: 'ready',
@@ -380,7 +620,7 @@ export function YouduSettingsTab({ rpcCall }) {
         setPageError(presentError(cause));
       }
     }
-  }, [invoke]);
+  }, [statusWithTimeout]);
 
   React.useEffect(() => { void refresh({ silent: false }); }, [refresh]);
 
@@ -476,6 +716,13 @@ export function YouduSettingsTab({ rpcCall }) {
     setFeedbackByBot((current) => ({ ...current, [botId]: '已保存。' }));
   };
 
+  const updateBotGroupAccess = (botId, snapshot) => {
+    if (snapshot) {
+      setModel((current) => ({ ...current, ...snapshot, phase: 'ready' }));
+    }
+    setFeedbackByBot((current) => ({ ...current, [botId]: '按群访问设置已保存。' }));
+  };
+
   // 编辑既有接入的连接信息：地址/secret 留空表示不修改（host 侧 upsert 保持原值）。
   // 失败时抛出，由卡片内联表单展示错误，不整页报错。
   const saveConnection = async (bot, payload) => {
@@ -508,11 +755,13 @@ export function YouduSettingsTab({ rpcCall }) {
                 feedback: feedbackByBot[bot.botId],
                 removing: removeTarget === bot.botId,
                 rpcCall: invoke,
+                rawRpcCall: rpcCall,
                 onReconnect: () => runBotAction(YOUDU_ENDPOINTS.reconnectBot, bot),
                 onWorkspaceSave: (workspace) => saveBotSetting(YOUDU_ENDPOINTS.setWorkspace, bot, { workspace }, 'workspace'),
                 onAgentPresetSave: (agentPreset) => saveBotSetting(YOUDU_ENDPOINTS.setAgentPreset, bot, { agentPreset }, 'preset'),
                 onContextEnhancementSave: (config) => saveBotSetting(YOUDU_ENDPOINTS.setContextEnhancement, bot, { config }, 'context'),
                 onAccessPolicySaved: (policy) => updateBotAccessPolicy(bot.botId, policy),
+                onGroupAccessSaved: (snapshot) => updateBotGroupAccess(bot.botId, snapshot),
                 onConnectionSave: (payload) => saveConnection(bot, payload),
                 onRequestRemove: () => setRemoveTarget(bot.botId),
                 onConfirmRemove: () => runBotAction(YOUDU_ENDPOINTS.deleteBot, bot),
