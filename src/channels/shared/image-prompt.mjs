@@ -283,6 +283,18 @@ export async function promptContentForMessage(message, {
   return content;
 }
 
+/**
+ * Host codes used when an attachment-bearing prompt is refused.
+ * Older Hosts (and the dsh-im test doubles) used the bare `attachment-error`;
+ * the current session controller raises the namespaced
+ * `session/attachment-invalid`. Accept both spellings so the non-vision image
+ * fallback keeps working across Host versions.
+ */
+function isAttachmentRejection(error) {
+  const code = String(error?.code ?? '');
+  return code === 'attachment-error' || code.endsWith('attachment-invalid');
+}
+
 /** Return only allowlisted, user-safe image failure details. */
 export function imagePromptDiagnostic(error) {
   if (error instanceof ImagePromptError) {
@@ -292,7 +304,7 @@ export function imagePromptDiagnostic(error) {
       userMessage: error.userMessage,
     };
   }
-  if (error?.code !== 'attachment-error' || typeof error?.details?.reason !== 'string') {
+  if (!isAttachmentRejection(error) || typeof error?.details?.reason !== 'string') {
     return null;
   }
   const reason = error.details.reason;
@@ -347,6 +359,6 @@ export function contentWithoutImages(content) {
 
 /** Whether an error is the Host rejecting image input for a non-vision model. */
 export function isModelImageRejection(error) {
-  return error?.code === 'attachment-error'
+  return isAttachmentRejection(error)
     && error?.details?.reason === 'MODEL_DOES_NOT_SUPPORT_IMAGES';
 }

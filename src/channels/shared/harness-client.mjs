@@ -1524,6 +1524,11 @@ export class HarnessClient {
         // Session workspace and named in a text manifest — then retry once
         // with a text-only prompt. The retry reuses promptRpcId so reply
         // tracking, control and interaction ownership stay bound to this ask.
+        // The code is logged in the message text because the Host masks the
+        // `code` field of logged error objects.
+        console.warn(
+          `[${this.#logPrefix}] session.prompt rejected: code=${error?.code ?? '?'} reason=${error?.details?.reason ?? '?'}`,
+        );
         const imageSources = isModelImageRejection(error)
           ? imageFileSourcesFromContent(content)
           : [];

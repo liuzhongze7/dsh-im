@@ -135,7 +135,8 @@ function failureCode(error) {
   if (code.startsWith('workspace-')) return 'WORKSPACE_UNAVAILABLE';
   if (code.startsWith('agent-preset-')) return 'PRESET_UNAVAILABLE';
   if (code.startsWith('image-') || code.startsWith('inbound-file-')
-    || code === 'attachment-error') return 'INPUT_INVALID';
+    || code === 'attachment-error'
+    || code.endsWith('attachment-invalid')) return 'INPUT_INVALID';
 
   const status = Number(error?.status ?? error?.httpStatus);
   if (status === 401 || status === 403
