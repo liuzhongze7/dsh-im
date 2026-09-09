@@ -16,6 +16,7 @@ export class YouduController {
   #createRuntime;
   #settingsStore;
   #deleteState;
+  #clearSessions;
   #logger;
   #runtimes = new Map();
   #errors = new Map();
@@ -29,6 +30,7 @@ export class YouduController {
     createRuntime,
     settingsStore,
     deleteState = async () => {},
+    clearSessions = async () => {},
     logger = console,
   }) {
     if (!credentials || typeof credentials.resolve !== 'function'
@@ -45,6 +47,7 @@ export class YouduController {
     this.#createRuntime = createRuntime;
     this.#settingsStore = settingsStore ?? null;
     this.#deleteState = deleteState;
+    this.#clearSessions = clearSessions;
     this.#logger = logger;
   }
 
@@ -235,11 +238,13 @@ export class YouduController {
     return this.#settingsStore ? this.#settingsStore.decorateStatus(base) : base;
   }
 
-  /** 更新机器人工作区（轻量 config-backed；当前值读写，重启保留属后续缺口）。 */
+  /** 更新机器人工作区（轻量 config-backed）：写入后清空该 bot 已绑定会话，使下条消息在新工作区新建会话。 */
   async updateWorkspace(botId, workspace) {
     this.#assertBot(botId);
     if (!this.#settingsStore) throw new TypeError('Youdu settings store is required');
-    return this.#settingsStore.setWorkspace(botId, workspace);
+    const value = await this.#settingsStore.setWorkspace(botId, workspace);
+    await this.#clearSessions(botId);
+    return value;
   }
 
   /** 更新机器人 Agent Preset。 */

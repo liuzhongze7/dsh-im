@@ -65,6 +65,49 @@ function pluginPaths(config) {
   };
 }
 
+/**
+ * 每个机器人工区感知的 Harness 代理（轻量版）：
+ * - createSession 注入该 bot 在 settingsStore 里的 workspace 与 agentPreset，
+ *   使消息会话跑在各自配置的工作区，而不是 Harness 启动时的默认工作区。
+ * - currentWorkspace / switchWorkspace 读写 settingsStore，并让切换工作区时清空
+ *   该 bot 的已绑定会话，使下一条消息在新工作区新建会话。
+ * 其余方法（listWorkspaces / listWorkspaceSessions / 转发等）原样透传到目标 Harness。
+ */
+function createYouduWorkspaceScope(harness, { botId, settingsStore, state }) {
+  if (!harness || !settingsStore) {
+    throw new TypeError('youdu workspace scope requires harness and settingsStore');
+  }
+  return new Proxy(harness, {
+    get(target, property) {
+      if (property === 'createSession') {
+        return async (options = {}) => {
+          const agentPreset = settingsStore.agentPresetFor(botId);
+          return target.createSession({
+            ...options,
+            workspace: settingsStore.workspaceFor(botId),
+            ...(agentPreset == null ? {} : { agentPreset }),
+          });
+        };
+      }
+      if (property === 'currentWorkspace') {
+        return () => settingsStore.workspaceFor(botId);
+      }
+      if (property === 'switchWorkspace') {
+        return async (workspace) => {
+          const next = await settingsStore.setWorkspace(botId, workspace);
+          if (typeof state?.clearSessions === 'function') await state.clearSessions();
+          return next;
+        };
+      }
+      // 其余方法透传到目标 Harness，但必须把 this 绑定到 target：
+      // 共享 HarnessClient 使用 # 私有字段，若以 Proxy 作为 this 调用会抛
+      // "Cannot read private member ... from an object whose class did not declare it"。
+      const value = Reflect.get(target, property, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
 export async function createProductionController(ctx, config = {}, internals = {}) {
   let log;
   try { log = typeof ctx.logger === 'function' ? ctx.logger('dsh-im:youdu') : (ctx.logger ?? console); }
@@ -116,7 +159,7 @@ export async function createProductionController(ctx, config = {}, internals = {
       return new Runtime({
         config: botConfig,
         secret,
-        harness,
+        harness: createYouduWorkspaceScope(harness, { botId, settingsStore, state }),
         state,
         replyTimeoutMs: config.replyTimeoutMs ?? 600_000,
         connectTimeoutMs: config.connectTimeoutMs ?? 20_000,
@@ -130,6 +173,10 @@ export async function createProductionController(ctx, config = {}, internals = {
           debug: (...args) => logger.debug?.(`[${botId}]`, ...args),
         },
       });
+    },
+    clearSessions: async (botId) => {
+      const state = await stateFor(botId);
+      if (typeof state.clearSessions === 'function') await state.clearSessions();
     },
     deleteState: async ({ botId }) => {
       const state = stateStores.get(botId);
