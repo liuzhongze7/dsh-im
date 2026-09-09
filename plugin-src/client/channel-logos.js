@@ -1,5 +1,5 @@
 import * as React from 'react';
-import youduLogo from './channels/youdu/youdu_logo.png';
+import youduLogo from './channels/youdu/youdu-logo.js';
 
 const h = React.createElement;
 
@@ -148,7 +148,8 @@ export function OfficeLogoGlyph({ size } = {}) {
 export function YouduLogoGlyph({ size = 32 } = {}) {
   return h('img', {
     src: youduLogo,
-    alt: '有度',
+    // 品牌图标是位图（其余渠道为内联 SVG），父节点已 aria-hidden，空 alt 避免英文界面出现中文。
+    alt: '',
     width: size,
     height: size,
     'data-im-channel-logo': 'youdu',

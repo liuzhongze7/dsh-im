@@ -1,7 +1,7 @@
 import * as React from 'react';
 
 import { h } from '../../i18n.js';
-import youduLogo from './youdu_logo.png';
+import youduLogo from './youdu-logo.js';
 import { CredentialActionIcon } from '../../credential-binding.js';
 import {
   BotStatusMeta,
@@ -93,7 +93,9 @@ function accessSceneSummary(sceneValue, sceneLabel) {
 
 function accessSummaryText(policy) {
   if (!policy) return '未配置（默认：开放模式，命令默认关闭）';
-  return `${accessSceneSummary(policy.direct, '私聊')} | ${accessSceneSummary(policy.group, '群聊')}`;
+  const direct = accessSceneSummary(policy.direct, '私聊');
+  const group = accessSceneSummary(policy.group, '群聊');
+  return `${direct} | ${group}`;
 }
 
 function AccessPolicyInlineEditor({ account, rpcCall, onSaved, disabled }) {
@@ -272,7 +274,8 @@ function GroupAccessEditor({ account, rpcCall, onSaved, disabled }) {
                     h('code', { title: row.chatId }, row.chatId),
                     h('span', { className: 'ydt-groupAccessMeta' },
                       row.observed
-                        ? `${row.messages} 条消息${row.lastSeenAt ? ` · 最近 ${checkedTime(row.lastSeenAt)}` : ''}`
+                        ? `${row.messages} 条消息`
+                          + (row.lastSeenAt ? ' · 最近 ' + checkedTime(row.lastSeenAt) : '')
                         : '手动添加')),
                   h('select', {
                     className: 'ydt-groupAccessMode',

@@ -182,7 +182,7 @@ test('removing the first account preserves collapse styles and toggling for rema
   }
 });
 
-test('IM settings renders ten IM channels plus the AI Office connector', async () => {
+test('IM settings renders eleven IM channels plus the AI Office connector', async () => {
   const { default: packageMetadata } = await import('../package.json', {
     with: { type: 'json' },
   });
@@ -210,7 +210,10 @@ test('IM settings renders ten IM channels plus the AI Office connector', async (
     `<div class="dim-brandHeading"><strong class="dim-brandName">DSH-IM<\\/strong><span class="dim-brandVersion">v${packageVersion.replaceAll('.', '\\.')}<\\/span><\\/div>`,
   ));
   assert.doesNotMatch(markup, /dim-versionTooltip|当前版本/);
-  assert.doesNotMatch(markup, /dim-brandLogo|<img/);
+  assert.doesNotMatch(markup, /dim-brandLogo/);
+  // 有度渠道使用官方位图品牌图标（其余渠道均为内联 SVG），因此这里只约束数量与来源。
+  assert.equal((markup.match(/<img/g) ?? []).length, 1);
+  assert.match(markup, /<img[^>]+src="data:image\/png;base64,[^"]+"[^>]*data-im-channel-logo="youdu"/);
   assert.match(markup, /href="https:\/\/github\.com\/xmanrui\/dsh-im"/);
   assert.match(markup, /target="_blank"/);
   assert.match(markup, /rel="noopener noreferrer"/);
@@ -261,6 +264,7 @@ test('IM settings renders ten IM channels plus the AI Office connector', async (
   assert.match(markup, />Telegram</);
   assert.match(markup, />Discord</);
   assert.match(markup, />WhatsApp</);
+  assert.match(markup, />有度</);
   assert.match(markup, />AI Office<\/strong><small class="dim-channelNote">（实验功能）<\/small>/);
   assert.match(markup, /dim-logoWeixin/);
   assert.match(markup, /dim-logoFeishu/);
@@ -271,9 +275,10 @@ test('IM settings renders ten IM channels plus the AI Office connector', async (
   assert.match(markup, /dim-logoTelegram/);
   assert.match(markup, /dim-logoDiscord/);
   assert.match(markup, /dim-logoWhatsapp/);
+  assert.match(markup, /dim-logoYoudu/);
   assert.match(markup, /dim-logoOffice/);
   assert.match(styles, /\.dim-logoFeishu svg \{ width: 28px; height: 28px; \}/);
-  assert.equal((markup.match(/role="tab"/g) ?? []).length, 11);
+  assert.equal((markup.match(/role="tab"/g) ?? []).length, 12);
   assert.equal((markup.match(/aria-selected="true"/g) ?? []).length, 1);
   assert.doesNotMatch(markup, /role="switch"|type="checkbox"/);
   assert.doesNotMatch(markup, /dim-chevron|扫码绑定<\/small>|扫码接入<\/small>/);

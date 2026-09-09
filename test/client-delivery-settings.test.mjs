@@ -132,7 +132,11 @@ test('delivery settings define only the ten supported IM channel routes', () => 
     ['chatId', 'messageThreadId'],
   );
   assert.equal('office' in DELIVERY_CHANNEL_DEFINITIONS, false);
-  assert.deepEqual(Object.keys(ACCESS_CHANNEL_DEFINITIONS), Object.keys(DELIVERY_CHANNEL_DEFINITIONS));
+  // 有度渠道目前只支持会话内回复，没有投递目标设置，因此访问设置比投递设置多这一个渠道。
+  assert.deepEqual(
+    Object.keys(ACCESS_CHANNEL_DEFINITIONS).filter((channel) => channel !== 'youdu'),
+    Object.keys(DELIVERY_CHANNEL_DEFINITIONS),
+  );
   assert.equal(ACCESS_CHANNEL_DEFINITIONS.weixin.groupSupported, false);
 });
 
