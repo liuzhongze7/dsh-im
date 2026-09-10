@@ -4,6 +4,7 @@ import { normalizeGroupAccess } from '../../../../src/channels/youdu/group-acces
 import { SET_WORKSPACE_ENDPOINT, validWorkspacePayload } from '../shared/workspace-rpc.mjs';
 import { SET_AGENT_PRESET_ENDPOINT, validAgentPresetPayload } from '../shared/agent-preset-rpc.mjs';
 import { SET_CONTEXT_ENHANCEMENT_ENDPOINT, validContextEnhancementPayload } from '../shared/context-enhancement-rpc.mjs';
+import { SET_GROUP_HISTORY_ENDPOINT, validGroupHistoryPayload } from '../shared/group-history-rpc.mjs';
 import { SET_ACCESS_POLICY_ENDPOINT, validAccessPolicyPayload } from '../shared/access-policy-rpc.mjs';
 
 export const YOUDU_RPC_CHANNEL = '/youdu';
@@ -16,6 +17,7 @@ export const YOUDU_ENDPOINTS = Object.freeze({
   setWorkspace: SET_WORKSPACE_ENDPOINT,
   setAgentPreset: SET_AGENT_PRESET_ENDPOINT,
   setContextEnhancement: SET_CONTEXT_ENHANCEMENT_ENDPOINT,
+  setGroupHistory: SET_GROUP_HISTORY_ENDPOINT,
   setAccessPolicy: SET_ACCESS_POLICY_ENDPOINT,
   setGroupAccess: 'bot.group-access.set',
 });
@@ -120,6 +122,13 @@ export function createYouduRpcHandler(controller, options = {}) {
       } else if (endpoint === YOUDU_ENDPOINTS.setContextEnhancement) {
         if (!validContextEnhancementPayload(payload)) throw new TypeError('请提交有效的上下文增强设置。');
         value = await controller.updateContextEnhancement(
+          payload.botId,
+          payload.config,
+          (status) => publicStatus(status, cachedEncode),
+        );
+      } else if (endpoint === YOUDU_ENDPOINTS.setGroupHistory) {
+        if (!validGroupHistoryPayload(payload)) throw new TypeError('请提交有效的群聊上下文设置。');
+        value = await controller.updateGroupHistory(
           payload.botId,
           payload.config,
           (status) => publicStatus(status, cachedEncode),

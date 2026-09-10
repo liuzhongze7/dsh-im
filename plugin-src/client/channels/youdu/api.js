@@ -2,6 +2,7 @@ import {
   normalizeGroupAccess,
   resolveGroupAccessRule,
 } from '../../../../src/channels/youdu/group-access.mjs';
+import { normalizeGroupHistoryConfig } from '../../../../src/channels/shared/group-history.mjs';
 
 export const YOUDU_RPC_CHANNEL = '/youdu';
 
@@ -14,6 +15,7 @@ export const YOUDU_ENDPOINTS = Object.freeze({
   setWorkspace: 'bot.workspace.set',
   setAgentPreset: 'bot.preset.set',
   setContextEnhancement: 'bot.context-enhancement.set',
+  setGroupHistory: 'bot.group-history.set',
   setAccessPolicy: 'bot.access-policy.set',
   setGroupAccess: 'bot.group-access.set',
 });
@@ -80,6 +82,7 @@ function normalizeBot(value) {
     workspace: typeof value.workspace === 'string' ? value.workspace : undefined,
     agentPreset: value.agentPreset ?? undefined,
     contextEnhancement: isRecord(value.contextEnhancement) ? value.contextEnhancement : undefined,
+    groupHistory: normalizeGroupHistoryConfig(value.groupHistory),
     accessPolicy: isRecord(value.accessPolicy) ? value.accessPolicy : undefined,
     groupAccess: normalizeGroupAccess(value.groupAccess),
     knownGroups: Array.isArray(value.knownGroups)

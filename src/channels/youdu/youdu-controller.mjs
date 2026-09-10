@@ -298,6 +298,16 @@ export class YouduController {
       : result;
   }
 
+  /** 更新机器人群聊上下文缓存设置（开关 + 条数，下一条消息即生效）。 */
+  async updateGroupHistory(botId, config, projectStatus) {
+    this.#assertBot(botId);
+    if (!this.#settingsStore) throw new TypeError('Youdu settings store is required');
+    const result = await this.#settingsStore.setGroupHistory(botId, config);
+    return typeof projectStatus === 'function'
+      ? projectStatus(this.status())
+      : result;
+  }
+
   /** 更新机器人访问策略。 */
   async updateAccessPolicy(botId, policy, projectStatus) {
     this.#assertBot(botId);
