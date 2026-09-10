@@ -1,3 +1,4 @@
+import { registerManagementRpc } from '../../../management-rpc.mjs';
 import { resolveRpcAuthority } from '../../rpc-authority.mjs';
 import { normalizeGroupAccess } from '../../../../src/channels/youdu/group-access.mjs';
 import { SET_WORKSPACE_ENDPOINT, validWorkspacePayload } from '../shared/workspace-rpc.mjs';
@@ -158,10 +159,10 @@ export function createYouduRpcHandler(controller, options = {}) {
 }
 
 export function installYouduRpc(ctx, controller, options, authority) {
-  if (!ctx?.connection?.rpc || typeof ctx.connection.rpc.handle !== 'function') {
-    throw new TypeError('DSH Host Connection RPC is required');
-  }
-  return ctx.connection.rpc.handle(
+  // 客户端固定请求 /api/dsh-im/youdu（见 management-rpc.mjs 的 callManagementRpc），
+  // 因此必须和其它通道一样注册到共享 /api 载波上的精确 Fetch 路由；
+  // 旧写法 ctx.connection.rpc.handle 只会在站点根路径注册前缀路由，客户端必然 404。
+  return registerManagementRpc(ctx,
     YOUDU_RPC_CHANNEL,
     createYouduRpcHandler(controller, options),
     { authority: resolveRpcAuthority(authority) },
