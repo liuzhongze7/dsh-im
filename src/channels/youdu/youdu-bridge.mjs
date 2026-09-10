@@ -71,7 +71,19 @@ import {
   groupHistoryActive,
   normalizeGroupHistoryConfig,
 } from '../shared/group-history.mjs';
-import { DEFAULT_GROUP_CONTEXT_RECENT_LIMIT } from '../shared/group-context-files.mjs';
+import {
+  DEFAULT_GROUP_CONTEXT_RECENT_LIMIT,
+  DEFAULT_GROUP_CONTEXT_RETENTION_HOURS,
+} from '../shared/group-context-files.mjs';
+import {
+  groupContextClearedText,
+  groupContextDirectText,
+  groupContextResetText,
+  groupContextStatusText,
+  groupContextUsageText,
+  isGroupContextCommand,
+  parseGroupContextCommand,
+} from '../shared/context-command.mjs';
 import { evaluateGroupAccess } from './group-access.mjs';
 import { t } from '../shared/i18n.mjs';
 import { prepareMessageBody } from './youdu-protocol/index.js';
@@ -646,8 +658,42 @@ export class YouduBridge {
     }
   }
 
-  /** 当前群聊待注入的上下文快照；不在群聊、未开启、无历史且无附件时返回 null。 */
-  async #pendingGroupHistory(message, key) {
+  /**
+   * `/context`：查看或清空本群的上下文缓存。只清内存里待带入的消息，
+   * 已落盘的群附件保持不动（按保留期自然过期）。
+   */
+  async #runGroupContextCommand(command, message, key) {
+    const parsed = parseGroupContextCommand(command);
+    if (!parsed || parsed.action === 'usage') return groupContextUsageText();
+    if (message.kind !== 'group') return groupContextDirectText();
+    if (parsed.action === 'clear') {
+      return groupContextClearedText({ cleared: this.#groupHistoryBuffer.clear(key) });
+    }
+    const settings = this.#groupHistorySettings();
+    const retention = this.#groupContextFiles?.retentionHours;
+    return groupContextStatusText({
+      active: groupHistoryActive(settings),
+      limit: settings.limit,
+      pending: this.#groupHistoryBuffer.size(key),
+      files: await this.#groupContextFileCount(message.chatId),
+      retentionHours: Number.isFinite(retention) ? retention : DEFAULT_GROUP_CONTEXT_RETENTION_HOURS,
+    });
+  }
+
+  /** 本轮清单里会出现的附件数（磁盘索引，读不到时按 0 显示）。 */
+  async #groupContextFileCount(chatId) {
+    const provider = this.#groupContextFiles;
+    if (!provider || typeof provider.list !== 'function') return 0;
+    try {
+      const listing = await provider.list({ chatId, limit: this.#groupContextRecentLimit });
+      return (Array.isArray(listing?.messages) ? listing.messages : [])
+        .reduce((total, entry) => total + (Array.isArray(entry?.files) ? entry.files.length : 0), 0);
+    } catch {
+      return 0;
+    }
+  }
+
+  /** 当前群聊待注入的上下文快照；不在群聊、未开启、无历史且无附件时返回 null。 */  async #pendingGroupHistory(message, key) {
     if (message.kind !== 'group') return null;
     const settings = this.#groupHistorySettings();
     if (!groupHistoryActive(settings)) return null;
@@ -719,10 +765,11 @@ export class YouduBridge {
   /** 访问控制：按群规则 → 共享 accessPolicy → owner 回退。 */
   #evaluateAccess(message) {
     const text = message.text ?? '';
-    const isCommand = isSharedLocalCommand(text, {
-      hasImages: hasMediaImages(message.media),
-      hasFiles: hasMediaFiles(message.media),
-    });
+    const hasImages = hasMediaImages(message.media);
+    const hasFiles = hasMediaFiles(message.media);
+    // `/context` 是本渠道本地命令，纯文字时按命令走权限判定，不带图片/文件。
+    const isCommand = isSharedLocalCommand(text, { hasImages, hasFiles })
+      || (!hasImages && !hasFiles && isGroupContextCommand(text));
     if (message.kind === 'group') {
       const group = this.#evaluateGroupRule(message.chatId, [message.senderId, message.senderAccount].filter(Boolean));
       if (group?.matched) {
@@ -949,11 +996,24 @@ export class YouduBridge {
     let batchSettled = batchSubmission === null;
 
     try {
-      if (message.kind === 'direct' && !mediaImages && !mediaFiles) {
+      if (!mediaImages && !mediaFiles) {
         const command = (text ?? '').trim().toLowerCase();
+        // /context：查看/清空本群上下文缓存，群聊与私聊都本地消费，不落到模型。
+        if (isGroupContextCommand(command)) {
+          const reply = await this.#runGroupContextCommand(command, message, key);
+          await this.#bot.sendReply(target, reply);
+          await markMessageSeen();
+          return;
+        }
         if (command === '/new') {
           await this.#state.clearSession(key);
-          await this.#bot.sendReply(target, t('已开启新会话。请发送你的问题。'));
+          if (message.kind === 'group') {
+            // 群里 /new 同时把待带入的群消息清掉，避免旧闲聊跟着进新会话。
+            const cleared = this.#groupHistoryBuffer.clear(key);
+            await this.#bot.sendReply(target, groupContextResetText({ cleared }));
+          } else {
+            await this.#bot.sendReply(target, t('已开启新会话。请发送你的问题。'));
+          }
           await markMessageSeen();
           return;
         }
@@ -1465,8 +1525,10 @@ function helpText() {
     t('有度机器人已连接 DeepSeek Harness。'),
     '',
     t('直接发送文字、图片或文件即可继续当前会话。'),
-    t('/new  开启一个全新会话'),
+    t('/new  开启一个全新会话（群聊里同时清空待带入的上下文）'),
     t('/compact  压缩当前会话的较早上下文'),
+    t('/context  查看本群上下文缓存状态'),
+    t('/context clear  清空本群待带入的消息'),
     t('/history [数量]  查看最近历史消息（默认 3 条，最多 5 条）'),
     t('/workspace 工作区序号或绝对路径  切换工作区'),
     t('/workspacelist  列出工作区绝对路径'),

@@ -292,7 +292,8 @@ export function formatGroupHistoryFilesBlock(entries) {
  * - `snapshot(key, { limit })`：返回最近 N 条的快照（数组副本），注入前调用。
  * - `consume(key, entries)`：删除这份快照已注入的条目；注入期间新到的消息保留到下一轮。
  * - `attachFiles(key, messageId, files)`：附件下载完成后补上清单（条目先入库、文件后到位）。
- * - `clear(key)` / `size(key)`：显式清空与观测用。
+ * - `clear(key)`：清空一个会话并返回清掉的条数（`/context clear`、群里 `/new` 用）。
+ * - `size(key)`：观测用。
  */
 export function createGroupHistory({ maxKeys = MAX_GROUP_HISTORY_KEYS } = {}) {
   const buckets = new Map();
@@ -384,7 +385,10 @@ export function createGroupHistory({ maxKeys = MAX_GROUP_HISTORY_KEYS } = {}) {
     attachFiles,
     clear(key) {
       const id = typeof key === 'string' ? key.trim() : '';
-      if (id) buckets.delete(id);
+      if (!id) return buckets.size;
+      const removed = buckets.get(id)?.length ?? 0;
+      buckets.delete(id);
+      return removed;
     },
     size(key) {
       const id = typeof key === 'string' ? key.trim() : '';

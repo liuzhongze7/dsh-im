@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { YouduBridge } from '../../../src/channels/youdu/youdu-bridge.mjs';
+import { createAccessPolicy, createAccessPolicyScope } from '../../../src/channels/shared/access-policy.mjs';
 
 function stateFixture(initialSessions = []) {
   const sessions = new Map(initialSessions);
@@ -495,6 +496,152 @@ function stagingFixture({ fail = false, delayMs = 0 } = {}) {
     },
   };
 }
+
+/** 命令类测试夹具：记录回复、询问、会话绑定变更，并提供一个可落盘记录的索引。 */
+function commandFixture() {
+  const sent = [];
+  const contents = [];
+  const cleared = [];
+  const listCalls = [];
+  const stagedMessages = [];
+  const staging = {
+    listCalls,
+    async stage({ chatId, messageId, files, sender, timestamp }) {
+      const message = {
+        messageId,
+        sender,
+        timestamp,
+        files: files.map((file, index) => ({
+          name: file.name,
+          path: `.dsh-im/group-context/${chatId}/${messageId}/0${index + 1}-${file.name}`,
+        })),
+      };
+      stagedMessages.push(message);
+      return { files: message.files };
+    },
+    async list({ chatId, limit }) {
+      listCalls.push({ chatId, limit });
+      return {
+        directory: '.dsh-im/group-context/g-1',
+        messages: stagedMessages.slice(-(Number.isSafeInteger(limit) && limit > 0 ? limit : 10)),
+      };
+    },
+  };
+  const { state, sessions } = stateFixture([['group:g-1', 'session-old']]);
+  const bridge = new YouduBridge({
+    bot: makeBot(sent),
+    harness: baseHarness({ contents }),
+    state: {
+      ...state,
+      clearSession: async (key) => { cleared.push(key); sessions.delete(key); },
+    },
+    ownerUserId: '*',
+    botId: 'bot-1',
+    groupResponseMode: 'mention',
+    groupHistory: { enabled: true, limit: 50 },
+    groupContextFiles: staging,
+  });
+  return { bridge, sent, contents, cleared, sessions, staging };
+}
+
+test('group context commands answer locally instead of reaching the model', async () => {
+  const { bridge, sent, contents, staging } = commandFixture();
+  // 先攒两条待带入的群消息与一个已落盘附件（staging 不落盘，只提供索引）。
+  await bridge.accept(groupFrame('h-1', '下午三点评审', { userId: 'm-1', name: '张三' }));
+  await bridge.accept(mediaGroupFrame('m-image', {
+    image: { mediaId: 'media-img', name: 'photo.png' },
+    raw: { decoded: { msgType: 0, atUser: [] } },
+  }));
+
+  await bridge.accept(groupFrame('c-1', '/context', { atUser: ['bot-1'] }));
+  const status = sent.at(-1).text;
+  assert.match(status, /本群上下文缓存：开启 · 最近 50 条/u);
+  assert.match(status, /待带入的消息：2 条/u);
+  assert.match(status, /本轮可带入的群附件：1 个/u);
+  assert.deepEqual(contents, [], 'the command must not prompt the model');
+
+  await bridge.accept(groupFrame('c-2', '/context 乱写', { atUser: ['bot-1'] }));
+  assert.match(sent.at(-1).text, /用法：\/context 或 \/context clear/u);
+
+  await bridge.accept(groupFrame('c-3', '/context clear', { atUser: ['bot-1'] }));
+  assert.match(sent.at(-1).text, /已清空本群待带入的上下文（2 条消息）。/u);
+  assert.match(sent.at(-1).text, /已下载的群附件仍保留，按保留期自动清理。/u);
+  assert.deepEqual(contents, []);
+
+  // 清空后：文本上下文没了，但磁盘上的附件仍在清单里（按你的选择，附件交给保留期）。
+  await bridge.accept(groupFrame('c-4', '再问一次', { atUser: ['bot-1'] }));
+  assert.equal(contents[0].includes('<dsh_im_group_history'), false, 'held messages were cleared');
+  assert.match(contents[0], /01-photo\.png/u, 'staged attachments stay until retention');
+  assert.equal(staging.listCalls.length > 0, true, 'the manifest comes from the disk index');
+
+  // 私聊里给说明，不落到模型。
+  await bridge.accept(frame('c-5', '/context', { from: { userId: 'owner-1', name: 'Owner' } }));
+  assert.match(sent.at(-1).text, /群聊上下文缓存只在群聊里生效。/u);
+  assert.equal(contents.length, 1);
+});
+
+test('/new in a group starts a fresh session and clears the held context', async () => {
+  const { bridge, sent, contents, cleared, sessions } = commandFixture();
+  await bridge.accept(groupFrame('h-1', '下午三点评审', { userId: 'm-1', name: '张三' }));
+  await bridge.accept(groupFrame('h-2', '会议室 A', { userId: 'm-2', name: '李四' }));
+  assert.equal(sessions.get('group:g-1'), 'session-old');
+
+  await bridge.accept(groupFrame('n-1', '/new', { atUser: ['bot-1'] }));
+  assert.deepEqual(cleared.map((key) => key), ['group:g-1']);
+  assert.equal(sessions.has('group:g-1'), false, 'the binding is released');
+  assert.match(sent.at(-1).text, /已开启新会话，并清空本群待带入的上下文（2 条消息）。/u);
+
+  await bridge.accept(groupFrame('a-1', '开始吧', { atUser: ['bot-1'] }));
+  assert.equal(contents.length, 1);
+  assert.equal(contents[0], '开始吧', 'neither the old session nor the held context follows');
+  assert.equal(sessions.get('group:g-1'), 'session-id', 'the next mention created a new session');
+});
+
+test('/help and /status also answer in group chats', async () => {
+  const { bridge, sent, contents } = commandFixture();
+  await bridge.accept(groupFrame('h-1', '/help', { atUser: ['bot-1'] }));
+  assert.match(sent.at(-1).text, /\/context  查看本群上下文缓存状态/u);
+  assert.match(sent.at(-1).text, /\/new  开启一个全新会话（群聊里同时清空待带入的上下文）/u);
+  await bridge.accept(groupFrame('h-2', '/status', { atUser: ['bot-1'] }));
+  assert.match(sent.at(-1).text, /连接正常/u);
+  assert.deepEqual(contents, []);
+});
+
+test('group context commands still obey the channel access policy', async () => {
+  const sent = [];
+  const contents = [];
+  const bridge = new YouduBridge({
+    bot: makeBot(sent),
+    harness: baseHarness({ contents }),
+    state: stateFixture().state,
+    ownerUserId: 'owner-1',
+    botId: 'bot-1',
+    groupResponseMode: 'mention',
+    groupHistory: { enabled: true, limit: 50 },
+    accessPolicy: {
+      getSettings: () => createAccessPolicy({
+        direct: createAccessPolicyScope({
+          mode: 'open',
+          open: { defaultCanExecuteCommands: false, commandPermissionOverrides: [] },
+          allowlist: { users: [] },
+        }),
+        group: createAccessPolicyScope({
+          mode: 'open',
+          open: { defaultCanExecuteCommands: false, commandPermissionOverrides: [] },
+          allowlist: { users: [] },
+        }),
+      }),
+      isPrivileged: () => false,
+    },
+  });
+  await bridge.accept(groupFrame('h-1', '闲聊', { userId: 'm-9', name: '路人' }));
+  await bridge.accept(groupFrame('c-1', '/context clear', { userId: 'm-9', name: '路人', atUser: ['bot-1'] }));
+  assert.equal(sent.some(({ text }) => /没有执行命令的权限/u.test(text)), true);
+  assert.deepEqual(contents, [], 'a denied command never reaches the model');
+
+  await bridge.accept(groupFrame('a-1', '机器人帮个忙', { userId: 'owner-1', name: 'Owner', atUser: ['bot-1'] }));
+  assert.equal(contents.length, 1, 'ordinary group mentions still work for the owner');
+});
 
 test('group attachments are downloaded through the media interface and listed for the model', async () => {
   const contents = [];
