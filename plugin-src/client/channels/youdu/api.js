@@ -84,11 +84,15 @@ function normalizeBot(value) {
     groupAccess: normalizeGroupAccess(value.groupAccess),
     knownGroups: Array.isArray(value.knownGroups)
       ? value.knownGroups
-        .map((group) => ({
-          chatId: text(group?.chatId, '', 256),
-          lastSeenAt: timestamp(group?.lastSeenAt),
-          messages: Number.isSafeInteger(group?.messages) && group.messages > 0 ? group.messages : 0,
-        }))
+        .map((group) => {
+          const name = text(group?.name, '', 128);
+          return {
+            chatId: text(group?.chatId, '', 256),
+            ...(name ? { name } : {}),
+            lastSeenAt: timestamp(group?.lastSeenAt),
+            messages: Number.isSafeInteger(group?.messages) && group.messages > 0 ? group.messages : 0,
+          };
+        })
         .filter((group) => group.chatId)
       : [],
   };

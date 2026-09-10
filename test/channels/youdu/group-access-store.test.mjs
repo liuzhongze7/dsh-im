@@ -86,6 +86,35 @@ test('state store records observed groups with a persisted recency order', async
   });
 });
 
+test('group records carry the session title as the group name', async () => {
+  await withDirectory(async (dir) => {
+    const path = join(dir, 'state.json');
+    const store = await new YouduStateStore(path).load();
+    // 会话事件先到：标题按 sessionId 存下来，之后消息命中同一个群时补上群名。
+    await store.recordSessionTitle('g-1', '机器人小队');
+    await store.recordGroup('g-1', { now: () => new Date('2026-09-09T10:00:00.000Z') });
+    // 消息帧自带 chatName 时直接写入。
+    await store.recordGroup('g-2', { name: '测试群', now: () => new Date('2026-09-09T11:00:00.000Z') });
+
+    const groups = store.groupsSnapshot();
+    assert.equal(groups.find((group) => group.chatId === 'g-1').name, '机器人小队');
+    assert.equal(groups.find((group) => group.chatId === 'g-2').name, '测试群');
+
+    // 标题晚于群记录到达时，也会回填到已观察到的群。
+    await store.recordSessionTitle('g-1', '机器人小队（改名）');
+    assert.equal(store.groupsSnapshot().find((group) => group.chatId === 'g-1').name, '机器人小队（改名）');
+
+    const reloaded = await new YouduStateStore(path).load();
+    assert.equal(reloaded.groupsSnapshot().find((group) => group.chatId === 'g-1').name, '机器人小队（改名）');
+    assert.equal(reloaded.groupsSnapshot().find((group) => group.chatId === 'g-2').name, '测试群');
+    // 空标题被忽略；重复写入同名标题是无副作用的空操作。
+    assert.equal(await reloaded.recordSessionTitle('g-2', ''), false);
+    assert.equal(await reloaded.recordSessionTitle('g-2', '测试群'), true);
+    assert.equal(await reloaded.recordSessionTitle('g-2', '测试群'), false);
+    assert.equal(reloaded.groupsSnapshot().find((group) => group.chatId === 'g-2').name, '测试群');
+  });
+});
+
 function fakeCredentials() {
   const values = new Map();
   return {
@@ -102,7 +131,7 @@ test('controller saves per-group access and reports observed groups', async () =
       defaultWorkspace: dir,
     }).load();
     const state = await new YouduStateStore(join(dir, 'state.json')).load();
-    await state.recordGroup('g-observed', { now: () => new Date('2026-09-09T09:00:00.000Z') });
+    await state.recordGroup('g-observed', { name: '机器人小队', now: () => new Date('2026-09-09T09:00:00.000Z') });
     const controller = new YouduController({
       credentials: fakeCredentials(),
       configStore,
@@ -121,6 +150,7 @@ test('controller saves per-group access and reports observed groups', async () =
     assert.equal(controller.status().bots[0].groupAccess, null);
     assert.deepEqual(controller.status().bots[0].knownGroups, [{
       chatId: 'g-observed',
+      name: '机器人小队',
       lastSeenAt: '2026-09-09T09:00:00.000Z',
       messages: 1,
     }]);

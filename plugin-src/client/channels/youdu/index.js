@@ -151,6 +151,7 @@ function groupAccessRows(account) {
     const rule = resolveGroupAccessRule(document, chatId);
     rows.push({
       chatId,
+      name: typeof group?.name === 'string' ? group.name.trim() : '',
       observed: true,
       lastSeenAt: typeof group.lastSeenAt === 'number' ? group.lastSeenAt : null,
       messages: Number.isSafeInteger(group.messages) ? group.messages : 0,
@@ -163,6 +164,7 @@ function groupAccessRows(account) {
     seen.add(chatId);
     rows.push({
       chatId,
+      name: '',
       observed: false,
       lastSeenAt: null,
       messages: 0,
@@ -209,7 +211,7 @@ function GroupAccessEditor({ account, rpcCall, onSaved, disabled }) {
     setRows((current) => (current.some((row) => row.chatId === chatId)
       ? current
       : [...current, {
-        chatId, observed: false, lastSeenAt: null, messages: 0, mode: 'allowlist', users: '',
+        chatId, name: '', observed: false, lastSeenAt: null, messages: 0, mode: 'allowlist', users: '',
       }]));
     setManual('');
     setFeedback(null);
@@ -264,13 +266,16 @@ function GroupAccessEditor({ account, rpcCall, onSaved, disabled }) {
       ? h('form', { className: 'ydt-groupAccess', onSubmit: (event) => void save(event) },
           h('p', { className: 'ydt-groupAccessHint' },
             '为具体群指定谁能与机器人对话。未单独配置的群沿用上面的「群聊」访问设置；'
-            + '「仅名单内用户」可填有度用户 ID（数字）或账号名（如 lewis.liu），用逗号分隔。'),
+            + '「仅名单内用户」可填有度用户 ID（数字）或账号名（如 zhangsan），用逗号分隔。'),
           rows.length === 0
             ? h('p', { className: 'ydt-groupAccessHint' },
                 '机器人还没有收到过群消息，暂时无法列出群；可以在下面手动填群 ID。')
             : h('ul', { className: 'ydt-groupAccessList', role: 'list' },
                 rows.map((row) => h('li', { key: row.chatId, className: 'ydt-groupAccessRow' },
                   h('div', { className: 'ydt-groupAccessId' },
+                    row.name
+                      ? h('span', { className: 'ydt-groupAccessName' }, row.name)
+                      : null,
                     h('code', { title: row.chatId }, row.chatId),
                     h('span', { className: 'ydt-groupAccessMeta' },
                       row.observed

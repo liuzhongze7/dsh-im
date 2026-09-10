@@ -206,10 +206,11 @@ export async function createProductionController(ctx, config = {}, internals = {
         contextEnhancement: createYouduContextEnhancement(settingsStore, botId),
         accessPolicy: createYouduAccessPolicy(settingsStore, botId, botConfig, config.groupResponseMode ?? 'mention'),
         groupAccess: createYouduGroupAccess(settingsStore, botId),
-        onGroupSeen: (chatId) => {
-          // 观察到的群写进该 bot 的状态文件，供设置页按群配置时选择。
+        onGroupSeen: (chatId, info = {}) => {
+          // 观察到的群写进该 bot 的状态文件，供设置页按群配置时选择；
+          // 群名来自会话事件（session title）或消息帧里带的 chatName。
           try {
-            const task = state.recordGroup?.(chatId);
+            const task = state.recordGroup?.(chatId, { name: info?.name ?? undefined });
             if (task && typeof task.catch === 'function') task.catch(() => undefined);
           } catch {
             // 群记录失败不影响消息处理。

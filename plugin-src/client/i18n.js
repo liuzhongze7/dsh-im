@@ -968,7 +968,7 @@ const EN = Object.freeze({
   // 有度（Youdu）渠道
   '有度': 'Youdu',
   '有度账号或用户 ID': 'Youdu account or user ID',
-  '填有度账号名（如 lewis.liu）或数字用户 ID': 'Enter the Youdu account name (e.g. lewis.liu) or numeric user ID',
+  '填有度账号名（如 zhangsan）或数字用户 ID': 'Enter the Youdu account name (e.g. zhangsan) or numeric user ID',
   '群成员账号或用户 ID': 'Group member account or user ID',
   '填群成员账号名或数字用户 ID': 'Enter the member account name or numeric user ID',
   '有度服务返回了无法识别的响应': 'The Youdu service returned an unrecognized response',
@@ -1002,7 +1002,7 @@ const EN = Object.freeze({
   '按群访问设置保存失败，请稍后重试。': 'Could not save the per-group access settings. Try again later.',
   '按群访问': 'Per-group access',
   '为具体群指定谁能与机器人对话。未单独配置的群沿用上面的「群聊」访问设置；': 'Choose who may talk to the bot in each group. Groups without their own rule follow the group access settings above;',
-  '「仅名单内用户」可填有度用户 ID（数字）或账号名（如 lewis.liu），用逗号分隔。': 'Allowlisted users can be Youdu user IDs (numeric) or account names (e.g. lewis.liu), separated by commas.',
+  '「仅名单内用户」可填有度用户 ID（数字）或账号名（如 zhangsan），用逗号分隔。': 'Allowlisted users can be Youdu user IDs (numeric) or account names (e.g. zhangsan), separated by commas.',
   '机器人还没有收到过群消息，暂时无法列出群；可以在下面手动填群 ID。': 'The bot has not received any group message yet, so no groups can be listed; add a group ID manually below.',
   '${row.messages} 条消息': '${row.messages} messages',
   ' · 最近 ': ' · last seen ',

@@ -181,8 +181,69 @@ test('commands from an allowlisted group still need the shared command permissio
 test('observed groups are reported through onGroupSeen', async () => {
   const asks = [];
   const observed = [];
-  const bridge = bridgeFor({ asks, onGroupSeen: (chatId) => observed.push(chatId) });
+  const bridge = bridgeFor({ asks, onGroupSeen: (chatId, info) => observed.push({ chatId, info }) });
   await bridge.accept(groupFrame('gg-1', { chatId: 'g-observed' }));
   await bridge.accept(groupFrame('gg-2', { chatId: 'g-observed' }));
-  assert.deepEqual(observed, ['g-observed', 'g-observed']);
+  assert.deepEqual(observed, [
+    { chatId: 'g-observed', info: { name: null } },
+    { chatId: 'g-observed', info: { name: null } },
+  ]);
+});
+
+test('a message frame carrying chatName names the group', async () => {
+  const asks = [];
+  const observed = [];
+  const bridge = bridgeFor({ asks, onGroupSeen: (chatId, info) => observed.push({ chatId, ...info }) });
+  const frame = groupFrame('gh-1', { chatId: 'g-named' });
+  frame.body.chatName = '机器人小队';
+  await bridge.accept(frame);
+  assert.deepEqual(observed, [{ chatId: 'g-named', name: '机器人小队' }]);
+});
+
+test('session events record the group name without touching message handling', async () => {
+  const asks = [];
+  const titles = [];
+  const observed = [];
+  const bridge = bridgeFor({
+    asks,
+    onGroupSeen: (chatId) => observed.push(chatId),
+    state: {
+      hasSeen: () => true,
+      recordSessionTitle: async (sessionId, title) => { titles.push({ sessionId, title }); return true; },
+    },
+  });
+
+  await bridge.accept({
+    cmd: 'event_callback',
+    headers: { reqId: 'ev-1' },
+    body: {
+      eventType: 'session_update',
+      sessionId: 'g-1',
+      data: { title: '机器人小队', actionType: 'dq_session_event' },
+    },
+  });
+  await bridge.accept({
+    cmd: 'event_callback',
+    headers: { reqId: 'ev-2' },
+    body: {
+      eventType: 'session_create',
+      sessionId: 'g-2',
+      data: { type: 'group' },
+      raw: { event: { create: { sessionId: 'g-2', title: '测试群' } } },
+    },
+  });
+  // 没有标题的事件不写入。
+  await bridge.accept({
+    cmd: 'event_callback',
+    headers: { reqId: 'ev-3' },
+    body: { eventType: 'session_update', sessionId: 'g-3', data: {} },
+  });
+
+  assert.deepEqual(titles, [
+    { sessionId: 'g-1', title: '机器人小队' },
+    { sessionId: 'g-2', title: '测试群' },
+  ]);
+  assert.deepEqual(observed, [], 'session events are not groups until a message arrives');
+  assert.equal(bridge.status.messagesReceived, 0);
+  assert.equal(asks.length, 0);
 });

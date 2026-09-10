@@ -114,6 +114,26 @@ function cleanMentions(text) {
     .trim();
 }
 
+/**
+ * 会话事件帧（session_create / session_update / session_destroy 等）。
+ * 有度的群名只在这些事件里下发，消息帧不带，因此需要单独识别。
+ */
+function isSessionEventFrame(frame) {
+  return frame?.cmd === 'event_callback';
+}
+
+/** 会话标题：群聊即群名，优先取语义化后的 data.title，再回退到原始事件的 title。 */
+function sessionEventTitle(frame) {
+  const data = frame?.body?.data ?? {};
+  const event = frame?.body?.raw?.event ?? {};
+  return clean(data.title)
+    ?? clean(data.sessionTitle)
+    ?? clean(event.create?.title)
+    ?? clean(event.update?.title)
+    ?? clean(event.destroy?.title)
+    ?? '';
+}
+
 /** 会话路由 key：私聊用 senderId，群聊用 chatId。 */
 function conversationKey(message) {
   return message.kind === 'group' ? `group:${message.chatId}` : `direct:${message.senderId}`;
@@ -240,6 +260,10 @@ export class YouduBridge {
   /** 处理一条入站消息帧；返回 Promise（入队串行，防止并发写会话）。 */
   accept(frame) {
     if (this.#signal?.aborted) return Promise.resolve();
+    if (isSessionEventFrame(frame)) {
+      this.#recordSessionTitle(sessionEventTitle(frame), frame.body);
+      return Promise.resolve();
+    }
     const body = frame.body ?? {};
     const { text, media } = prepareMessageBody(body);
     const msgType = body?.msgType ?? undefined;
@@ -247,6 +271,7 @@ export class YouduBridge {
       messageId: youduMessageId(frame),
       chatId: clean(frame.body?.chatId),
       chatType: clean(frame.body?.chatType) ?? 'single',
+      chatName: clean(frame.body?.chatName) ?? clean(frame.body?.chatTitle) ?? '',
       senderId: clean(frame.body?.from?.userId) ?? clean(frame.body?.from?.userid) ?? '',
       senderAccount: clean(frame.body?.from?.account) ?? '',
       senderName: clean(frame.body?.from?.name) ?? '',
@@ -262,7 +287,7 @@ export class YouduBridge {
       return Promise.resolve();
     }
     const key = conversationKey(message);
-    if (message.kind === 'group') this.#recordGroup(message.chatId);
+    if (message.kind === 'group') this.#recordGroup(message.chatId, message.chatName);
     else this.#recordPerson(message);
     const addressed = message.kind !== 'group' || this.#isAddressedGroupMessage(message);
 
@@ -460,7 +485,7 @@ export class YouduBridge {
     if (this.#accessPolicy) {
       return evaluateInboundAccess(this.#accessPolicy, {
         conversationType: message.kind === 'group' ? 'group' : 'direct',
-        // 发送者身份：数字 userId + 账号名（from.account，如 lewis.liu），两者任一匹配白名单/owner 即放行。
+        // 发送者身份：数字 userId + 账号名（from.account，如 zhangsan），两者任一匹配白名单/owner 即放行。
         // 这样设置页里既可用纯数字 ID，也可用账号名（对齐 openclaw 的 senderAccount 语义）。
         senderIds,
         text,
@@ -539,18 +564,38 @@ export class YouduBridge {
   }
 
   /** 记录观察到的群（供设置页按群配置），失败不影响消息处理。 */
-  #recordGroup(chatId) {
+  #recordGroup(chatId, name = '') {
     if (!chatId) return;
     try {
       if (this.#onGroupSeen) {
-        this.#onGroupSeen(chatId);
+        this.#onGroupSeen(chatId, { name: name || null });
         return;
       }
       if (typeof this.#state.recordGroup === 'function') {
-        void Promise.resolve(this.#state.recordGroup(chatId)).catch(() => undefined);
+        void Promise.resolve(this.#state.recordGroup(chatId, { name: name || undefined }))
+          .catch(() => undefined);
       }
     } catch {
       // 群记录是辅助信息，任何失败都不应影响入站消息。
+    }
+  }
+
+  /**
+   * 记录会话标题。有度的 msg_callback 只带 chatId（群聊是会话 id），群名要靠
+   * session_create / session_update 这类会话事件里的 title；同一个会话 id 命中
+   * 已记录的群时，群列表随即能显示群名。
+   */
+  #recordSessionTitle(title, body) {
+    const sessionId = clean(body?.sessionId) ?? clean(body?.data?.sessionId) ?? '';
+    if (!sessionId || !title) return;
+    try {
+      if (typeof this.#state.recordSessionTitle === 'function') {
+        void Promise.resolve(this.#state.recordSessionTitle(sessionId, title)).catch(() => undefined);
+        return;
+      }
+      if (this.#onGroupSeen) this.#onGroupSeen(sessionId, { name: title });
+    } catch {
+      // 会话标题是辅助信息，任何失败都不应影响入站消息。
     }
   }
 

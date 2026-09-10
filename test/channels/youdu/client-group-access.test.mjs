@@ -35,7 +35,12 @@ function botFixture(overrides = {}) {
     health: { summary: '有度 WebSocket 长连接运行正常', lastCheckedAt: Date.now() },
     workspace: 'D:\\Youdu',
     groupAccess: null,
-    knownGroups: [{ chatId: '{0798E01E-CD68-42BB-813C-EB51593BB0F5}', lastSeenAt: Date.now(), messages: 12 }],
+    knownGroups: [{
+      chatId: '{0798E01E-CD68-42BB-813C-EB51593BB0F5}',
+      name: '机器人小队',
+      lastSeenAt: Date.now(),
+      messages: 12,
+    }],
     error: null,
     ...overrides,
   };
@@ -67,7 +72,8 @@ test('client normalization keeps per-group rules and observed groups', () => {
         },
       },
       knownGroups: [
-        { chatId: '{0798E01E-CD68-42BB-813C-EB51593BB0F5}', lastSeenAt: '2026-09-09T09:00:00.000Z', messages: 3, extra: 'dropped' },
+        { chatId: '{0798E01E-CD68-42BB-813C-EB51593BB0F5}', name: '机器人小队', lastSeenAt: '2026-09-09T09:00:00.000Z', messages: 3, extra: 'dropped' },
+        { chatId: '{3D3A7AA2-0D9D-4924-AF8F-6920E5D2D98E}', lastSeenAt: '2026-09-08T09:00:00.000Z', messages: 1 },
         { chatId: '', lastSeenAt: null, messages: 0 },
       ],
     })],
@@ -75,8 +81,13 @@ test('client normalization keeps per-group rules and observed groups', () => {
   assert.deepEqual(snapshot.bots[0].groupAccess.groups['*'], { mode: 'disabled', users: [] });
   assert.deepEqual(snapshot.bots[0].knownGroups, [{
     chatId: '{0798E01E-CD68-42BB-813C-EB51593BB0F5}',
+    name: '机器人小队',
     lastSeenAt: Date.parse('2026-09-09T09:00:00.000Z'),
     messages: 3,
+  }, {
+    chatId: '{3D3A7AA2-0D9D-4924-AF8F-6920E5D2D98E}',
+    lastSeenAt: Date.parse('2026-09-08T09:00:00.000Z'),
+    messages: 1,
   }]);
   assert.equal(normalizeSnapshot({ revision: 1, bots: [botFixture({ groupAccess: { version: 9 } })] }).bots[0].groupAccess, null);
 });
@@ -125,6 +136,7 @@ test('the settings page saves per-group rules through bot.group-access.set', asy
         && textOf(node).includes('按群访问'));
     const row = expanded.findAll((node) => node.type === 'li'
       && node.props?.className === 'ydt-groupAccessRow')[0];
+    assert.match(textOf(row), /机器人小队/, 'known group name must be shown');
     assert.match(textOf(row), /\{0798E01E-CD68-42BB-813C-EB51593BB0F5\}/);
     assert.match(textOf(row), /12 条消息/);
 

@@ -71,7 +71,7 @@ export const ACCESS_CHANNEL_DEFINITIONS = Object.freeze({
   }),
   youdu: Object.freeze({
     directUserLabel: '有度账号或用户 ID',
-    directPlaceholder: '填有度账号名（如 lewis.liu）或数字用户 ID',
+    directPlaceholder: '填有度账号名（如 zhangsan）或数字用户 ID',
     groupUserLabel: '群成员账号或用户 ID',
     groupPlaceholder: '填群成员账号名或数字用户 ID',
   }),

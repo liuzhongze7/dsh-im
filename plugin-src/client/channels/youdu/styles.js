@@ -64,6 +64,7 @@ const CSS = String.raw`
 }
 .ydt-groupAccessId { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .ydt-groupAccessId code { font-size: 12px; word-break: break-all; }
+.ydt-groupAccessName { font-size: 13px; font-weight: 600; word-break: break-all; }
 .ydt-groupAccessMeta { font-size: 11px; opacity: 0.65; }
 .ydt-groupAccessMode, .ydt-groupAccessUsers {
   min-width: 0; padding: 6px 8px; border-radius: 8px;
