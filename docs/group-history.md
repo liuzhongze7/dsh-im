@@ -51,6 +51,18 @@ Because the manifest comes from disk rather than memory, it still works **after 
 
 Attachment count and size are not capped beyond the ordinary message limits. The files are temporary and age out by retention: seven days by default, configurable through the plugin's `groupContextRetentionHours` (`-1` keeps them forever, `0` deletes on the next sweep). Sweeping shares the staging path: every new attachment write also sweeps expired directories at most once per interval (six hours by default, `groupContextSweepIntervalMs`), so an idle bot defers the sweep until the next write.
 
+## Commands
+
+Three commands cover the everyday case (all of them need a mention in group chats and obey the group access rules and command permissions like every other command; sending them in a direct chat only returns a short note):
+
+| Command | What it does |
+| --- | --- |
+| `/context` | Show this group's cache: switch and limit, messages held for context, attachments offered on the next mention, and the attachment retention window. |
+| `/context clear` | Drop the **messages** held for this group; downloaded attachments stay in the workspace and age out by retention. |
+| `/new` | Start a brand-new Harness Session and also drop the messages held for this group — the cleanest way out when earlier group chatter keeps derailing the model. |
+
+All three are answered locally and never sent to the model; `/new` rebinds the conversation by definition. `/help` and `/status` also answer normally in group chats.
+
 ## Boundaries and defaults
 
 | Item | Behavior |
