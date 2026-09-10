@@ -55,6 +55,8 @@ import {
   WhatsappAccountCard,
   WhatsappSettingsTab,
 } from '../plugin-src/client/channels/whatsapp/index.js';
+import { YouduSettingsTab } from '../plugin-src/client/channels/youdu/index.js';
+import { YOUDU_ENDPOINTS } from '../plugin-src/client/channels/youdu/api.js';
 import {
   en,
   IM_LOCALE_NAMESPACE,
@@ -1437,5 +1439,109 @@ test('all nine channel settings and connected cards render English copy', () => 
     assert.doesNotMatch(qqRetryMarkup, /[\p{Script=Han}]/u);
   } finally {
     setImTranslator(null);
+  }
+});
+
+function youduStatusSnapshot() {
+  return {
+    revision: 7,
+    bots: [{
+      botId: 'yd_1a7d8037a6758b93fe17c1cc',
+      sourceBotId: 'oc86aed821c86345e4',
+      ownerUserId: '*',
+      connected: true,
+      state: 'connected',
+      bot: { name: '有度机器人', wsHostMasked: 'internal•••' },
+      health: { summary: '有度 WebSocket 长连接运行正常' },
+    }],
+    totals: { configured: 1, connected: 1 },
+  };
+}
+
+test('a failed Youdu status read shows the error view with a retry instead of loading forever', async () => {
+  let failStatus = true;
+  const rpcCall = async (endpoint) => {
+    if (endpoint === YOUDU_ENDPOINTS.status) {
+      if (failStatus) throw new Error('读取有度连接状态失败');
+      return { ok: true, value: youduStatusSnapshot() };
+    }
+    throw new Error(`Unexpected endpoint: ${endpoint}`);
+  };
+
+  let renderer;
+  let previousWindow;
+  try {
+    previousWindow = globalThis.window;
+    globalThis.window = { setInterval, clearInterval };
+    await act(async () => {
+      renderer = create(React.createElement(YouduSettingsTab, { rpcCall }));
+      await flushTasks();
+    });
+
+    const pageText = () => nodeText(renderer.toJSON());
+    assert.match(pageText(), /无法读取有度机器人/);
+    assert.match(pageText(), /读取有度连接状态失败/);
+    assert.doesNotMatch(pageText(), /正在读取有度连接状态/);
+    assert.ok(findButton(renderer, '重新读取'));
+
+    failStatus = false;
+    await act(async () => {
+      findButton(renderer, '重新读取').props.onClick();
+      await flushTasks();
+    });
+    assert.equal(renderer.root.findAllByProps({ className: 'dim-botList' }).length, 1);
+    assert.doesNotMatch(pageText(), /无法读取有度机器人/);
+  } finally {
+    await act(async () => renderer?.unmount());
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+});
+
+test('a failed Youdu background refresh keeps the list and surfaces a retryable notice', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval', 'setTimeout'] });
+  const previousWindow = globalThis.window;
+  globalThis.window = { setInterval: globalThis.setInterval, clearInterval: globalThis.clearInterval };
+  let failStatus = false;
+  const rpcCall = async (endpoint) => {
+    if (endpoint !== YOUDU_ENDPOINTS.status) throw new Error(`Unexpected endpoint: ${endpoint}`);
+    if (failStatus) throw new Error('后台刷新失败');
+    return { ok: true, value: youduStatusSnapshot() };
+  };
+
+  let renderer;
+  try {
+    await act(async () => {
+      renderer = create(React.createElement(YouduSettingsTab, { rpcCall }));
+      await flushTasks();
+    });
+    assert.equal(renderer.root.findAllByProps({ className: 'dim-botList' }).length, 1);
+
+    failStatus = true;
+    await act(async () => {
+      t.mock.timers.tick(15_000);
+      await flushTasks();
+    });
+
+    const pageText = () => nodeText(renderer.toJSON());
+    assert.match(pageText(), /状态刷新失败/);
+    assert.match(pageText(), /后台刷新失败/);
+    assert.equal(
+      renderer.root.findAllByProps({ className: 'dim-botList' }).length,
+      1,
+      '静默刷新失败时必须保留已有机器人列表',
+    );
+
+    failStatus = false;
+    await act(async () => {
+      findButton(renderer, '立即重试').props.onClick();
+      await flushTasks();
+    });
+    assert.doesNotMatch(pageText(), /状态刷新失败/);
+  } finally {
+    await act(async () => renderer?.unmount());
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+    t.mock.timers.reset();
   }
 });

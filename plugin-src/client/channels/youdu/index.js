@@ -567,6 +567,8 @@ export function YouduSettingsTab({ rpcCall }) {
     revision: 0,
     bots: [],
     totals: { configured: 0, connected: 0 },
+    pageError: null,
+    statusError: null,
   });
   const [busyByBot, setBusyByBot] = React.useState({});
   const [feedbackByBot, setFeedbackByBot] = React.useState({});
@@ -574,7 +576,9 @@ export function YouduSettingsTab({ rpcCall }) {
   const [credentialOpen, setCredentialOpen] = React.useState(false);
   const [credentialBusy, setCredentialBusy] = React.useState(false);
   const [credentialError, setCredentialError] = React.useState(null);
-  const [pageError, setPageError] = React.useState(null);
+  const mounted = React.useRef(true);
+
+  React.useEffect(() => () => { mounted.current = false; }, []);
 
   const [wsHost, setWsHost] = React.useState('');
   const [botId, setBotId] = React.useState('');
@@ -605,23 +609,27 @@ export function YouduSettingsTab({ rpcCall }) {
   }, [invoke]);
 
   const refresh = React.useCallback(async ({ silent = true } = {}) => {
-    if (!silent) setModel((current) => ({ ...current, phase: 'loading' }));
+    if (!silent) setModel((current) => ({ ...current, phase: 'loading', pageError: null }));
     try {
       const snapshot = normalizeSnapshot(await statusWithTimeout());
+      if (!mounted.current) return;
       setModel((current) => ({
         ...current,
         phase: 'ready',
         revision: snapshot.revision,
         bots: snapshot.bots,
         totals: snapshot.totals,
+        pageError: null,
+        statusError: null,
       }));
-      setPageError(null);
     } catch (cause) {
-      if (silent) {
-        setModel((current) => ({ ...current, statusError: presentError(cause) }));
-      } else {
-        setPageError(presentError(cause));
-      }
+      if (!mounted.current) return;
+      const presented = presentError(cause);
+      // 首屏加载或显式重试失败 → 整页错误视图（带「重新读取」）；
+      // 后台静默刷新失败 → 保留已有列表，只在顶部给一条可重试的提示。
+      setModel((current) => (current.phase === 'loading' || !silent
+        ? { ...current, phase: 'error', pageError: presented, statusError: null }
+        : { ...current, statusError: presented }));
     }
   }, [statusWithTimeout]);
 
@@ -641,7 +649,6 @@ export function YouduSettingsTab({ rpcCall }) {
     if (credentialBusy) return;
     setCredentialBusy(true);
     setCredentialError(null);
-    setPageError(null);
     try {
       const snapshot = normalizeSnapshot(await invoke(YOUDU_ENDPOINTS.attachBot, {
         wsHost,
@@ -664,7 +671,6 @@ export function YouduSettingsTab({ rpcCall }) {
   };
 
   const runBotAction = async (endpoint, bot, payload = {}) => {
-    setPageError(null);
     const botIdValue = bot.botId;
     try {
       if (endpoint === YOUDU_ENDPOINTS.connectionTest) {
@@ -685,22 +691,28 @@ export function YouduSettingsTab({ rpcCall }) {
         setModel((current) => ({ ...current, ...snapshot, phase: 'ready' }));
       }
     } catch (cause) {
-      setPageError(presentError(cause));
+      // 单个机器人的操作失败只在这张卡片内联提示，不把整页打成错误视图。
+      setFeedbackByBot((current) => ({
+        ...current,
+        [botIdValue]: `操作失败：${presentError(cause).message}`,
+      }));
     }
   };
 
   const saveBotSetting = async (endpoint, bot, payload, label) => {
-    setPageError(null);
     setBusyFor(bot.botId, label);
     try {
       const snapshot = normalizeSnapshot(await invoke(endpoint, {
         botId: bot.botId,
         ...payload,
       }));
-      setModel((current) => ({ ...current, ...snapshot, phase: 'ready' }));
+      setModel((current) => ({ ...current, ...snapshot, phase: 'ready', statusError: null }));
       setFeedbackByBot((current) => ({ ...current, [bot.botId]: '已保存。' }));
     } catch (cause) {
-      setPageError(presentError(cause));
+      setFeedbackByBot((current) => ({
+        ...current,
+        [bot.botId]: `保存失败：${presentError(cause).message}`,
+      }));
     } finally {
       setBusyFor(bot.botId, false);
     }
@@ -746,8 +758,11 @@ export function YouduSettingsTab({ rpcCall }) {
 
   const content = model.phase === 'loading'
     ? h(LoadingView)
-    : pageError
-      ? h(PageError, { error: pageError, onRetry: () => refresh({ silent: false }) })
+    : model.phase === 'error'
+      ? h(PageError, {
+          error: model.pageError ?? { message: '无法读取有度连接状态' },
+          onRetry: () => refresh({ silent: false }),
+        })
       : model.bots.length === 0
         ? h(EmptyView, { onStart: openCredential })
         : h('ul', { className: 'dim-botList', role: 'list' },
@@ -832,6 +847,12 @@ export function YouduSettingsTab({ rpcCall }) {
                 onClick: () => { setCredentialOpen(false); setCredentialError(null); },
                 disabled: credentialBusy,
               }, '取消'))))
+      : null,
+
+    model.statusError && model.phase === 'ready'
+      ? h('div', { className: 'dim-statusNotice', role: 'alert' },
+          h('span', null, `状态刷新失败：${model.statusError.message}`),
+          h(Button, { size: 'small', onClick: () => refresh({ silent: true }) }, '立即重试'))
       : null,
 
     content);

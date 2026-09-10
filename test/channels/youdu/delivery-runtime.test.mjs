@@ -54,7 +54,8 @@ test('youdu runtime sends proactive text through send_msg with the route chatId'
   assert.deepEqual(socket.sent.at(-1), {
     kind: 'message',
     chatId: '{0798E01E-CD68-42BB-813C-EB51593BB0F5}',
-    body: { msgType: 'text', text: { content: '主动投递' } },
+    // chatType 必须显式声明，否则服务端按单聊投递（wss_outbound.go:207-219）。
+    body: { chatType: 'group', msgType: 'text', text: { content: '主动投递' } },
   });
 
   // 单聊：chatId 就是对方用户 ID。
@@ -62,7 +63,29 @@ test('youdu runtime sends proactive text through send_msg with the route chatId'
   assert.deepEqual(socket.sent.at(-1), {
     kind: 'message',
     chatId: '6463894',
-    body: { msgType: 'text', text: { content: 'hi' } },
+    body: { chatType: 'single', msgType: 'text', text: { content: 'hi' } },
+  });
+  await runtime.stop();
+});
+
+test('youdu connection test sends a well-formed single-chat text frame', async () => {
+  const socket = new FakeSocket();
+  const runtime = new YouduRuntime({
+    config: { botId: 'yd_bot', wsHost: 'push.example.com', ownerUserId: '6463894' },
+    secret: 'secret-1',
+    harness: { ensureRunning: async () => true },
+    state: fakeState(),
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+    connectTimeoutMs: 1_000,
+    createSocket: () => socket,
+  });
+  await runtime.start();
+  assert.deepEqual(await runtime.sendConnectionTest('连接测试'), { sent: true });
+  assert.deepEqual(socket.sent.at(-1), {
+    kind: 'message',
+    chatId: '6463894',
+    // 连接测试也必须发合规文本帧，而不是把字符串当 body。
+    body: { chatType: 'single', msgType: 'text', text: { content: '连接测试' } },
   });
   await runtime.stop();
 });

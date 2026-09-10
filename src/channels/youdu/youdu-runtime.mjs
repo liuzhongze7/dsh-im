@@ -272,7 +272,13 @@ export class YouduRuntime {
       error.code = 'test-target-unavailable';
       throw error;
     }
-    await this.#socket.sendMessage(chatId, text);
+    // 主动发送必须显式带 chatType：服务端只按 `chatType === 'group'` 走会话发送，
+    // 否则一律按单聊处理（把群 ID 当用户 ID），见 ng_bot/internal/api/openclaw/wss_outbound.go:207-219。
+    await this.#socket.sendMessage(chatId, {
+      chatType: 'single',
+      msgType: 'text',
+      text: { content: text },
+    });
     return { sent: true };
   }
 
@@ -294,6 +300,8 @@ export class YouduRuntime {
     signal?.throwIfAborted();
     try {
       await this.#socket.sendMessage(chatId, {
+        // 群聊必须声明 chatType，否则服务端按单聊投递，消息发不到群里。
+        chatType: target.kind === 'group' ? 'group' : 'single',
         msgType: 'text',
         text: { content: text },
       });
