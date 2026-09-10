@@ -6,6 +6,11 @@ This file records the notable changes in each dsh-im release. Its format follows
 
 ## [Unreleased]
 
+### Added / 新增
+
+- 有度渠道新增默认开启的「群聊上下文」：缓存群里没有 @ 机器人的最近群消息（默认 50 条，0 表示关闭，范围 0–200），在被 @ 时把这些消息作为上下文块附加在当前消息之前，并在该回合结束后消费掉，避免重复注入。只作用于群聊，只缓存群访问规则允许的消息，缓存在内存中、重启即清空；设置页可随时开关与调整条数，保存后即时生效且不重连机器人。
+  The Youdu channel gains **Group chat context**, enabled by default: recent group messages that did not mention the bot are cached (latest 50 by default, 0 disables, range 0–200), prepended as a context block when the bot is mentioned, and consumed when that turn ends so they are never injected twice. It only applies to group chats, only caches messages the group rules allow, lives in memory only, and is cleared on restart. The settings panel can toggle it and change the limit at any time without reconnecting the bot.
+
 ## [4.17.1] - 2026-09-09
 
 ### Fixed / 修复

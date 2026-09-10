@@ -153,6 +153,12 @@ See the [Proactive Delivery Guide](PROACTIVE_DELIVERY.en.md) ([简体中文](PRO
 
 [Read the context enhancement guide](docs/context-enhancement.md)
 
+### Group chat context
+
+Youdu bot cards offer **Group chat context**, on by default: recent group messages that did not mention the bot are cached (latest 50, set the limit to 0 to disable), prepended as context when the bot is mentioned, and consumed when that turn ends. It only applies to group chats, only caches messages the group rules allow, and lives in memory only — a plugin restart clears it.
+
+[Read the group chat context guide](docs/group-history.md) ([简体中文](docs/群聊上下文.md))
+
 ### Access modes
 
 [Read the access modes guide](docs/access-modes.md)
