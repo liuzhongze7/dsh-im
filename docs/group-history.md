@@ -24,26 +24,27 @@ Images, files, voice notes, and videos posted without mentioning the bot are **d
 <workspace>/.dsh-im/group-context/<group>/<20260910-141230-messageId>/01-photo.png
 ```
 
-When the bot is mentioned, the history block is followed by an attachment manifest listing every downloaded file with its name, workspace-relative path, sender, and time:
+When the bot is mentioned, the history block is followed by an attachment manifest: **the manifest is rebuilt from disk on every injection**, listing this group's recent message attachments within the retention window (latest 10 by default, tunable through `groupContextRecentLimit`):
 
 ```text
 <dsh_im_group_history note="...">
 [2026-09-10 14:12] 张三: [图片] photo.png
 </dsh_im_group_history>
 <dsh_im_group_files>
-{"description":"Attachments from the cached group messages above; paths are relative to the current Harness workspace.","files":[{"name":"photo.png","path":".dsh-im/group-context/.../01-photo.png","sender":"张三","time":"2026-09-10 14:12"}]}
+{"description":"Attachments staged for this group from earlier messages; paths are relative to the current Harness workspace. Older attachments stay in the same directory and can be listed on demand.","directory":".dsh-im/group-context/{0798E01E-...}","files":[{"name":"photo.png","path":".dsh-im/group-context/.../01-photo.png","sender":"张三","time":"2026-09-10 14:12"}]}
 </dsh_im_group_files>
 
 [Current message - respond to this]
 这张图什么意思
 ```
 
-The model can read those paths directly and move the files wherever they are needed. The cached history line keeps its `[图片] photo.png` placeholder; the manifest only lists files that were staged successfully.
+Because the manifest comes from disk rather than memory, it still works **after a plugin restart** (the text cache is empty but the files remain), **after an earlier turn already consumed a manifest**, and when a download is slower than the staging wait (the file shows up on the next mention). The block also tells the model that the directory exists, so it can list it, read the files, or move them wherever they are needed.
 
 | Situation | Behavior |
 | --- | --- |
-| Download succeeded | History line plus a `<dsh_im_group_files>` manifest with usable relative paths |
-| Download failed, rejected, or timed out | The text placeholder stays and the reply is unaffected |
+| Download succeeded | History line plus a manifest with name, workspace-relative path, sender, and time |
+| Download failed | The text placeholder stays and the reply is unaffected |
+| Download slower than the wait | Missing from this turn's manifest, listed once it lands |
 | Redelivered message | Downloaded only once |
 | Group rejected by access rules, feature off, or limit 0 | Nothing is downloaded or written |
 | Direct messages | Keep the existing inbound-file pipeline, unrelated to this cache |
