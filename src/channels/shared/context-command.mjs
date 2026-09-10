@@ -43,9 +43,9 @@ export function groupContextDirectText() {
   ].join('\n');
 }
 
-/** `/context` 的状态文本：开关与条数、待带入的消息数、已下载的群附件数。 */
+/** `/context` 的状态文本：开关与条数、待带入的消息数、已下载/仍在下载的群附件数。 */
 export function groupContextStatusText({
-  active = false, limit = 0, pending = 0, files = 0, retentionHours = 0,
+  active = false, limit = 0, pending = 0, files = 0, downloading = 0, retentionHours = 0,
 } = {}) {
   const lines = [
     active
@@ -53,10 +53,15 @@ export function groupContextStatusText({
       : t('本群上下文缓存：未开启'),
     t('待带入的消息：{count} 条', { count: pending }),
     t('本轮可带入的群附件：{files} 个', { files }),
+  ];
+  if (downloading > 0) {
+    lines.push(t('正在下载的群附件：{count} 个（完成后本轮即可带入）', { count: downloading }));
+  }
+  lines.push(
     retentionHours < 0
       ? t('附件永久保留，可随时按路径取用。')
       : t('附件按保留期清理（当前 {hours} 小时）。', { hours: retentionHours }),
-  ];
+  );
   if (pending > 0) lines.push('', t('发送 /context clear 清空本群待带入的消息。'));
   return lines.join('\n');
 }

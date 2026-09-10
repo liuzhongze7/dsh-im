@@ -186,6 +186,8 @@ export default {
   '本群上下文缓存：未开启': 'Group context cache: off',
   '待带入的消息：{count} 条': 'Messages held for context: {count}',
   '本轮可带入的群附件：{files} 个': 'Group attachments offered on the next mention: {files}',
+  '正在下载的群附件：{count} 个（完成后本轮即可带入）':
+    'Group attachments still downloading: {count} (they join this turn once finished)',
   '附件永久保留，可随时按路径取用。':
     'Attachments are kept forever and can be read by path at any time.',
   '附件按保留期清理（当前 {hours} 小时）。':

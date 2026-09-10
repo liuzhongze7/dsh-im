@@ -676,8 +676,18 @@ export class YouduBridge {
       limit: settings.limit,
       pending: this.#groupHistoryBuffer.size(key),
       files: await this.#groupContextFileCount(message.chatId),
+      downloading: this.#groupContextStagingCount(message.chatId),
       retentionHours: Number.isFinite(retention) ? retention : DEFAULT_GROUP_CONTEXT_RETENTION_HOURS,
     });
+  }
+
+  /** 这个群里还在下载的附件数（刚发完就查 /context 时用来解释为什么还没列出来）。 */
+  #groupContextStagingCount(chatId) {
+    let count = 0;
+    for (const staged of this.#groupHistoryStaging.values()) {
+      if (staged.chatId === chatId) count += 1;
+    }
+    return count;
   }
 
   /** 本轮清单里会出现的附件数（磁盘索引，读不到时按 0 显示）。 */

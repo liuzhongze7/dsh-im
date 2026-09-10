@@ -41,6 +41,14 @@ test('the status text reports the switch, the held messages and the staged attac
   assert.match(active, /本轮可带入的群附件：3 个/u);
   assert.match(active, /附件按保留期清理（当前 168 小时）。/u);
   assert.match(active, /发送 \/context clear 清空本群待带入的消息。/u);
+  assert.equal(active.includes('正在下载'), false, 'nothing downloading means no extra line');
+
+  // 刚发完附件就查询：已列出的与仍在下载的分开说明，避免看起来"没收到"。
+  const downloading = groupContextStatusText({
+    active: true, limit: 50, pending: 2, files: 0, downloading: 1, retentionHours: 168,
+  });
+  assert.match(downloading, /本轮可带入的群附件：0 个/u);
+  assert.match(downloading, /正在下载的群附件：1 个（完成后本轮即可带入）/u);
 
   const off = groupContextStatusText({ active: false, limit: 0, pending: 0, files: 0, retentionHours: -1 });
   assert.match(off, /本群上下文缓存：未开启/u);
@@ -73,6 +81,9 @@ test('every group context command text has an English projection', () => {
     groupContextUsageText(),
     groupContextDirectText(),
     groupContextStatusText({ active: true, limit: 50, pending: 2, files: 1, retentionHours: 24 }),
+    groupContextStatusText({
+      active: true, limit: 50, pending: 2, files: 0, downloading: 1, retentionHours: 24,
+    }),
     groupContextStatusText({ active: false, limit: 0, pending: 0, files: 0, retentionHours: -1 }),
     groupContextClearedText({ cleared: 2 }),
     groupContextResetText({ cleared: 2 }),
