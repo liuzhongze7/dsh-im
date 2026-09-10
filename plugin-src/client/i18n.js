@@ -1040,6 +1040,18 @@ const EN = Object.freeze({
   '读取有度连接状态超时，请刷新页面后重试。': 'Loading the Youdu connection status timed out. Refresh the page and try again.',
   '填写有度用户 ID（数字），需对方先私聊过机器人': 'Enter the numeric Youdu user ID; that user must have messaged the bot first',
   '填写群 ID，例如 {0798E01E-CD68-42BB-813C-EB51593BB0F5}': 'Enter the group ID, e.g. {0798E01E-CD68-42BB-813C-EB51593BB0F5}',
+  // 有度群聊上下文缓存（group-history.mjs）
+  '群聊上下文': 'Group chat context',
+  '开启 · 最近 ${normalized.limit} 条': 'On · last ${normalized.limit} messages',
+  '缓存条数': 'Cached messages',
+  '查看缓存条数说明': 'View the cached message count details',
+  '缓存群里没有 @ 机器人的最近消息，机器人被 @ 时把这些消息作为上下文一起交给模型。只作用于群聊。': 'Cache the recent group messages that did not @ the bot; when the bot is @mentioned, they are passed to the model as context together with the current message. Applies to group chats only.',
+  '0 表示不缓存；默认 50 条，可填 0 到 200 之间的整数。': '0 disables caching; the default is 50, and any integer from 0 to 200 is accepted.',
+  '缓存在内存中、重启即清空。': 'Cached in memory and cleared on restart.',
+  '被群访问规则拒绝的群不缓存。': 'Groups rejected by the group access rules are never cached.',
+  '缓存位置': 'Where it is cached',
+  '群访问规则': 'Group access rules',
+  '群聊上下文保存失败，请重试。': 'Could not save the group chat context. Try again.',
 });
 
 export const en = EN;
@@ -1064,6 +1076,8 @@ function channelName(value) {
 function translateDynamic(text) {
   const guidanceLimit = /^增强提示词不得超过 (\d+) 个字符。$/.exec(text);
   if (guidanceLimit) return `Guidance must not exceed ${guidanceLimit[1]} characters.`;
+  const groupHistoryLimit = /^开启 · 最近 (\d+) 条$/.exec(text);
+  if (groupHistoryLimit) return `On · last ${groupHistoryLimit[1]} messages`;
   let match = /^(\d+) \/ (\d+) 在线$/.exec(text);
   if (match) return `${match[1]}/${match[2]} online`;
   match = /^已接入 (\d+) 个机器人，其中 (\d+) 个在线$/.exec(text);

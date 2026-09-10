@@ -11,6 +11,7 @@ import {
 import { WorkspaceEditor } from '../../workspace-editor.js';
 import { AgentPresetEditor } from '../../agent-preset.js';
 import { ContextEnhancementEditor } from '../../context-enhancement.js';
+import { GroupHistoryEditor } from '../../group-history.js';
 import { AccessPolicySettingsPage } from '../../access-policy-settings.js';
 import { normalizeAccessPolicy } from '../../../../src/channels/shared/access-policy.mjs';
 import {
@@ -474,6 +475,7 @@ function AccountCard({
   onWorkspaceSave,
   onAgentPresetSave,
   onContextEnhancementSave,
+  onGroupHistorySave,
   onAccessPolicySaved,
   onGroupAccessSaved,
   onConnectionSave,
@@ -529,6 +531,11 @@ function AccountCard({
         config: account.contextEnhancement,
         disabled,
         onSave: onContextEnhancementSave,
+      }),
+      h(GroupHistoryEditor, {
+        config: account.groupHistory,
+        disabled,
+        onSave: onGroupHistorySave,
       }),
       editingConnection
         ? h('div', { className: 'ydt-connectionPanel' },
@@ -792,6 +799,7 @@ export function YouduSettingsTab({ rpcCall }) {
                 onWorkspaceSave: (workspace) => saveBotSetting(YOUDU_ENDPOINTS.setWorkspace, bot, { workspace }, 'workspace'),
                 onAgentPresetSave: (agentPreset) => saveBotSetting(YOUDU_ENDPOINTS.setAgentPreset, bot, { agentPreset }, 'preset'),
                 onContextEnhancementSave: (config) => saveBotSetting(YOUDU_ENDPOINTS.setContextEnhancement, bot, { config }, 'context'),
+                onGroupHistorySave: (config) => saveBotSetting(YOUDU_ENDPOINTS.setGroupHistory, bot, { config }, 'context'),
                 onAccessPolicySaved: (policy) => updateBotAccessPolicy(bot.botId, policy),
                 onGroupAccessSaved: (snapshot) => updateBotGroupAccess(bot.botId, snapshot),
                 onConnectionSave: (payload) => saveConnection(bot, payload),
