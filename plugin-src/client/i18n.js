@@ -1128,6 +1128,8 @@ function translateDynamic(text) {
   if (match) return `Automatic status refresh failed: ${match[1]}`;
   match = /^操作失败：(.+)$/.exec(text);
   if (match) return `Operation failed: ${match[1]}`;
+  match = /^保存失败：(.+)$/.exec(text);
+  if (match) return `Could not save: ${match[1]}`;
   match = /^连接检查失败：(.+)（参考号：(.+)）$/.exec(text);
   if (match) return `Connection check failed: ${localizeText(match[1])} (reference: ${match[2]})`;
   match = /^连接检查失败：(.+)$/.exec(text);

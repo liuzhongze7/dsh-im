@@ -1379,6 +1379,7 @@ test('all nine channel settings and connected cards render English copy', () => 
       TelegramSettingsTab,
       DiscordSettingsTab,
       WhatsappSettingsTab,
+      YouduSettingsTab,
     ];
     const pageMarkup = pages.map((Component) =>
       renderToStaticMarkup(React.createElement(Component, { rpcCall }))).join('\n');
@@ -1394,6 +1395,7 @@ test('all nine channel settings and connected cards render English copy', () => 
     assert.match(pageMarkup, /Loading Telegram bot status/);
     assert.match(pageMarkup, /Loading Discord bot status/);
     assert.match(pageMarkup, /Loading WhatsApp bot status/);
+    assert.match(pageMarkup, /Loading the Youdu connection status/);
     assert.doesNotMatch(pageMarkup, /[\p{Script=Han}]/u);
 
     const sharedCardProps = {
@@ -1496,6 +1498,33 @@ test('a failed Youdu status read shows the error view with a retry instead of lo
     if (previousWindow === undefined) delete globalThis.window;
     else globalThis.window = previousWindow;
   }
+});
+
+test('unmounting the Youdu page aborts the in-flight status read', async () => {
+  const signals = [];
+  let settleStatus;
+  const rpcCall = async (endpoint, payload, signal) => {
+    signals.push(signal);
+    if (endpoint !== YOUDU_ENDPOINTS.status) throw new Error(`Unexpected endpoint: ${endpoint}`);
+    return new Promise((resolve) => { settleStatus = resolve; });
+  };
+
+  let renderer;
+  await act(async () => {
+    renderer = create(React.createElement(YouduSettingsTab, { rpcCall }));
+    await flushTasks();
+  });
+  assert.equal(signals.length, 1, '首屏只发起一次状态读取');
+  assert.equal(signals[0]?.aborted, false);
+
+  await act(async () => renderer.unmount());
+  assert.equal(signals[0]?.aborted, true, '卸载时必须中止在途请求');
+
+  // 迟到的响应不得再写状态，也不得抛错。
+  await act(async () => {
+    settleStatus?.({ ok: true, value: youduStatusSnapshot() });
+    await flushTasks();
+  });
 });
 
 test('a failed Youdu background refresh keeps the list and surfaces a retryable notice', async (t) => {

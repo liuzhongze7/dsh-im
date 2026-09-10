@@ -590,11 +590,11 @@ export function YouduSettingsTab({ rpcCall }) {
   }, [rpcCall]);
 
   // 读取状态加超时：Host 重启后旧页面的 RPC 通道可能已经断开，没有超时会一直转圈。
-  const statusWithTimeout = React.useCallback(async (timeoutMs = 20_000) => {
+  const statusWithTimeout = React.useCallback(async (signal, timeoutMs = 20_000) => {
     let timer;
     try {
       return await Promise.race([
-        invoke(YOUDU_ENDPOINTS.status),
+        invoke(YOUDU_ENDPOINTS.status, {}, signal),
         new Promise((_, reject) => {
           timer = setTimeout(() => {
             const error = new Error('读取有度连接状态超时，请刷新页面后重试。');
@@ -608,11 +608,11 @@ export function YouduSettingsTab({ rpcCall }) {
     }
   }, [invoke]);
 
-  const refresh = React.useCallback(async ({ silent = true } = {}) => {
+  const refresh = React.useCallback(async ({ silent = true, signal } = {}) => {
     if (!silent) setModel((current) => ({ ...current, phase: 'loading', pageError: null }));
     try {
-      const snapshot = normalizeSnapshot(await statusWithTimeout());
-      if (!mounted.current) return;
+      const snapshot = normalizeSnapshot(await statusWithTimeout(signal));
+      if (!mounted.current || signal?.aborted) return;
       setModel((current) => ({
         ...current,
         phase: 'ready',
@@ -623,7 +623,8 @@ export function YouduSettingsTab({ rpcCall }) {
         statusError: null,
       }));
     } catch (cause) {
-      if (!mounted.current) return;
+      // 卸载 / 定时器清理导致的中止不算失败，也不要写状态。
+      if (!mounted.current || signal?.aborted || cause?.name === 'AbortError') return;
       const presented = presentError(cause);
       // 首屏加载或显式重试失败 → 整页错误视图（带「重新读取」）；
       // 后台静默刷新失败 → 保留已有列表，只在顶部给一条可重试的提示。
@@ -633,15 +634,23 @@ export function YouduSettingsTab({ rpcCall }) {
     }
   }, [statusWithTimeout]);
 
-  React.useEffect(() => { void refresh({ silent: false }); }, [refresh]);
+  React.useEffect(() => {
+    const controller = new AbortController();
+    void refresh({ silent: false, signal: controller.signal });
+    return () => controller.abort();
+  }, [refresh]);
 
-  // 每 15s 静默刷新，保证状态不过期。
+  // 每 15s 静默刷新，保证状态不过期；组件卸载时连同在途请求一起中止。
   React.useEffect(() => {
     if (model.phase !== 'ready') return undefined;
-    const timer = window.setInterval(async () => {
-      await refresh({ silent: true });
+    const controller = new AbortController();
+    const timer = window.setInterval(() => {
+      void refresh({ silent: true, signal: controller.signal });
     }, 15_000);
-    return () => window.clearInterval(timer);
+    return () => {
+      controller.abort();
+      window.clearInterval(timer);
+    };
   }, [model.phase, refresh]);
 
   const bind = async (event) => {
@@ -760,7 +769,7 @@ export function YouduSettingsTab({ rpcCall }) {
     ? h(LoadingView)
     : model.phase === 'error'
       ? h(PageError, {
-          error: model.pageError ?? { message: '无法读取有度连接状态' },
+          error: model.pageError ?? { message: '无法读取连接状态' },
           onRetry: () => refresh({ silent: false }),
         })
       : model.bots.length === 0
