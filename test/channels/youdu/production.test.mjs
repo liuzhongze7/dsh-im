@@ -305,6 +305,18 @@ test('Youdu production stages group context attachments inside the bot workspace
   assert.deepEqual(await readdir(join(workspace, '.dsh-im', 'group-context')), [
     '{0798E01E-CD68-42BB-813C-EB51593BB0F5}',
   ]);
+  // 清单由磁盘索引重建：插件重启后照样能列出这条附件。
+  const listing = await files.list({
+    chatId: '{0798E01E-CD68-42BB-813C-EB51593BB0F5}',
+    limit: 5,
+  });
+  assert.equal(
+    listing.directory.split(/[\\/]+/u).join('/'),
+    '.dsh-im/group-context/{0798E01E-CD68-42BB-813C-EB51593BB0F5}',
+  );
+  assert.equal(listing.messages.length, 1);
+  assert.equal(listing.messages[0].messageId, '1777543724');
+  assert.equal(listing.messages[0].files[0].name, 'photo.png');
   assert.deepEqual(await files.sweep(), { deleted: 0 });
 });
 

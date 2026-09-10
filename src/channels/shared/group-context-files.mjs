@@ -1,5 +1,5 @@
 import { createWriteStream } from 'node:fs';
-import { mkdir, readdir, realpath, rm, rmdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, realpath, rm, rmdir, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 
@@ -18,10 +18,14 @@ import {
  * 群一层便于人工翻找，消息一层带时间戳便于按保留期清理，也与 `inbound` 的命名口径一致。
  */
 export const GROUP_CONTEXT_DIRECTORY = join('.dsh-im', 'group-context');
+/** 消息目录里记录“谁、什么时候、发了哪些文件”的旁挂文件，供清单重建（重启后也能读到）。 */
+export const GROUP_CONTEXT_META_FILE = '.meta.json';
 /** 默认保留 7 天；-1 表示永久保留，0 表示下一次清理即删除。 */
 export const DEFAULT_GROUP_CONTEXT_RETENTION_HOURS = 24 * 7;
 export const KEEP_GROUP_CONTEXT_FOREVER = -1;
 export const DEFAULT_GROUP_CONTEXT_SWEEP_INTERVAL_MS = 6 * 60 * 60_000;
+/** 每次注入清单时最多列出最近多少条群消息的附件。 */
+export const DEFAULT_GROUP_CONTEXT_RECENT_LIMIT = 10;
 export const MAX_CHAT_DIRECTORY_CHARS = 60;
 export const MAX_MESSAGE_DIRECTORY_CHARS = 40;
 
@@ -207,7 +211,7 @@ export function createGroupContextFiles({
    * 下载是逐个进行的，单个失败会清掉已写的部分，避免留下半份附件。
    */
   async function stage({
-    workspace, chatId, messageId, files, signal,
+    workspace, chatId, messageId, sender, timestamp, files, signal,
   } = {}) {
     const sources = Array.isArray(files) ? files.filter(Boolean) : [];
     if (sources.length === 0) return null;
@@ -248,7 +252,8 @@ export function createGroupContextFiles({
           );
         }
         const name = displayFileName(loaded.name ?? source?.name, `file-${index + 1}`);
-        const path = join(directory, storageFileName(name, index));
+        const storage = storageFileName(name, index);
+        const path = join(directory, storage);
         if (loaded.data) {
           await writeFile(path, loaded.data, { mode: 0o600, signal });
         } else {
@@ -278,10 +283,22 @@ export function createGroupContextFiles({
         const mediaType = loaded.mediaType ?? source?.mediaType;
         staged.push(Object.freeze({
           name,
+          storage,
           path: relativePath,
           ...(typeof mediaType === 'string' && mediaType.trim() ? { mediaType: mediaType.trim() } : {}),
         }));
       }
+      // 旁挂元数据：清单是注入时从磁盘重建的，重启后也要能还原发送者与时间。
+      await writeFile(
+        join(directory, GROUP_CONTEXT_META_FILE),
+        `${JSON.stringify({
+          messageId: typeof messageId === 'string' ? messageId : '',
+          sender: typeof sender === 'string' ? sender : '',
+          timestamp: Number.isFinite(timestamp) ? timestamp : now().getTime(),
+          files: staged.map((file) => ({ name: file.name, storage: file.storage })),
+        }, null, 2)}\n`,
+        { mode: 0o600, signal },
+      );
     } catch (error) {
       await rm(directory, { recursive: true, force: true }).catch(() => undefined);
       throw error;
@@ -290,15 +307,89 @@ export function createGroupContextFiles({
       void sweepIfDue(workspace);
     }
     return Object.freeze({
-      files: Object.freeze(staged),
+      files: Object.freeze(staged.map(({ storage, ...rest }) => Object.freeze(rest))),
       directory,
       retentionHours: resolvedRetention,
     });
   }
 
+  /**
+   * 从磁盘重建“这个群最近的附件”：列出保留期内最近 limit 条消息目录。
+   * 下载中的目录会被跳过（文件可能还不完整），清单因此不依赖进程内状态。
+   */
+  async function list(workspace, chatId, { limit = DEFAULT_GROUP_CONTEXT_RECENT_LIMIT } = {}) {
+    if (typeof workspace !== 'string' || !isAbsolute(workspace)) {
+      return { directory: '', messages: [] };
+    }
+    const chatDirectory = join(resolve(workspace, GROUP_CONTEXT_DIRECTORY), groupContextChatSegment(chatId));
+    const directoryPath = relative(resolve(workspace), chatDirectory);
+    let entries;
+    try {
+      entries = await readdir(chatDirectory, { withFileTypes: true });
+    } catch (error) {
+      if (error?.code === 'ENOENT') return { directory: directoryPath, messages: [] };
+      throw error;
+    }
+    const resolvedLimit = Number.isSafeInteger(limit) && limit > 0
+      ? limit
+      : DEFAULT_GROUP_CONTEXT_RECENT_LIMIT;
+    const current = now().getTime();
+    const messages = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const messageDirectory = join(chatDirectory, entry.name);
+      if (isTracked(messageDirectory)) continue;
+      const stagedAt = parseInboundDirectoryName(entry.name);
+      if (stagedAt === null) continue;
+      if (resolvedRetention > 0
+        && current - stagedAt.getTime() >= resolvedRetention * 3_600_000) continue;
+      let fileEntries;
+      try {
+        fileEntries = await readdir(messageDirectory, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      let meta = null;
+      try {
+        meta = JSON.parse(await readFile(join(messageDirectory, GROUP_CONTEXT_META_FILE), 'utf8'));
+      } catch {
+        meta = null;
+      }
+      const byStorage = new Map(
+        (Array.isArray(meta?.files) ? meta.files : [])
+          .filter((file) => file && typeof file.storage === 'string')
+          .map((file) => [file.storage, typeof file.name === 'string' ? file.name : file.storage]),
+      );
+      const files = [];
+      for (const fileEntry of fileEntries) {
+        if (!fileEntry.isFile() || fileEntry.name === GROUP_CONTEXT_META_FILE) continue;
+        const relativePath = relative(resolve(workspace), join(messageDirectory, fileEntry.name));
+        if (!relativePath || relativePath.startsWith('..') || isAbsolute(relativePath)) continue;
+        files.push(Object.freeze({
+          name: byStorage.get(fileEntry.name)
+            ?? fileEntry.name.replace(/^\d+-/u, ''),
+          path: relativePath,
+        }));
+      }
+      if (files.length === 0) continue;
+      messages.push({
+        stagedAt,
+        timestamp: Number.isFinite(meta?.timestamp) ? meta.timestamp : stagedAt.getTime(),
+        messageId: typeof meta?.messageId === 'string' && meta.messageId
+          ? meta.messageId
+          : entry.name.replace(/^\d{8}-\d{6}-/u, ''),
+        sender: typeof meta?.sender === 'string' ? meta.sender : '',
+        files: Object.freeze(files),
+      });
+    }
+    messages.sort((left, right) => right.stagedAt - left.stagedAt);
+    return { directory: directoryPath, messages: Object.freeze(messages.slice(0, resolvedLimit)) };
+  }
+
   return Object.freeze({
     retentionHours: resolvedRetention,
     stage,
+    list,
     sweep,
     sweepIfDue,
     isTracked,

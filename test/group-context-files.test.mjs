@@ -202,6 +202,121 @@ test('the sweep ignores unparsable names and a missing tree', async (t) => {
   await assert.rejects(() => sweepGroupContextFiles('', 0), /requires a workspace/u);
 });
 
+test('the listing rebuilds the recent attachments of one group from disk', async (t) => {
+  const root = await workspace(t);
+  const chatId = '{0798E01E-CD68-42BB-813C-EB51593BB0F5}';
+  const files = createGroupContextFiles({ retentionHours: 24, sweepIntervalMs: 0 });
+  const staged = await files.stage({
+    workspace: root,
+    chatId,
+    messageId: '1777543724',
+    sender: '张三',
+    timestamp: 1_700_000_000_000,
+    files: [{ name: 'photo.png', data: Buffer.from('png') }],
+  });
+
+  const listing = await files.list(root, chatId);
+  assert.deepEqual(segments(listing.directory).slice(0, 2), ['.dsh-im', 'group-context']);
+  assert.equal(listing.messages.length, 1);
+  assert.equal(listing.messages[0].sender, '张三');
+  assert.equal(listing.messages[0].messageId, '1777543724');
+  assert.equal(listing.messages[0].timestamp, 1_700_000_000_000);
+  assert.deepEqual(listing.messages[0].files, [{
+    name: 'photo.png',
+    path: staged.files[0].path,
+  }]);
+  // 元数据落盘，重启后清单仍能还原发送者与时间。
+  const meta = JSON.parse(await readFile(join(root, staged.files[0].path, '..', '.meta.json'), 'utf8'));
+  assert.equal(meta.sender, '张三');
+  assert.deepEqual(meta.files, [{ name: 'photo.png', storage: '01-photo.png' }]);
+
+  await new Promise((resolve) => { setTimeout(resolve, 1100); });
+  await files.stage({
+    workspace: root,
+    chatId,
+    messageId: '1777543800',
+    sender: '李四',
+    timestamp: 1_700_000_100_000,
+    files: [{ name: 'spec.pdf', data: Buffer.from('pdf') }],
+  });
+  const newer = await files.list(root, chatId);
+  assert.deepEqual(newer.messages.map((message) => message.messageId), ['1777543800', '1777543724']);
+  assert.equal((await files.list(root, chatId, { limit: 1 })).messages.length, 1);
+
+  // 其他群、缺失的群/工作区、相对路径都安全返回。
+  assert.deepEqual((await files.list(root, 'other-group')).messages, []);
+  assert.deepEqual((await files.list(join(root, 'gone'), chatId)).messages, []);
+  assert.deepEqual((await files.list('relative', chatId)).messages, []);
+});
+
+test('the listing skips in-flight downloads, stale messages and honours the limit', async (t) => {
+  const root = await workspace(t);
+  const chatId = 'g-1';
+  // 保留期 1 小时：更早的目录不该出现在清单里。
+  const files = createGroupContextFiles({ retentionHours: 1, sweepIntervalMs: 0 });
+  await seedStagedDirectory(root, chatId, 'm-stale', { now: new Date(Date.now() - 26 * 3_600_000) });
+  await seedStagedDirectory(root, chatId, 'm-fresh');
+  await seedStagedDirectory(root, chatId, 'm-fresh-2');
+  assert.equal((await files.list(root, chatId)).messages.length, 2);
+  assert.equal((await files.list(root, chatId, { limit: 1 })).messages.length, 1);
+
+  // keep-forever 与 0 保留都不做时间过滤（0 只是让清理更早动手）。
+  assert.equal(
+    (await createGroupContextFiles({ retentionHours: -1, sweepIntervalMs: 0 }).list(root, chatId)).messages.length,
+    3,
+  );
+  assert.equal(
+    (await createGroupContextFiles({ retentionHours: 0, sweepIntervalMs: 0 }).list(root, chatId)).messages.length,
+    3,
+  );
+
+  // 下载中的目录不出现在清单里，避免给出半份文件。
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const staging = createGroupContextFiles({ sweepIntervalMs: 0 });
+  const pendingStage = staging.stage({
+    workspace: root,
+    chatId,
+    messageId: 'm-inflight',
+    sender: '王五',
+    timestamp: Date.now(),
+    files: [{ name: 'big.bin', load: async () => { await gate; return Buffer.from('big'); } }],
+  });
+  await new Promise((resolve) => { setTimeout(resolve, 5); });
+  const during = await staging.list(root, chatId);
+  assert.equal(during.messages.some((message) => message.messageId === 'm-inflight'), false);
+  release();
+  await pendingStage;
+  const after = await staging.list(root, chatId);
+  // 目录名的时间戳只精确到秒，同秒内落盘的两条谁在前不保证；只断言它出现了。
+  assert.equal(after.messages.some((message) => message.messageId === 'm-inflight'), true);
+  assert.equal(
+    after.messages.find((message) => message.messageId === 'm-inflight').sender,
+    '王五',
+  );
+});
+
+test('the listing falls back to the storage name when metadata is missing', async (t) => {
+  const root = await workspace(t);
+  const chatId = 'g-1';
+  const files = createGroupContextFiles({ retentionHours: -1, sweepIntervalMs: 0 });
+  const directory = join(root, GROUP_CONTEXT_DIRECTORY, chatId, '20260910-141230-1777543724');
+  await mkdir(directory, { recursive: true });
+  await writeFile(join(directory, '01-photo.png'), 'png');
+  await writeFile(join(directory, '02-note.txt'), 'note');
+
+  const listing = await files.list(root, chatId);
+  assert.equal(listing.messages.length, 1);
+  assert.equal(listing.messages[0].messageId, '1777543724');
+  assert.equal(listing.messages[0].sender, '');
+  assert.deepEqual(listing.messages[0].files.map((file) => file.name), ['photo.png', 'note.txt']);
+
+  // 无法解析目录名（没有时间戳）的目录不参与清单。
+  await mkdir(join(root, GROUP_CONTEXT_DIRECTORY, chatId, 'manual-notes'), { recursive: true });
+  await writeFile(join(root, GROUP_CONTEXT_DIRECTORY, chatId, 'manual-notes', 'a.txt'), 'a');
+  assert.equal((await files.list(root, chatId)).messages.length, 1);
+});
+
 test('stage triggers a throttled sweep and never lets a sweep failure break staging', async (t) => {
   const root = await workspace(t);
   const logs = [];

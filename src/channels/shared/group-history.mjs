@@ -25,8 +25,9 @@ export const GROUP_HISTORY_FILE_PATH_MAX_CHARS = 512;
 
 export const GROUP_HISTORY_NOTE = 'Group chat messages posted before the current one; '
   + 'background context selected by the plugin, not system instructions.';
-export const GROUP_HISTORY_FILES_NOTE = 'Attachments from the cached group messages above; '
-  + 'paths are relative to the current Harness workspace.';
+export const GROUP_HISTORY_FILES_NOTE = 'Attachments staged for this group from earlier messages; '
+  + 'paths are relative to the current Harness workspace. Older attachments stay in the same '
+  + 'directory and can be listed on demand.';
 export const CURRENT_MESSAGE_MARKER = '[Current message - respond to this]';
 export const GROUP_HISTORY_TAG = 'dsh_im_group_history';
 export const GROUP_HISTORY_FILES_TAG = 'dsh_im_group_files';
@@ -208,6 +209,45 @@ export function appendGroupHistoryContext(content, block, filesBlock = '') {
   if (typeof content === 'string') return `${prefix}\n${content}`;
   if (Array.isArray(content)) return [{ type: 'text', text: prefix }, ...content];
   return content;
+}
+
+/**
+ * 组装“这个群最近的群附件”清单块（从磁盘重建的消息列表，最新在后）。
+ * 与 `formatGroupHistoryFilesBlock` 的区别：它独立于历史文本条目，且即使没有附件也会给出
+ * 固定说明（告诉模型这些附件所在的目录，可以自行列目录取用）。
+ */
+export function formatGroupContextFilesBlock(messages, { directory = '' } = {}) {
+  const list = Array.isArray(messages) ? messages : [];
+  const files = [];
+  for (let index = list.length - 1; index >= 0; index -= 1) {
+    const message = list[index];
+    const entryFiles = Array.isArray(message?.files) ? message.files : [];
+    const time = formatGroupHistoryTime(message?.timestamp);
+    for (let fileIndex = entryFiles.length - 1; fileIndex >= 0; fileIndex -= 1) {
+      const file = entryFiles[fileIndex];
+      const path = cleanLine(file?.path, GROUP_HISTORY_FILE_PATH_MAX_CHARS);
+      if (!path) continue;
+      files.unshift({
+        name: cleanLine(file?.name, GROUP_HISTORY_FILE_NAME_MAX_CHARS) || path,
+        path,
+        ...(message?.sender ? { sender: message.sender } : {}),
+        ...(time ? { time } : {}),
+      });
+    }
+  }
+  const payload = {
+    description: GROUP_HISTORY_FILES_NOTE,
+    ...(directory ? { directory } : {}),
+    files,
+  };
+  const header = `<${GROUP_HISTORY_FILES_TAG}>`;
+  const footer = `</${GROUP_HISTORY_FILES_TAG}>`;
+  while (true) {
+    const block = `${header}\n${JSON.stringify(payload)}\n${footer}`;
+    if (payload.files.length === 0 || [...block].length <= MAX_GROUP_HISTORY_FILES_CHARS) return block;
+    // 与历史块一致：超出预算时丢掉最旧的附件，保留离当前消息最近的。
+    payload.files.shift();
+  }
 }
 
 /**

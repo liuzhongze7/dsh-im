@@ -308,6 +308,115 @@ function mergedForwardFrame(messageId) {
   });
 }
 
+/** 磁盘索引式 provider：清单来自“该群最近的附件”，与文本条目解耦。 */
+function indexFixture({ messages = [], directory = '.dsh-im/group-context/g-1', fail = false } = {}) {
+  const stageCalls = [];
+  const listCalls = [];
+  return {
+    stageCalls,
+    listCalls,
+    async stage({ chatId, messageId, files, sender, timestamp }) {
+      stageCalls.push({ chatId, messageId, sender, timestamp, names: files.map((file) => file.name) });
+      return { files: files.map((file) => ({ name: file.name, path: `${directory}/${messageId}/01-${file.name}` })) };
+    },
+    async list({ chatId, limit }) {
+      listCalls.push({ chatId, limit });
+      if (fail) throw new Error('listing unavailable');
+      return { directory, messages };
+    },
+  };
+}
+
+test('the attachment manifest is rebuilt from disk, so it survives restarts and consumption', async () => {
+  const contents = [];
+  const index = indexFixture({
+    messages: [{
+      messageId: '1777543724',
+      sender: '张三',
+      timestamp: 1_700_000_000_000,
+      files: [{ name: 'photo.png', path: '.dsh-im/group-context/g-1/1777543724/01-photo.png' }],
+    }, {
+      messageId: '1777543800',
+      sender: '李四',
+      timestamp: 1_700_000_100_000,
+      files: [{ name: 'spec.pdf', path: '.dsh-im/group-context/g-1/1777543800/01-spec.pdf' }],
+    }],
+  });
+  const bridge = new YouduBridge({
+    bot: { ...makeBot([]), downloadMedia: async () => Buffer.from('bytes') },
+    harness: baseHarness({ contents }),
+    state: stateFixture().state,
+    ownerUserId: '*',
+    botId: 'bot-1',
+    groupResponseMode: 'mention',
+    groupHistory: { enabled: true, limit: 50 },
+    groupContextFiles: index,
+    groupContextRecentLimit: 7,
+  });
+
+  // 群里只有附件、没有任何可缓存文本（模拟插件重启后的状态）。
+  await bridge.accept(groupFrame('ask-1', '我发的附件你收到了么', { atUser: ['bot-1'] }));
+  assert.deepEqual(index.listCalls, [{ chatId: 'g-1', limit: 7 }]);
+  const content = contents[0];
+  assert.equal(content.includes('<dsh_im_group_history'), false, 'no cached text yet');
+  assert.match(content, /^<dsh_im_group_files>\n/u);
+  const payload = JSON.parse(content.split('\n')[1]);
+  assert.equal(payload.directory, '.dsh-im/group-context/g-1');
+  assert.deepEqual(payload.files.map((file) => file.name), ['photo.png', 'spec.pdf']);
+  assert.deepEqual(payload.files.map((file) => file.sender), ['张三', '李四']);
+  assert.match(payload.description, /Older attachments stay in the same directory and can be listed on demand/u);
+  assert.equal(content.endsWith('\n我发的附件你收到了么'), true);
+});
+
+test('the manifest stays available after the history entries were consumed', async () => {
+  const contents = [];
+  const index = indexFixture({
+    messages: [{
+      messageId: 'm-1',
+      sender: '张三',
+      timestamp: 1_700_000_000_000,
+      files: [{ name: 'photo.png', path: '.dsh-im/group-context/g-1/m-1/01-photo.png' }],
+    }],
+  });
+  const bridge = new YouduBridge({
+    bot: { ...makeBot([]), downloadMedia: async () => Buffer.from('bytes') },
+    harness: baseHarness({ contents }),
+    state: stateFixture().state,
+    ownerUserId: '*',
+    botId: 'bot-1',
+    groupResponseMode: 'mention',
+    groupHistory: { enabled: true, limit: 50 },
+    groupContextFiles: index,
+  });
+
+  await bridge.accept(groupFrame('h-1', '下午三点评审', { userId: 'm-1', name: '张三' }));
+  await bridge.accept(groupFrame('ask-1', '总结', { atUser: ['bot-1'] }));
+  await bridge.accept(groupFrame('ask-2', '附件呢', { atUser: ['bot-1'] }));
+  assert.match(contents[0], /下午三点评审/u);
+  assert.match(contents[1], /01-photo\.png/u, 'the second mention still sees the staged attachment');
+  assert.equal(contents[1].includes('<dsh_im_group_history'), false, 'the text batch was consumed');
+});
+
+test('a failing index falls back to the attachments staged in this turn', async () => {
+  const contents = [];
+  const failing = indexFixture({ fail: true });
+  const bridge = new YouduBridge({
+    bot: { ...makeBot([]), downloadMedia: async () => Buffer.from('bytes') },
+    harness: baseHarness({ contents }),
+    state: stateFixture().state,
+    ownerUserId: '*',
+    botId: 'bot-1',
+    groupResponseMode: 'mention',
+    groupHistory: { enabled: true, limit: 50 },
+    groupContextFiles: failing,
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+  });
+  await bridge.accept(mediaGroupFrame('m-image', { image: { mediaId: 'media-img', name: 'photo.png' } }));
+  await bridge.accept(groupFrame('ask-1', '看图', { atUser: ['bot-1'] }));
+  assert.match(contents[0], /01-photo\.png/u, 'a failing index still lists what this turn staged');
+  assert.match(contents[0], /张三: \[图片\] photo\.png\n/u);
+});
+
 test('group media is cached as a text placeholder and never downloaded', async () => {
   const contents = [];
   const downloads = [];

@@ -65,11 +65,13 @@ import {
   createGroupHistory,
   DEFAULT_GROUP_HISTORY_CONFIG,
   DISABLED_GROUP_HISTORY_CONFIG,
+  formatGroupContextFilesBlock,
   formatGroupHistoryBlock,
   formatGroupHistoryFilesBlock,
   groupHistoryActive,
   normalizeGroupHistoryConfig,
 } from '../shared/group-history.mjs';
+import { DEFAULT_GROUP_CONTEXT_RECENT_LIMIT } from '../shared/group-context-files.mjs';
 import { evaluateGroupAccess } from './group-access.mjs';
 import { t } from '../shared/i18n.mjs';
 import { prepareMessageBody } from './youdu-protocol/index.js';
@@ -227,6 +229,7 @@ export class YouduBridge {
   #groupContextFiles;
   #groupHistoryStaging = new Map();
   #groupHistoryStagingWaitMs = 10_000;
+  #groupContextRecentLimit = DEFAULT_GROUP_CONTEXT_RECENT_LIMIT;
   #accessPolicy;
   #groupAccess;
   #onGroupSeen;
@@ -256,6 +259,7 @@ export class YouduBridge {
     groupHistory,
     groupContextFiles,
     groupHistoryStagingWaitMs = 10_000,
+    groupContextRecentLimit = DEFAULT_GROUP_CONTEXT_RECENT_LIMIT,
     accessPolicy,
     groupAccess,
     onGroupSeen,
@@ -284,6 +288,9 @@ export class YouduBridge {
     this.#groupHistoryStagingWaitMs = Number.isFinite(groupHistoryStagingWaitMs) && groupHistoryStagingWaitMs >= 0
       ? groupHistoryStagingWaitMs
       : 10_000;
+    this.#groupContextRecentLimit = Number.isSafeInteger(groupContextRecentLimit) && groupContextRecentLimit > 0
+      ? groupContextRecentLimit
+      : DEFAULT_GROUP_CONTEXT_RECENT_LIMIT;
     this.#accessPolicy = accessPolicy;
     this.#groupAccess = groupAccess ?? null;
     this.#onGroupSeen = typeof onGroupSeen === 'function' ? onGroupSeen : null;
@@ -556,16 +563,19 @@ export class YouduBridge {
     if (!provider || typeof provider.stage !== 'function') return;
     const files = this.#groupHistoryFileSources(message);
     if (files.length === 0) return;
+    const messageId = message.messageId;
     const task = Promise.resolve()
       .then(() => provider.stage({
         chatId: message.chatId,
-        messageId: message.messageId,
+        messageId,
+        sender: message.senderName || message.senderAccount || message.senderId,
+        timestamp: message.timestamp,
         files,
         signal: this.#signal,
       }))
       .then((staged) => {
         if (Array.isArray(staged?.files) && staged.files.length > 0) {
-          this.#groupHistoryBuffer.attachFiles(key, message.messageId, staged.files);
+          this.#groupHistoryBuffer.attachFiles(key, messageId, staged.files);
         }
         return staged ?? null;
       })
@@ -578,26 +588,26 @@ export class YouduBridge {
         return null;
       })
       .finally(() => {
-        if (this.#groupHistoryStaging.get(message.messageId) === task) {
-          this.#groupHistoryStaging.delete(message.messageId);
+        if (this.#groupHistoryStaging.get(messageId)?.task === task) {
+          this.#groupHistoryStaging.delete(messageId);
         }
       });
-    this.#groupHistoryStaging.set(message.messageId, task);
+    this.#groupHistoryStaging.set(messageId, { chatId: message.chatId, task });
   }
 
   /**
-   * 等一等这批条目正在下载的附件（有上限）。附件下载是后台任务，通常在下一条 @ 消息
-   * 之前就已完成；这里只兜住“刚发完就被 @" 的情况，超时后按已有内容继续。
+   * 等一等这个群里正在下载的附件（有上限）。附件下载是后台任务，通常在下一条 @ 消息
+   * 之前就已完成；这里只兜住“刚发完就被 @”的情况，超时后按已有内容继续。
    */
-  async #awaitGroupHistoryFiles(entries) {
-    if (this.#groupHistoryStaging.size === 0) return;
-    const watched = entries
-      .map((entry) => this.#groupHistoryStaging.get(entry.messageId))
-      .filter(Boolean);
+  async #awaitGroupHistoryFiles(chatId) {
+    const watched = [];
+    for (const staged of this.#groupHistoryStaging.values()) {
+      if (staged.chatId === chatId) watched.push(staged.task);
+    }
     if (watched.length === 0) return;
     let timer;
     const timeout = new Promise((resolve) => {
-      // 不做 unref：这个等待本身就是要给下载留时间，且最长只有几百毫秒级的配置值。
+      // 不做 unref：这个等待本身就是要给下载留时间，且最长只有配置的等待上限。
       timer = setTimeout(resolve, this.#groupHistoryStagingWaitMs);
     });
     try {
@@ -607,23 +617,47 @@ export class YouduBridge {
     }
   }
 
-  /** 当前群聊待注入的上下文快照；不在群聊、未开启或缓存为空时返回 null。 */
+  /**
+   * 附件清单块：优先用磁盘索引重建（重启、消费、超时都不影响，能列出该群最近的附件），
+   * provider 没有索引能力时退回“这一轮文本条目对应的附件”。
+   */
+  async #groupHistoryFilesBlock(message, entries) {
+    const entriesBlock = formatGroupHistoryFilesBlock(entries);
+    const provider = this.#groupContextFiles;
+    if (!provider || typeof provider.list !== 'function') {
+      return { block: entriesBlock, hasFiles: entriesBlock !== '' };
+    }
+    try {
+      const listing = await provider.list({
+        chatId: message.chatId,
+        limit: this.#groupContextRecentLimit,
+      });
+      const messages = Array.isArray(listing?.messages) ? listing.messages : [];
+      return {
+        block: formatGroupContextFilesBlock(messages, { directory: listing?.directory ?? '' }),
+        hasFiles: messages.some((entry) => Array.isArray(entry?.files) && entry.files.length > 0),
+      };
+    } catch (error) {
+      this.#logger.debug?.(
+        '[dsh-im:youdu] group context attachment listing failed:',
+        error?.message ?? String(error),
+      );
+      return { block: entriesBlock, hasFiles: entriesBlock !== '' };
+    }
+  }
+
+  /** 当前群聊待注入的上下文快照；不在群聊、未开启、无历史且无附件时返回 null。 */
   async #pendingGroupHistory(message, key) {
     if (message.kind !== 'group') return null;
     const settings = this.#groupHistorySettings();
     if (!groupHistoryActive(settings)) return null;
     const limit = settings.limit;
-    await this.#awaitGroupHistoryFiles(this.#groupHistoryBuffer.snapshot(key, { limit }));
+    await this.#awaitGroupHistoryFiles(message.chatId);
     const entries = this.#groupHistoryBuffer.snapshot(key, { limit });
-    if (entries.length === 0) return null;
-    const block = formatGroupHistoryBlock(entries);
-    if (!block) return null;
-    return Object.freeze({
-      key,
-      entries,
-      block,
-      filesBlock: formatGroupHistoryFilesBlock(entries),
-    });
+    const block = entries.length > 0 ? formatGroupHistoryBlock(entries) : '';
+    const files = await this.#groupHistoryFilesBlock(message, entries);
+    if (!block && !files.hasFiles) return null;
+    return Object.freeze({ key, entries, block, filesBlock: files.block });
   }
 
   /** 回合结束（无论成败）后消费已注入的条目；注入期间新到的消息保留给下一轮。 */

@@ -44,6 +44,7 @@ export class YouduRuntime {
   #groupHistory;
   #groupContextFiles;
   #groupHistoryStagingWaitMs;
+  #groupContextRecentLimit;
   #accessPolicy;
   #groupAccess;
   #onGroupSeen;
@@ -69,6 +70,7 @@ export class YouduRuntime {
     groupHistory,
     groupContextFiles,
     groupHistoryStagingWaitMs = 10_000,
+    groupContextRecentLimit,
     accessPolicy,
     groupAccess,
     onGroupSeen,
@@ -90,6 +92,7 @@ export class YouduRuntime {
     this.#groupHistory = groupHistory ?? null;
     this.#groupContextFiles = groupContextFiles ?? null;
     this.#groupHistoryStagingWaitMs = groupHistoryStagingWaitMs;
+    this.#groupContextRecentLimit = groupContextRecentLimit;
     this.#accessPolicy = accessPolicy;
     this.#groupAccess = groupAccess ?? null;
     this.#onGroupSeen = typeof onGroupSeen === 'function' ? onGroupSeen : null;
@@ -196,6 +199,7 @@ export class YouduRuntime {
       groupHistory: this.#groupHistory,
       groupContextFiles: this.#groupContextFiles,
       groupHistoryStagingWaitMs: this.#groupHistoryStagingWaitMs,
+      groupContextRecentLimit: this.#groupContextRecentLimit,
       accessPolicy: this.#accessPolicy,
       groupAccess: this.#groupAccess,
       onGroupSeen: this.#onGroupSeen,

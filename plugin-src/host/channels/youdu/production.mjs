@@ -102,14 +102,20 @@ function createYouduGroupContextFiles(settingsStore, botId, {
   return {
     botId,
     retentionHours: store.retentionHours,
-    async stage({ chatId, messageId, files, signal }) {
+    async stage({ chatId, messageId, sender, timestamp, files, signal }) {
       return store.stage({
         workspace: settingsStore.workspaceFor(botId),
         chatId,
         messageId,
+        sender,
+        timestamp,
         files,
         signal,
       });
+    },
+    /** 从磁盘重建“这个群最近的附件”：重启、清单被消费后依然能列出。 */
+    async list({ chatId, limit }) {
+      return store.list(settingsStore.workspaceFor(botId), chatId, { limit });
     },
     sweep: () => store.sweep(settingsStore.workspaceFor(botId)),
   };
@@ -255,6 +261,7 @@ export async function createProductionController(ctx, config = {}, internals = {
           logger,
         }),
         groupHistoryStagingWaitMs: config.groupHistoryStagingWaitMs,
+        groupContextRecentLimit: config.groupContextRecentLimit,
         accessPolicy: createYouduAccessPolicy(settingsStore, botId, botConfig, config.groupResponseMode ?? 'mention'),
         groupAccess: createYouduGroupAccess(settingsStore, botId),
         onGroupSeen: (chatId, info = {}) => {
