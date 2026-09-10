@@ -66,6 +66,7 @@ import {
   DEFAULT_GROUP_HISTORY_CONFIG,
   DISABLED_GROUP_HISTORY_CONFIG,
   formatGroupHistoryBlock,
+  formatGroupHistoryFilesBlock,
   groupHistoryActive,
   normalizeGroupHistoryConfig,
 } from '../shared/group-history.mjs';
@@ -223,6 +224,9 @@ export class YouduBridge {
   #contextEnhancement;
   #groupHistory;
   #groupHistoryBuffer = createGroupHistory();
+  #groupContextFiles;
+  #groupHistoryStaging = new Map();
+  #groupHistoryStagingWaitMs = 10_000;
   #accessPolicy;
   #groupAccess;
   #onGroupSeen;
@@ -250,6 +254,8 @@ export class YouduBridge {
     kbAccount,
     contextEnhancement,
     groupHistory,
+    groupContextFiles,
+    groupHistoryStagingWaitMs = 10_000,
     accessPolicy,
     groupAccess,
     onGroupSeen,
@@ -274,6 +280,10 @@ export class YouduBridge {
       : null;
     this.#contextEnhancement = contextEnhancement;
     this.#groupHistory = groupHistory ?? null;
+    this.#groupContextFiles = groupContextFiles ?? null;
+    this.#groupHistoryStagingWaitMs = Number.isFinite(groupHistoryStagingWaitMs) && groupHistoryStagingWaitMs >= 0
+      ? groupHistoryStagingWaitMs
+      : 10_000;
     this.#accessPolicy = accessPolicy;
     this.#groupAccess = groupAccess ?? null;
     this.#onGroupSeen = typeof onGroupSeen === 'function' ? onGroupSeen : null;
@@ -523,24 +533,97 @@ export class YouduBridge {
       allowed = false;
     }
     if (!allowed) return 0;
-    return this.#groupHistoryBuffer.record(key, {
+    const recorded = this.#groupHistoryBuffer.record(key, {
       sender: message.senderName || message.senderAccount || message.senderId,
       body: message.text || placeholderForMedia(message.media),
       timestamp: message.timestamp,
       messageId: message.messageId,
     }, { limit: settings.limit });
+    // 附件走媒体下载接口异步取回：先入库正文，下载完成后再补清单。
+    this.#stageGroupHistoryFiles(message, key);
+    return recorded;
+  }
+
+  /** 待下载的群聊附件描述，与寻址消息复用同一套媒体描述（名字、类型、按需 load）。 */
+  #groupHistoryFileSources(message) {
+    const media = Array.isArray(message.media) ? message.media : [];
+    if (media.length === 0 || typeof this.#bot?.downloadMedia !== 'function') return [];
+    return buildPromptMessage(message, this.#bot).files ?? [];
+  }
+
+  #stageGroupHistoryFiles(message, key) {
+    const provider = this.#groupContextFiles;
+    if (!provider || typeof provider.stage !== 'function') return;
+    const files = this.#groupHistoryFileSources(message);
+    if (files.length === 0) return;
+    const task = Promise.resolve()
+      .then(() => provider.stage({
+        chatId: message.chatId,
+        messageId: message.messageId,
+        files,
+        signal: this.#signal,
+      }))
+      .then((staged) => {
+        if (Array.isArray(staged?.files) && staged.files.length > 0) {
+          this.#groupHistoryBuffer.attachFiles(key, message.messageId, staged.files);
+        }
+        return staged ?? null;
+      })
+      .catch((error) => {
+        // 附件下载失败只降级为文本占位，不影响消息本身。
+        this.#logger.debug?.(
+          '[dsh-im:youdu] group context attachment staging failed:',
+          error?.message ?? String(error),
+        );
+        return null;
+      })
+      .finally(() => {
+        if (this.#groupHistoryStaging.get(message.messageId) === task) {
+          this.#groupHistoryStaging.delete(message.messageId);
+        }
+      });
+    this.#groupHistoryStaging.set(message.messageId, task);
+  }
+
+  /**
+   * 等一等这批条目正在下载的附件（有上限）。附件下载是后台任务，通常在下一条 @ 消息
+   * 之前就已完成；这里只兜住“刚发完就被 @" 的情况，超时后按已有内容继续。
+   */
+  async #awaitGroupHistoryFiles(entries) {
+    if (this.#groupHistoryStaging.size === 0) return;
+    const watched = entries
+      .map((entry) => this.#groupHistoryStaging.get(entry.messageId))
+      .filter(Boolean);
+    if (watched.length === 0) return;
+    let timer;
+    const timeout = new Promise((resolve) => {
+      // 不做 unref：这个等待本身就是要给下载留时间，且最长只有几百毫秒级的配置值。
+      timer = setTimeout(resolve, this.#groupHistoryStagingWaitMs);
+    });
+    try {
+      await Promise.race([Promise.allSettled(watched), timeout]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /** 当前群聊待注入的上下文快照；不在群聊、未开启或缓存为空时返回 null。 */
-  #pendingGroupHistory(message, key) {
+  async #pendingGroupHistory(message, key) {
     if (message.kind !== 'group') return null;
     const settings = this.#groupHistorySettings();
     if (!groupHistoryActive(settings)) return null;
-    const entries = this.#groupHistoryBuffer.snapshot(key, { limit: settings.limit });
+    const limit = settings.limit;
+    await this.#awaitGroupHistoryFiles(this.#groupHistoryBuffer.snapshot(key, { limit }));
+    const entries = this.#groupHistoryBuffer.snapshot(key, { limit });
     if (entries.length === 0) return null;
     const block = formatGroupHistoryBlock(entries);
     if (!block) return null;
-    return Object.freeze({ key, entries, block });
+    return Object.freeze({
+      key,
+      entries,
+      block,
+      filesBlock: formatGroupHistoryFilesBlock(entries),
+    });
   }
 
   /** 回合结束（无论成败）后消费已注入的条目；注入期间新到的消息保留给下一轮。 */
@@ -905,8 +988,10 @@ export class YouduBridge {
       let artifacts = [];
       let boundKbSessionId = null;
       // 群聊上下文：取快照并拼在正文之前，回合结束后消费掉这份快照。
-      const groupHistory = this.#pendingGroupHistory(message, key);
-      if (groupHistory) content = appendGroupHistoryContext(content, groupHistory.block);
+      const groupHistory = await this.#pendingGroupHistory(message, key);
+      if (groupHistory) {
+        content = appendGroupHistoryContext(content, groupHistory.block, groupHistory.filesBlock);
+      }
       try {
         ({ answer, artifacts } = await askInWorkspaceSession({
           harness: this.#harness,

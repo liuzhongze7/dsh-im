@@ -59,6 +59,7 @@ const required = [
   'src/channels/whatsapp/whatsapp-web-session.mjs',
   'src/channels/shared/context-enhancement.mjs',
   'src/channels/shared/group-history.mjs',
+  'src/channels/shared/group-context-files.mjs',
 ];
 await Promise.all(required.map((path) => access(resolve(root, path))));
 

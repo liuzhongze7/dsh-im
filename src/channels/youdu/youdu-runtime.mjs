@@ -42,6 +42,8 @@ export class YouduRuntime {
   #botId;
   #contextEnhancement;
   #groupHistory;
+  #groupContextFiles;
+  #groupHistoryStagingWaitMs;
   #accessPolicy;
   #groupAccess;
   #onGroupSeen;
@@ -65,6 +67,8 @@ export class YouduRuntime {
     botId = '',
     contextEnhancement,
     groupHistory,
+    groupContextFiles,
+    groupHistoryStagingWaitMs = 10_000,
     accessPolicy,
     groupAccess,
     onGroupSeen,
@@ -84,6 +88,8 @@ export class YouduRuntime {
     this.#botId = botId ?? '';
     this.#contextEnhancement = contextEnhancement;
     this.#groupHistory = groupHistory ?? null;
+    this.#groupContextFiles = groupContextFiles ?? null;
+    this.#groupHistoryStagingWaitMs = groupHistoryStagingWaitMs;
     this.#accessPolicy = accessPolicy;
     this.#groupAccess = groupAccess ?? null;
     this.#onGroupSeen = typeof onGroupSeen === 'function' ? onGroupSeen : null;
@@ -188,6 +194,8 @@ export class YouduRuntime {
       },
       contextEnhancement: this.#contextEnhancement,
       groupHistory: this.#groupHistory,
+      groupContextFiles: this.#groupContextFiles,
+      groupHistoryStagingWaitMs: this.#groupHistoryStagingWaitMs,
       accessPolicy: this.#accessPolicy,
       groupAccess: this.#groupAccess,
       onGroupSeen: this.#onGroupSeen,

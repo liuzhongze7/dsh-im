@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import test from 'node:test';
 
 import { createProductionController } from '../../../plugin-src/host/channels/youdu/production.mjs';
 import { DeliveryService } from '../../../plugin-src/host/delivery-service.mjs';
 import { DEFAULT_GROUP_HISTORY_CONFIG } from '../../../src/channels/shared/group-history.mjs';
+import { DEFAULT_GROUP_CONTEXT_RETENTION_HOURS } from '../../../src/channels/shared/group-context-files.mjs';
 
 test('Youdu production injects a file ingress executor for inbound attachments', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'dsh-youdu-production-'));
@@ -226,6 +227,85 @@ test('Youdu production hands each runtime a live group history provider', async 
   await production.controller.updateGroupHistory(bot.botId, { enabled: true, limit: 8 });
   assert.deepEqual(provider.getSettings(), { enabled: true, limit: 8 });
   assert.equal(runtimeOptions.length, 2);
+});
+
+test('Youdu production stages group context attachments inside the bot workspace', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-youdu-group-context-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const dataDir = join(root, 'data');
+  const workspace = join(root, 'workspace');
+  const bot = { botId: 'yd_1a7d8037a6758b93fe17c1cc', sourceBotId: 'oc86aed821c86345e4' };
+  const runtimeOptions = [];
+  let controllerOptions;
+
+  class ConfigStore {
+    async load() { return this; }
+    list() { return [bot]; }
+    get(botId) { return botId === bot.botId ? bot : null; }
+    async save(value) { return value; }
+    async remove() { return null; }
+  }
+  class StateStore {
+    async load() { return this; }
+  }
+  class Harness {
+    stopManagedProcess() {}
+  }
+  class Controller {
+    constructor(options) { controllerOptions = options; }
+    async close() {}
+    status() { return { bots: [{ botId: bot.botId }] }; }
+  }
+  class Runtime {
+    constructor(options) { runtimeOptions.push(options); }
+  }
+  const ctx = {
+    credentials: {
+      async resolve() { return { value: 'secret-1' }; },
+      async set() {},
+      async unset() {},
+    },
+    apiProxy: {},
+    logger: () => ({ error() {}, warn() {}, info() {}, debug() {} }),
+  };
+
+  const production = await createProductionController(ctx, { dataDir, workspace }, {
+    ConfigStore,
+    StateStore,
+    HarnessClient: Harness,
+    Controller,
+    Runtime,
+    createConnectionSupervisor: () => ({
+      ready: Promise.resolve(),
+      start() { return this; },
+      async close() {},
+    }),
+  });
+  t.after(() => production.close());
+
+  await controllerOptions.createRuntime({ botId: bot.botId, config: bot, secret: 'secret-1' });
+  const files = runtimeOptions[0].groupContextFiles;
+  assert.equal(files.botId, bot.botId);
+  assert.equal(files.retentionHours, DEFAULT_GROUP_CONTEXT_RETENTION_HOURS);
+
+  const staged = await files.stage({
+    chatId: '{0798E01E-CD68-42BB-813C-EB51593BB0F5}',
+    messageId: '1777543724',
+    files: [{ name: 'photo.png', data: Buffer.from('png-bytes'), mediaType: 'image/png' }],
+  });
+  assert.equal(staged.files.length, 1);
+  const parts = staged.files[0].path.split(/[\\/]+/u);
+  assert.deepEqual(parts.slice(0, 3), [
+    '.dsh-im', 'group-context', '{0798E01E-CD68-42BB-813C-EB51593BB0F5}',
+  ]);
+  assert.match(parts[3], /^\d{8}-\d{6}-1777543724$/u);
+  assert.equal(parts[4], '01-photo.png');
+  // 相对路径落在该 bot 的工作区里，模型按相对路径就能读到。
+  assert.equal(await readFile(resolve(workspace, staged.files[0].path), 'utf8'), 'png-bytes');
+  assert.deepEqual(await readdir(join(workspace, '.dsh-im', 'group-context')), [
+    '{0798E01E-CD68-42BB-813C-EB51593BB0F5}',
+  ]);
+  assert.deepEqual(await files.sweep(), { deleted: 0 });
 });
 
 test('Youdu production rejects inbound staging without a workspace', async (t) => {

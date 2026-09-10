@@ -12,6 +12,7 @@ import {
   appendGroupHistoryContext,
   createGroupHistory,
   formatGroupHistoryBlock,
+  formatGroupHistoryFilesBlock,
   groupHistoryActive,
   normalizeGroupHistoryConfig,
   normalizeGroupHistoryEntry,
@@ -206,4 +207,67 @@ test('the context block is prepended before the current message', () => {
   assert.equal(appendGroupHistoryContext('只有正文', ''), '只有正文');
   assert.equal(appendGroupHistoryContext('只有正文', '   '), '只有正文');
   assert.deepEqual(appendGroupHistoryContext({ custom: true }, block), { custom: true });
+});
+
+test('staged attachments are attached to their entry and listed in their own block', () => {
+  const history = createGroupHistory();
+  history.record('group:g-1', { sender: '张三', body: '[图片] photo.png', messageId: 'id-1', timestamp: 1_700_000_000_000 });
+  history.record('group:g-1', { sender: '李四', body: '看下附件', messageId: 'id-2', timestamp: 1_700_000_060_000 });
+  assert.deepEqual(history.snapshot('group:g-1')[0].files, []);
+  assert.equal(formatGroupHistoryFilesBlock(history.snapshot('group:g-1')), '');
+
+  const attached = history.attachFiles('group:g-1', 'id-1', [
+    { name: 'photo.png', path: '.dsh-im/group-context/g-1/20260910-141200-id-1/01-photo.png' },
+  ]);
+  assert.equal(attached.files.length, 1);
+  assert.equal(history.attachFiles('group:g-1', 'missing', [{ path: 'x' }]), null);
+  assert.equal(history.attachFiles('group:g-1', 'id-2', []), null);
+  assert.equal(history.attachFiles('group:missing', 'id-1', [{ path: 'x' }]), null);
+
+  const entries = history.snapshot('group:g-1');
+  assert.equal(entries[0].files[0].name, 'photo.png');
+  const filesBlock = formatGroupHistoryFilesBlock(entries);
+  assert.match(filesBlock, /^<dsh_im_group_files>\n/u);
+  assert.match(filesBlock, /\n<\/dsh_im_group_files>$/u);
+  const payload = JSON.parse(filesBlock.split('\n')[1]);
+  assert.equal(payload.files.length, 1);
+  assert.equal(payload.files[0].sender, '张三');
+  assert.equal(payload.files[0].path, '.dsh-im/group-context/g-1/20260910-141200-id-1/01-photo.png');
+  assert.match(payload.files[0].time, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/u);
+  assert.match(payload.description, /relative to the current Harness workspace/u);
+
+  // 历史块与附件清单块一起前置，且顺序固定：历史 → 附件 → 当前消息。
+  const content = appendGroupHistoryContext(
+    '帮我看看',
+    formatGroupHistoryBlock(entries),
+    filesBlock,
+  );
+  assert.equal(content.indexOf('<dsh_im_group_history') < content.indexOf('<dsh_im_group_files>'), true);
+  assert.equal(content.indexOf('<dsh_im_group_files>') < content.indexOf(CURRENT_MESSAGE_MARKER), true);
+  assert.equal(content.endsWith('\n帮我看看'), true);
+
+  // 条目被消费后附件清单随之消失，但磁盘文件不受影响（由保留期清理）。
+  history.consume('group:g-1', entries);
+  assert.equal(formatGroupHistoryFilesBlock(history.snapshot('group:g-1')), '');
+});
+
+test('the attachment block drops the oldest files first when it exceeds its budget', () => {
+  const history = createGroupHistory();
+  for (let index = 0; index < 60; index += 1) {
+    history.record('group:g-1', {
+      sender: 'S',
+      body: `m${index}`,
+      messageId: `id-${index}`,
+      timestamp: 1_700_000_000_000 + index * 1000,
+    });
+    history.attachFiles('group:g-1', `id-${index}`, [{
+      name: `${'n'.repeat(120)}-${index}.bin`,
+      path: `.dsh-im/group-context/g-1/${'p'.repeat(80)}-${index}/01-file.bin`,
+    }]);
+  }
+  const block = formatGroupHistoryFilesBlock(history.snapshot('group:g-1', { limit: 200 }));
+  assert.equal([...block].length <= 4_000, true);
+  const payload = JSON.parse(block.split('\n')[1]);
+  assert.equal(payload.files.at(-1).name.endsWith('-59.bin'), true, 'the newest attachment survives');
+  assert.equal(payload.files.some((file) => file.name.endsWith('-0.bin')), false, 'the oldest are dropped');
 });

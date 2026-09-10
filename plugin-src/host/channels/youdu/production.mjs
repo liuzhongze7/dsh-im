@@ -19,6 +19,10 @@ import {
 import {
   normalizeGroupHistoryConfig,
 } from '../../../../src/channels/shared/group-history.mjs';
+import {
+  createGroupContextFiles,
+  normalizeGroupContextRetention,
+} from '../../../../src/channels/shared/group-context-files.mjs';
 import { createConnectionSupervisor } from './connection-supervisor.mjs';
 import { harnessConnection } from '../../harness-connection.mjs';
 import { createDeliveryAdapter } from '../../delivery-adapter.mjs';
@@ -79,6 +83,35 @@ function createYouduGroupHistory(settingsStore, botId) {
   return {
     botId,
     getSettings: () => normalizeGroupHistoryConfig(settingsStore.groupHistoryFor(botId)),
+  };
+}
+
+/**
+ * 群聊附件落盘：用媒体下载接口把未寻址群消息的图片/文件取回，写到该 bot 工作区的
+ * `.dsh-im/group-context/<群>/<时间戳>-<消息>/`，供模型在被 @ 时按相对路径读取。
+ * 工作区每次实时读取，跟随设置页的工作区切换；过期清理挂在写入路径上。
+ */
+function createYouduGroupContextFiles(settingsStore, botId, {
+  retentionHours, sweepIntervalMs, logger = console,
+} = {}) {
+  const store = createGroupContextFiles({
+    retentionHours: normalizeGroupContextRetention(retentionHours),
+    sweepIntervalMs,
+    logger,
+  });
+  return {
+    botId,
+    retentionHours: store.retentionHours,
+    async stage({ chatId, messageId, files, signal }) {
+      return store.stage({
+        workspace: settingsStore.workspaceFor(botId),
+        chatId,
+        messageId,
+        files,
+        signal,
+      });
+    },
+    sweep: () => store.sweep(settingsStore.workspaceFor(botId)),
   };
 }
 
@@ -216,6 +249,12 @@ export async function createProductionController(ctx, config = {}, internals = {
         botId: botConfig.sourceBotId ?? botConfig.botId ?? botId,
         contextEnhancement: createYouduContextEnhancement(settingsStore, botId),
         groupHistory: createYouduGroupHistory(settingsStore, botId),
+        groupContextFiles: createYouduGroupContextFiles(settingsStore, botId, {
+          retentionHours: config.groupContextRetentionHours,
+          sweepIntervalMs: config.groupContextSweepIntervalMs,
+          logger,
+        }),
+        groupHistoryStagingWaitMs: config.groupHistoryStagingWaitMs,
         accessPolicy: createYouduAccessPolicy(settingsStore, botId, botConfig, config.groupResponseMode ?? 'mention'),
         groupAccess: createYouduGroupAccess(settingsStore, botId),
         onGroupSeen: (chatId, info = {}) => {

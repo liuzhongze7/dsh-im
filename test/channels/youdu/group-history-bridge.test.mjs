@@ -273,3 +273,328 @@ test('group context and the context-enhancement source block coexist', async () 
   assert.match(content, /<dsh_im_source>\{"channel":"youdu","senderName":"成员一"\}<\/dsh_im_source>/);
   assert.match(content, /\[Current message - respond to this\]\n<dsh_im_source>/);
 });
+
+/** 群里未寻址的多媒体消息：只带 media 节点，没有可用正文。 */
+function mediaGroupFrame(messageId, { text = '', ...body } = {}) {
+  return frame(messageId, text, {
+    chatId: 'g-1',
+    chatType: 'group',
+    from: { userId: '10086', name: '张三' },
+    createTime: 1_700_000_000_000,
+    raw: { decoded: { msgType: 0, atUser: [] } },
+    ...body,
+  });
+}
+
+function mergedForwardFrame(messageId) {
+  const line = (payload) => Buffer.from(JSON.stringify(payload)).toString('base64');
+  return mediaGroupFrame(messageId, {
+    msgType: 12,
+    raw: {
+      decoded: {
+        msgType: 12,
+        title: '聊天记录',
+        list: [
+          { sender: 2, senderName: '李四', sendTime: 1_700_000_000_000, content: line({ text: [{ txt: '见附件' }] }) },
+          {
+            sender: 2,
+            senderName: '李四',
+            sendTime: 1_700_000_100_000,
+            content: line({ msgType: 3, id: 'f-1', name: 'spec.pdf', size: 20_480 }),
+          },
+        ],
+      },
+    },
+  });
+}
+
+test('group media is cached as a text placeholder and never downloaded', async () => {
+  const contents = [];
+  const downloads = [];
+  const bridge = new YouduBridge({
+    bot: {
+      ...makeBot([]),
+      downloadMedia: async (media) => { downloads.push(media); return Buffer.from('x'); },
+    },
+    harness: baseHarness({ contents }),
+    state: stateFixture().state,
+    ownerUserId: '*',
+    botId: 'bot-1',
+    groupResponseMode: 'mention',
+    groupHistory: { enabled: true, limit: 50 },
+  });
+
+  await bridge.accept(mediaGroupFrame('m-image', { image: { mediaId: 'media-img', name: 'photo.png' } }));
+  await bridge.accept(mediaGroupFrame('m-file', { file: { mediaId: 'media-file', name: 'report.pdf', size: 12_345 } }));
+  await bridge.accept(mediaGroupFrame('m-audio', { msgType: 'audio', media: [{ mediaId: 'media-audio', name: 'voice.amr' }] }));
+  // 带文字说明的图片：正文优先，不额外标注附件（与 openclaw 一致）。
+  await bridge.accept(mediaGroupFrame('m-captioned', { text: '看下这张图', image: { mediaId: 'media-img2', name: 'chart.png' } }));
+
+  await bridge.accept(groupFrame('ask-1', '帮我看看', { atUser: ['bot-1'] }));
+  const block = contents[0];
+  assert.match(block, /张三: \[图片\] photo\.png/);
+  assert.match(block, /张三: \[文件\] report\.pdf/);
+  assert.match(block, /张三: \[语音\] voice\.amr/);
+  assert.match(block, /张三: 看下这张图\n/);
+  assert.equal(block.includes('chart.png'), false, 'a captioned attachment is not annotated separately');
+  assert.equal(block.includes('media-img'), false, 'no media id may leak into the prompt');
+  assert.deepEqual(downloads, [], 'unaddressed group media must never be fetched');
+});
+
+test('a forwarded chat record keeps its placeholder lines and still downloads nothing', async () => {
+  const contents = [];
+  const downloads = [];
+  const bridge = new YouduBridge({
+    bot: {
+      ...makeBot([]),
+      downloadMedia: async (media) => { downloads.push(media); return Buffer.from('x'); },
+    },
+    harness: baseHarness({ contents }),
+    state: stateFixture().state,
+    ownerUserId: '*',
+    botId: 'bot-1',
+    groupResponseMode: 'mention',
+    groupHistory: { enabled: true, limit: 50 },
+  });
+
+  await bridge.accept(mergedForwardFrame('m-merged'));
+  await bridge.accept(groupFrame('ask-1', '总结', { atUser: ['bot-1'] }));
+  assert.match(contents[0], /\[文件: spec\.pdf\] \(20\.0KB\)/);
+  assert.match(contents[0], /聊天记录/);
+  assert.deepEqual(downloads, []);
+});
+
+/** 模拟“单独接口下载到临时目录”的 provider：记录调用并返回工作区相对路径。 */
+function stagingFixture({ fail = false, delayMs = 0 } = {}) {
+  const calls = [];
+  const loaded = [];
+  return {
+    calls,
+    loaded,
+    async stage({ chatId, messageId, files }) {
+      calls.push({ chatId, messageId, names: files.map((file) => file.name) });
+      for (const file of files) loaded.push(await file.load({ signal: undefined }));
+      if (delayMs > 0) await new Promise((resolve) => { setTimeout(resolve, delayMs); });
+      if (fail) throw new Error('download failed');
+      return {
+        files: files.map((file, index) => ({
+          name: file.name,
+          path: `.dsh-im/group-context/${chatId}/${messageId}/0${index + 1}-${file.name}`,
+        })),
+        directory: `D:\\workspace\\.dsh-im\\group-context\\${chatId}\\${messageId}`,
+      };
+    },
+  };
+}
+
+test('group attachments are downloaded through the media interface and listed for the model', async () => {
+  const contents = [];
+  const downloads = [];
+  const staging = stagingFixture();
+  const bridge = new YouduBridge({
+    bot: {
+      ...makeBot([]),
+      downloadMedia: async (media) => {
+        downloads.push(media.mediaId);
+        return Buffer.from(`bytes-of-${media.mediaId}`);
+      },
+    },
+    harness: baseHarness({ contents }),
+    state: stateFixture().state,
+    ownerUserId: '*',
+    botId: 'bot-1',
+    groupResponseMode: 'mention',
+    groupHistory: { enabled: true, limit: 50 },
+    groupContextFiles: staging,
+  });
+
+  await bridge.accept(mediaGroupFrame('m-image', {
+    image: { mediaId: 'media-img', name: 'photo.png' },
+    createTime: 1_700_000_000_000,
+  }));
+  await bridge.accept(groupFrame('ask-1', '这张图什么意思', { atUser: ['bot-1'] }));
+
+  assert.deepEqual(staging.calls, [{ chatId: 'g-1', messageId: 'm-image', names: ['photo.png'] }]);
+  assert.deepEqual(downloads, ['media-img']);
+  assert.deepEqual(staging.loaded, [Buffer.from('bytes-of-media-img')]);
+  const content = contents[0];
+  assert.match(content, /张三: \[图片\] photo\.png\n/);
+  assert.match(content, /<dsh_im_group_files>\n/u);
+  const payload = JSON.parse(content.split('\n').find((line) => line.startsWith('{"description"')));
+  assert.deepEqual(payload.files, [{
+    name: 'photo.png',
+    path: '.dsh-im/group-context/g-1/m-image/01-photo.png',
+    sender: '张三',
+    time: payload.files[0].time,
+  }]);
+  // 块顺序：历史 → 附件清单 → 当前消息标记 → 当前正文。
+  assert.equal(content.indexOf('<dsh_im_group_history') < content.indexOf('<dsh_im_group_files>'), true);
+  assert.equal(content.indexOf('<dsh_im_group_files>') < content.indexOf('[Current message - respond to this]'), true);
+  assert.equal(content.endsWith('\n这张图什么意思'), true);
+});
+
+test('the injection waits for an in-flight attachment download before building the prompt', async () => {
+  const contents = [];
+  const staging = stagingFixture({ delayMs: 30 });
+  const bridge = new YouduBridge({
+    bot: { ...makeBot([]), downloadMedia: async () => Buffer.from('bytes') },
+    harness: baseHarness({ contents }),
+    state: stateFixture().state,
+    ownerUserId: '*',
+    botId: 'bot-1',
+    groupResponseMode: 'mention',
+    groupHistory: { enabled: true, limit: 50 },
+    groupContextFiles: staging,
+    groupHistoryStagingWaitMs: 1_000,
+  });
+
+  await bridge.accept(mediaGroupFrame('m-file', { file: { mediaId: 'media-file', name: 'spec.pdf' } }));
+  await bridge.accept(groupFrame('ask-1', '看看附件', { atUser: ['bot-1'] }));
+  assert.match(contents[0], /01-spec\.pdf/u);
+});
+
+test('a slow attachment download degrades to the text placeholder after the bounded wait', async () => {
+  const contents = [];
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const staging = {
+    async stage() {
+      await gate;
+      return { files: [{ name: 'late.pdf', path: '.dsh-im/group-context/g-1/m-file/01-late.pdf' }] };
+    },
+  };
+  const bridge = new YouduBridge({
+    bot: { ...makeBot([]), downloadMedia: async () => Buffer.from('bytes') },
+    harness: baseHarness({ contents }),
+    state: stateFixture().state,
+    ownerUserId: '*',
+    botId: 'bot-1',
+    groupResponseMode: 'mention',
+    groupHistory: { enabled: true, limit: 50 },
+    groupContextFiles: staging,
+    groupHistoryStagingWaitMs: 20,
+  });
+
+  await bridge.accept(mediaGroupFrame('m-file', { file: { mediaId: 'media-file', name: 'late.pdf' } }));
+  await bridge.accept(groupFrame('ask-1', '看看附件', { atUser: ['bot-1'] }));
+  assert.match(contents[0], /\[文件\] late\.pdf/u, 'the placeholder is still there');
+  assert.equal(contents[0].includes('<dsh_im_group_files>'), false, 'no manifest without staged paths');
+  release();
+});
+
+test('a failed attachment download keeps the text placeholder and never breaks the turn', async () => {
+  const contents = [];
+  const staging = stagingFixture({ fail: true });
+  const bridge = new YouduBridge({
+    bot: { ...makeBot([]), downloadMedia: async () => { throw new Error('socket closed'); } },
+    harness: baseHarness({ contents }),
+    state: stateFixture().state,
+    ownerUserId: '*',
+    botId: 'bot-1',
+    groupResponseMode: 'mention',
+    groupHistory: { enabled: true, limit: 50 },
+    groupContextFiles: staging,
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+  });
+
+  await bridge.accept(mediaGroupFrame('m-image', { image: { mediaId: 'media-img', name: 'photo.png' } }));
+  await bridge.accept(groupFrame('ask-1', '在吗', { atUser: ['bot-1'] }));
+  assert.equal(contents.length, 1);
+  assert.match(contents[0], /张三: \[图片\] photo\.png\n/);
+  assert.equal(contents[0].includes('<dsh_im_group_files>'), false, 'no manifest without staged paths');
+  assert.equal(contents[0].endsWith('\n在吗'), true);
+  assert.equal(staging.calls.length, 1);
+});
+
+test('nothing is downloaded for denied groups, disabled caches or direct chats', async () => {
+  const contents = [];
+  const staging = stagingFixture();
+  const downloads = [];
+  const bot = {
+    ...makeBot([]),
+    downloadMedia: async (media) => { downloads.push(media.mediaId); return Buffer.from('x'); },
+  };
+  const denied = new YouduBridge({
+    bot,
+    harness: baseHarness({ contents }),
+    state: stateFixture().state,
+    ownerUserId: '*',
+    botId: 'bot-1',
+    groupResponseMode: 'mention',
+    groupHistory: { enabled: true, limit: 50 },
+    groupContextFiles: staging,
+    groupAccess: { getSettings: () => ({ version: 1, groups: { 'g-1': { mode: 'disabled' } } }) },
+  });
+  await denied.accept(mediaGroupFrame('m-denied', { image: { mediaId: 'media-denied', name: 'a.png' } }));
+
+  const disabledCache = new YouduBridge({
+    bot,
+    harness: baseHarness({ contents }),
+    state: stateFixture().state,
+    ownerUserId: '*',
+    botId: 'bot-1',
+    groupResponseMode: 'mention',
+    groupHistory: { enabled: true, limit: 0 },
+    groupContextFiles: staging,
+  });
+  await disabledCache.accept(mediaGroupFrame('m-off', { image: { mediaId: 'media-off', name: 'b.png' } }));
+
+  const direct = new YouduBridge({
+    bot,
+    harness: baseHarness({ contents }),
+    state: stateFixture().state,
+    ownerUserId: '*',
+    botId: 'bot-1',
+    groupContextFiles: staging,
+  });
+  await direct.accept(frame('m-direct', '', {
+    from: { userId: 'owner-1', name: 'Owner' },
+    image: { mediaId: 'media-direct', name: 'c.png' },
+  }));
+
+  assert.deepEqual(staging.calls, [], 'only cached group messages may use the group context store');
+  // 私聊图片仍走原有的提示链路（下载交给 Harness 的入站文件管线），与群聊上下文缓存无关。
+  assert.deepEqual(downloads, ['media-direct']);
+});
+
+test('a quoted image is cached by its name, not by its bytes', async () => {  const contents = [];
+  const downloads = [];
+  const bridge = new YouduBridge({
+    bot: {
+      ...makeBot([]),
+      downloadMedia: async (media) => { downloads.push(media); return Buffer.from('x'); },
+    },
+    harness: baseHarness({ contents }),
+    state: stateFixture().state,
+    ownerUserId: '*',
+    botId: 'bot-1',
+    groupResponseMode: 'mention',
+    groupHistory: { enabled: true, limit: 50 },
+  });
+
+  await bridge.accept(frame('quote-1', '', {
+    chatId: 'g-1',
+    chatType: 'group',
+    from: { userId: '10087', name: '李四' },
+    createTime: 1_700_000_300_000,
+    raw: {
+      decoded: {
+        msgType: 10,
+        atUser: [],
+        text: [{ txt: '这张图什么意思' }],
+        reference: {
+          sender: 10086,
+          senderName: '张三',
+          time: 1_700_000_000_000,
+          text: [{ img: { id: 'ref-img', name: 'shot.png' } }],
+        },
+      },
+    },
+  }));
+  await bridge.accept(groupFrame('ask-1', '总结', { atUser: ['bot-1'] }));
+
+  assert.match(contents[0], /被回复的消息（发送者: 张三/);
+  assert.match(contents[0], /\[图片: shot\.png\]/);
+  assert.equal(contents[0].includes('ref-img'), false);
+  assert.deepEqual(downloads, []);
+});

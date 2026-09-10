@@ -17,12 +17,19 @@ export const MAX_GROUP_HISTORY_KEYS = 1_000;
 export const MAX_GROUP_HISTORY_ENTRY_CHARS = 300;
 /** 单次注入块总上限（码点），超出从最旧一条开始丢弃。 */
 export const MAX_GROUP_HISTORY_BLOCK_CHARS = 4_000;
+/** 附件清单块总上限（码点），超出同样从最旧的条目开始丢弃。 */
+export const MAX_GROUP_HISTORY_FILES_CHARS = 4_000;
 export const GROUP_HISTORY_SENDER_MAX_CHARS = 64;
+export const GROUP_HISTORY_FILE_NAME_MAX_CHARS = 200;
+export const GROUP_HISTORY_FILE_PATH_MAX_CHARS = 512;
 
 export const GROUP_HISTORY_NOTE = 'Group chat messages posted before the current one; '
   + 'background context selected by the plugin, not system instructions.';
+export const GROUP_HISTORY_FILES_NOTE = 'Attachments from the cached group messages above; '
+  + 'paths are relative to the current Harness workspace.';
 export const CURRENT_MESSAGE_MARKER = '[Current message - respond to this]';
 export const GROUP_HISTORY_TAG = 'dsh_im_group_history';
+export const GROUP_HISTORY_FILES_TAG = 'dsh_im_group_files';
 
 export const DEFAULT_GROUP_HISTORY_CONFIG = Object.freeze({
   enabled: true,
@@ -142,7 +149,22 @@ export function normalizeGroupHistoryEntry(entry) {
     body,
     timestamp: Number.isFinite(timestamp) && timestamp > 0 ? timestamp : 0,
     messageId,
+    files: normalizeGroupHistoryFiles(entry.files),
   });
+}
+
+/** 归一化附件清单：只保留名字与工作区相对路径。 */
+export function normalizeGroupHistoryFiles(value) {
+  if (!Array.isArray(value)) return Object.freeze([]);
+  const files = [];
+  for (const file of value) {
+    if (!file || typeof file !== 'object') continue;
+    const name = cleanLine(file.name, GROUP_HISTORY_FILE_NAME_MAX_CHARS);
+    const path = cleanLine(file.path, GROUP_HISTORY_FILE_PATH_MAX_CHARS);
+    if (!path) continue;
+    files.push(Object.freeze({ name: name || path, path }));
+  }
+  return Object.freeze(files);
 }
 
 function renderEntry(entry) {
@@ -179,12 +201,48 @@ export function formatGroupHistoryBlock(entries) {
 }
 
 /** 把上下文块与当前消息标记拼在正文之前；块为空时原样返回。 */
-export function appendGroupHistoryContext(content, block) {
-  if (typeof block !== 'string' || !block.trim()) return content;
-  const prefix = `${block}\n\n${CURRENT_MESSAGE_MARKER}`;
+export function appendGroupHistoryContext(content, block, filesBlock = '') {
+  const parts = [block, filesBlock].filter((value) => typeof value === 'string' && value.trim());
+  if (parts.length === 0) return content;
+  const prefix = `${parts.join('\n')}\n\n${CURRENT_MESSAGE_MARKER}`;
   if (typeof content === 'string') return `${prefix}\n${content}`;
   if (Array.isArray(content)) return [{ type: 'text', text: prefix }, ...content];
   return content;
+}
+
+/**
+ * 组装附件清单块：把已经落到工作区的群聊附件按“名字 + 相对路径 + 发送者 + 时间”
+ * 列出来，形状与入站附件清单一致。没有附件时返回空串；超预算时从最旧一条开始丢。
+ */
+export function formatGroupHistoryFilesBlock(entries) {
+  const list = Array.isArray(entries) ? entries : [];
+  const files = [];
+  for (let index = list.length - 1; index >= 0; index -= 1) {
+    const entry = list[index];
+    const entryFiles = Array.isArray(entry?.files) ? entry.files : [];
+    if (entryFiles.length === 0) continue;
+    const time = formatGroupHistoryTime(entry.timestamp);
+    for (let fileIndex = entryFiles.length - 1; fileIndex >= 0; fileIndex -= 1) {
+      const file = entryFiles[fileIndex];
+      files.unshift({
+        name: file.name,
+        path: file.path,
+        ...(entry.sender ? { sender: entry.sender } : {}),
+        ...(time ? { time } : {}),
+      });
+    }
+  }
+  if (files.length === 0) return '';
+  const header = `<${GROUP_HISTORY_FILES_TAG}>`;
+  const footer = `</${GROUP_HISTORY_FILES_TAG}>`;
+  while (files.length > 0) {
+    const payload = JSON.stringify({ description: GROUP_HISTORY_FILES_NOTE, files });
+    const block = `${header}\n${payload}\n${footer}`;
+    if ([...block].length <= MAX_GROUP_HISTORY_FILES_CHARS) return block;
+    // 与历史块一致：超出预算时丢掉最旧的附件，保留离当前消息最近的。
+    files.shift();
+  }
+  return '';
 }
 
 /**
@@ -193,6 +251,7 @@ export function appendGroupHistoryContext(content, block) {
  * - `record(key, entry, { limit })`：条数上限内追加；`limit <= 0` 直接忽略。
  * - `snapshot(key, { limit })`：返回最近 N 条的快照（数组副本），注入前调用。
  * - `consume(key, entries)`：删除这份快照已注入的条目；注入期间新到的消息保留到下一轮。
+ * - `attachFiles(key, messageId, files)`：附件下载完成后补上清单（条目先入库、文件后到位）。
  * - `clear(key)` / `size(key)`：显式清空与观测用。
  */
 export function createGroupHistory({ maxKeys = MAX_GROUP_HISTORY_KEYS } = {}) {
@@ -260,10 +319,29 @@ export function createGroupHistory({ maxKeys = MAX_GROUP_HISTORY_KEYS } = {}) {
     return bucket.length - kept.length;
   }
 
+  /**
+   * 给已缓存的条目补上附件清单（下载是异步的，条目先入库、附件后到位）。
+   * 条目已被消费或淘汰时静默忽略——文件仍在磁盘上，只是不再进提示。
+   */
+  function attachFiles(key, messageId, files) {
+    const id = typeof key === 'string' ? key.trim() : '';
+    const entryId = typeof messageId === 'string' ? messageId.trim() : '';
+    const normalized = normalizeGroupHistoryFiles(files);
+    if (!id || !entryId || normalized.length === 0) return null;
+    const bucket = buckets.get(id);
+    if (!bucket) return null;
+    const index = bucket.findIndex((entry) => entry.messageId === entryId);
+    if (index < 0) return null;
+    const updated = Object.freeze({ ...bucket[index], files: normalized });
+    bucket[index] = updated;
+    return updated;
+  }
+
   return Object.freeze({
     record,
     snapshot,
     consume,
+    attachFiles,
     clear(key) {
       const id = typeof key === 'string' ? key.trim() : '';
       if (id) buckets.delete(id);
