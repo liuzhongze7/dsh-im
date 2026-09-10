@@ -242,6 +242,8 @@ export async function createProductionController(ctx, config = {}, internals = {
     deleteState: async ({ botId }) => {
       const state = stateStores.get(botId);
       stateStores.delete(botId);
+      // 移除接入时连同投递目标一起清理。
+      await deliveryStore.remove(botId).catch(() => undefined);
       if (state && typeof state.remove === 'function') {
         await state.remove();
       } else {

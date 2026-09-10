@@ -204,3 +204,72 @@ test('Youdu production rejects inbound staging without a workspace', async (t) =
 
   await production.close();
 });
+
+test('removing a Youdu bot also drops its delivery targets', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-youdu-production-remove-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const dataDir = join(root, 'data');
+  const bot = { botId: 'yd_1a7d8037a6758b93fe17c1cc', sourceBotId: 'oc86aed821c86345e4' };
+  const bots = [bot];
+  const secrets = new Map([[bot.botId, 'secret-1']]);
+
+  class ConfigStore {
+    async load() { return this; }
+    list() { return [...bots]; }
+    get(botId) { return bots.find((entry) => entry.botId === botId) ?? null; }
+    async save(value) { return value; }
+    async remove(botId) {
+      const index = bots.findIndex((entry) => entry.botId === botId);
+      if (index < 0) return null;
+      const [removed] = bots.splice(index, 1);
+      return removed;
+    }
+  }
+  class StateStore {
+    async load() { return this; }
+    async remove() {}
+  }
+  class Harness {
+    stopManagedProcess() {}
+  }
+  class Runtime {
+    constructor() { this.status = { ready: false, youduConnectionState: 'offline', harnessReachable: false }; }
+    async start() { return this.status; }
+    async stop() {}
+  }
+  const ctx = {
+    credentials: {
+      async resolve(ref) { return secrets.has(ref) ? { value: secrets.get(ref) } : null; },
+      async set(ref, value) { secrets.set(ref, value); },
+      async unset(ref) { secrets.delete(ref); },
+    },
+    apiProxy: {},
+    logger: () => ({ error() {}, warn() {}, info() {}, debug() {} }),
+  };
+
+  const production = await createProductionController(ctx, { dataDir, workspace: join(root, 'w') }, {
+    ConfigStore,
+    StateStore,
+    HarnessClient: Harness,
+    Runtime,
+    createConnectionSupervisor: () => ({
+      ready: Promise.resolve(),
+      start() { return this; },
+      async close() {},
+    }),
+  });
+  assert.deepEqual(secrets.get(bot.botId), 'secret-1');
+
+  const service = new DeliveryService();
+  service.registerAdapter(production.deliveryAdapter);
+  await service.createTarget(bot.botId, {
+    targetId: 'alice', kind: 'user', route: { chatId: '6463894' },
+  });
+  assert.equal((await service.listTargets(bot.botId)).targets.length, 1);
+
+  await production.controller.deleteBot(bot.botId);
+  assert.deepEqual(bots, []);
+  const reloaded = JSON.parse(await readFile(join(dataDir, 'bots', 'delivery.json'), 'utf8'));
+  assert.deepEqual(reloaded.bots, {});
+  await production.close();
+});
