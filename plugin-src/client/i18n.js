@@ -1038,6 +1038,8 @@ const EN = Object.freeze({
   '或留空为 *': 'Or leave empty for *',
   '正在接入…': 'Connecting…',
   '读取有度连接状态超时，请刷新页面后重试。': 'Loading the Youdu connection status timed out. Refresh the page and try again.',
+  '填写有度用户 ID（数字），需对方先私聊过机器人': 'Enter the numeric Youdu user ID; that user must have messaged the bot first',
+  '填写群 ID，例如 {0798E01E-CD68-42BB-813C-EB51593BB0F5}': 'Enter the group ID, e.g. {0798E01E-CD68-42BB-813C-EB51593BB0F5}',
 });
 
 export const en = EN;

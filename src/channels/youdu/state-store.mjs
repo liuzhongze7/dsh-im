@@ -1,10 +1,15 @@
 import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
-const EMPTY_STATE = Object.freeze({ version: 1, sessions: {}, seenMessageIds: [], groups: {} });
+const EMPTY_STATE = Object.freeze({ version: 1, sessions: {}, seenMessageIds: [], groups: {}, people: {} });
 const MAX_GROUPS = 200;
-/** Persist at most one lastSeenAt update per group per hour. */
+const MAX_PEOPLE = 200;
+/** Persist at most one lastSeenAt update per conversation per hour. */
 const GROUP_TOUCH_INTERVAL_MS = 3_600_000;
+
+function text(value, max) {
+  return typeof value === 'string' && value.trim() ? value.trim().slice(0, max) : null;
+}
 
 function normalizeGroups(value) {
   const groups = {};
@@ -18,6 +23,23 @@ function normalizeGroups(value) {
     groups[chatId] = { lastSeenAt, messages };
   }
   return groups;
+}
+
+/**
+ * 私聊联系人（key = chatId，有度单聊里就是对方用户 ID）。
+ * 用来给投递目标建议补上可读名字，并在设置页展示。
+ */
+function normalizePeople(value) {
+  const people = {};
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return people;
+  for (const [chatId, entry] of Object.entries(value)) {
+    if (typeof chatId !== 'string' || !chatId.trim()) continue;
+    const account = text(entry?.account, 128);
+    const name = text(entry?.name, 128);
+    const lastSeenAt = typeof entry?.lastSeenAt === 'string' ? entry.lastSeenAt : null;
+    people[chatId] = { account, name, lastSeenAt };
+  }
+  return people;
 }
 
 function normalizeState(value) {
@@ -37,6 +59,7 @@ function normalizeState(value) {
       ? value.seenMessageIds.filter((id) => typeof id === 'string').slice(-1_000)
       : [],
     groups: normalizeGroups(value.groups),
+    people: normalizePeople(value.people),
   };
 }
 
@@ -132,6 +155,50 @@ export class YouduStateStore {
         chatId,
         lastSeenAt: entry.lastSeenAt,
         messages: entry.messages ?? 0,
+      }))
+      .sort((left, right) => (Date.parse(right.lastSeenAt ?? 0) || 0)
+        - (Date.parse(left.lastSeenAt ?? 0) || 0));
+  }
+
+  /**
+   * 记住一个私聊联系人。有度单聊的 chatId 就是对方用户 ID，因此这条记录同时
+   * 提供了「主动投递目标」和它的可读名字（账号名 / 昵称）。
+   */
+  async recordPerson(chatId, { account, name, now = () => new Date() } = {}) {
+    const id = typeof chatId === 'string' ? chatId.trim() : '';
+    if (!id) return null;
+    const existing = this.#state.people[id];
+    const seenAt = now();
+    const nextAccount = text(account, 128) ?? existing?.account ?? null;
+    const nextName = text(name, 128) ?? existing?.name ?? null;
+    const previous = existing?.lastSeenAt ? Date.parse(existing.lastSeenAt) : Number.NaN;
+    const fresh = !Number.isFinite(previous) || seenAt.getTime() - previous >= GROUP_TOUCH_INTERVAL_MS;
+    const changed = !existing || existing.account !== nextAccount || existing.name !== nextName;
+    this.#state.people[id] = {
+      account: nextAccount,
+      name: nextName,
+      lastSeenAt: fresh || changed ? seenAt.toISOString() : existing.lastSeenAt,
+    };
+    if (fresh || changed) {
+      const entries = Object.entries(this.#state.people);
+      if (entries.length > MAX_PEOPLE) {
+        entries.sort((left, right) => (Date.parse(right[1].lastSeenAt ?? 0) || 0)
+          - (Date.parse(left[1].lastSeenAt ?? 0) || 0));
+        this.#state.people = Object.fromEntries(entries.slice(0, MAX_PEOPLE));
+      }
+      await this.#persist();
+    }
+    return structuredClone(this.#state.people[id]);
+  }
+
+  /** Observed private contacts, most recently active first. */
+  peopleSnapshot() {
+    return Object.entries(this.#state.people)
+      .map(([chatId, entry]) => ({
+        chatId,
+        account: entry.account ?? null,
+        name: entry.name ?? null,
+        lastSeenAt: entry.lastSeenAt,
       }))
       .sort((left, right) => (Date.parse(right.lastSeenAt ?? 0) || 0)
         - (Date.parse(left.lastSeenAt ?? 0) || 0));

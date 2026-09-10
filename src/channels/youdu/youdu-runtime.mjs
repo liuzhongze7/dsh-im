@@ -44,6 +44,7 @@ export class YouduRuntime {
   #accessPolicy;
   #groupAccess;
   #onGroupSeen;
+  #onPersonSeen;
   #createSocket;
   #status = createYouduRuntimeStatus();
   #socket = null;
@@ -65,6 +66,7 @@ export class YouduRuntime {
     accessPolicy,
     groupAccess,
     onGroupSeen,
+    onPersonSeen,
     createSocket = (options) => new YouduSocket(options),
   }) {
     if (!config || !secret || !harness || !state) {
@@ -82,6 +84,7 @@ export class YouduRuntime {
     this.#accessPolicy = accessPolicy;
     this.#groupAccess = groupAccess ?? null;
     this.#onGroupSeen = typeof onGroupSeen === 'function' ? onGroupSeen : null;
+    this.#onPersonSeen = typeof onPersonSeen === 'function' ? onPersonSeen : null;
     this.#createSocket = createSocket;
   }
 
@@ -184,6 +187,7 @@ export class YouduRuntime {
       accessPolicy: this.#accessPolicy,
       groupAccess: this.#groupAccess,
       onGroupSeen: this.#onGroupSeen,
+      onPersonSeen: this.#onPersonSeen,
       signal: controller.signal,
     });
     this.#bridge = bridge;
@@ -273,8 +277,11 @@ export class YouduRuntime {
   }
 
   async sendProactiveText(target, text, { signal } = {}) {
-    const chatId = typeof target?.chatId === 'string' ? target.chatId.trim() : '';
-    if (!chatId) {
+    // 与其它渠道一致：目标形如 { kind: 'user'|'group', route: { chatId } }。
+    // 有度单聊的 chatId 就是对方用户 ID（服务端 resolveChatID 对 single 取 Sender.ID），
+    // 群聊的 chatId 是会话 ID，两者都用 send_msg 按 chatId 投递。
+    const chatId = typeof target?.route?.chatId === 'string' ? target.route.chatId.trim() : '';
+    if ((target?.kind !== 'user' && target?.kind !== 'group') || !chatId) {
       const error = new TypeError('Invalid Youdu proactive delivery target');
       error.code = 'invalid-target';
       throw error;
@@ -285,7 +292,17 @@ export class YouduRuntime {
       throw error;
     }
     signal?.throwIfAborted();
-    return this.#socket.sendMessage(chatId, text);
+    try {
+      await this.#socket.sendMessage(chatId, {
+        msgType: 'text',
+        text: { content: text },
+      });
+    } catch (cause) {
+      const error = new Error('Youdu rejected the proactive delivery', { cause });
+      error.code = 'delivery-failed';
+      throw error;
+    }
+    return { sent: true };
   }
 
   async stop() {

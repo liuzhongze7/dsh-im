@@ -176,6 +176,7 @@ export class YouduBridge {
   #accessPolicy;
   #groupAccess;
   #onGroupSeen;
+  #onPersonSeen;
   #groupResponseMode;
   #signal;
   #queues = new Map();
@@ -201,6 +202,7 @@ export class YouduBridge {
     accessPolicy,
     groupAccess,
     onGroupSeen,
+    onPersonSeen,
     groupResponseMode = 'mention',
     signal,
   }) {
@@ -223,6 +225,7 @@ export class YouduBridge {
     this.#accessPolicy = accessPolicy;
     this.#groupAccess = groupAccess ?? null;
     this.#onGroupSeen = typeof onGroupSeen === 'function' ? onGroupSeen : null;
+    this.#onPersonSeen = typeof onPersonSeen === 'function' ? onPersonSeen : null;
     const resolvedGroupMode = groupResponseMode
       ?? (typeof accessPolicy === 'object' && accessPolicy !== null ? accessPolicy.groupResponseMode : undefined);
     this.#groupResponseMode = resolvedGroupMode === 'all' ? 'all' : 'mention';
@@ -260,6 +263,7 @@ export class YouduBridge {
     }
     const key = conversationKey(message);
     if (message.kind === 'group') this.#recordGroup(message.chatId);
+    else this.#recordPerson(message);
     const addressed = message.kind !== 'group' || this.#isAddressedGroupMessage(message);
 
     if (addressed) {
@@ -547,6 +551,33 @@ export class YouduBridge {
       }
     } catch {
       // 群记录是辅助信息，任何失败都不应影响入站消息。
+    }
+  }
+
+  /**
+   * 记录私聊联系人（chatId / 账号名 / 昵称）。有度单聊的 chatId 就是对方用户 ID，
+   * 因此这条记录既能给设置页展示，也能直接当主动投递目标。
+   */
+  #recordPerson(message) {
+    if (!message.chatId) return;
+    const person = {
+      chatId: message.chatId,
+      account: message.senderAccount || '',
+      name: message.senderName || '',
+    };
+    try {
+      if (this.#onPersonSeen) {
+        this.#onPersonSeen(person);
+        return;
+      }
+      if (typeof this.#state.recordPerson === 'function') {
+        void Promise.resolve(this.#state.recordPerson(person.chatId, {
+          account: person.account,
+          name: person.name,
+        })).catch(() => undefined);
+      }
+    } catch {
+      // 联系人记录是辅助信息，任何失败都不应影响入站消息。
     }
   }
 

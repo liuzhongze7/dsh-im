@@ -115,6 +115,22 @@ const CHANNEL_DEFINITIONS = Object.freeze({
       group: [{ key: 'jid', label: '群 JID', placeholder: '1234567890@g.us' }],
     },
   },
+  youdu: {
+    label: '有度',
+    kinds: [{ value: 'user', label: '私聊' }, { value: 'group', label: '群聊' }],
+    fields: {
+      user: [{
+        key: 'chatId',
+        label: '用户 ID',
+        placeholder: '填写有度用户 ID（数字），需对方先私聊过机器人',
+      }],
+      group: [{
+        key: 'chatId',
+        label: '群 Chat ID',
+        placeholder: '填写群 ID，例如 {0798E01E-CD68-42BB-813C-EB51593BB0F5}',
+      }],
+    },
+  },
 });
 
 export const DELIVERY_CHANNEL_DEFINITIONS = CHANNEL_DEFINITIONS;

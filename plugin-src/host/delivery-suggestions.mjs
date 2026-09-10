@@ -9,6 +9,7 @@ const CHANNELS = new Set([
   'telegram',
   'discord',
   'whatsapp',
+  'youdu',
 ]);
 
 function isRecord(value) {
@@ -113,6 +114,13 @@ export function deliverySuggestionFromConversationKey(channel, key) {
       return discordSuggestion(key);
     case 'whatsapp':
       return whatsappSuggestion(key);
+    // 有度的会话键是 `direct:<userId>` / `group:<chatId>`；服务端对单聊把
+    // chatId 解析为对方用户 ID，因此两者都能直接当成 send_msg 的 chatId。
+    case 'youdu':
+      return simpleSuggestion(key, [
+        ['direct', 'user', 'chatId'],
+        ['group', 'group', 'chatId'],
+      ]);
     default:
       return null;
   }
@@ -133,6 +141,7 @@ export function privateDeliverySuggestionFromConversationKey(channel, key) {
     telegram: 'direct',
     discord: 'direct',
     whatsapp: 'direct',
+    youdu: 'direct',
   }[channel];
   if (!privatePrefix || prefix !== privatePrefix) return null;
   return deliverySuggestionFromConversationKey(channel, key);

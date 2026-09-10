@@ -15,6 +15,7 @@ const CHANNELS = new Set([
   'telegram',
   'discord',
   'whatsapp',
+  'youdu',
 ]);
 
 export function supportsDeliveryChannel(channel) {
@@ -122,6 +123,11 @@ function normalizeRoute(channel, kind, route) {
       }
       return normalized;
     }
+    // 有度单聊的 chatId 就是对方的用户 ID（服务端 resolveChatID 对 single 取
+    // Sender.ID），群聊的 chatId 是会话 ID；两者都用 send_msg 按 chatId 投递。
+    case 'youdu':
+      oneOf(kind, ['user', 'group']);
+      return routeWithStrings(route, ['chatId']);
     default:
       throw new TypeError(`Unsupported delivery channel: ${channel}`);
   }

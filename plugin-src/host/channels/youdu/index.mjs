@@ -15,6 +15,11 @@ export async function apply(ctx, config = {}) {
   }
   const production = await createProductionController(ctx, config, config.internals);
   log.info('[dsh-im-youdu] production controller created');
+  // 把有度的主动发送接入统一的 DeliveryService（与其它渠道同一条通路）。
+  const unregisterDelivery = config.deliveryService && production.deliveryAdapter
+    ? config.deliveryService.registerAdapter(production.deliveryAdapter)
+    : undefined;
+  if (unregisterDelivery) log.info('[dsh-im-youdu] delivery adapter registered');
   // Register the youdu_kb knowledge-base tool host-globally. It resolves its
   // account + gids from the per-session run context bound by the YouDu bridge;
   // absent a bound context it fails closed (YOUDU_IM_CONTEXT_REQUIRED).
@@ -33,7 +38,11 @@ export async function apply(ctx, config = {}) {
   );
   log.info('[dsh-im-youdu] /youdu RPC installed');
   ctx.effect(() => async () => {
-    await production.close();
+    try {
+      await unregisterDelivery?.();
+    } finally {
+      await production.close();
+    }
   }, 'dsh-im: close Youdu bot connections');
   return disposeRpc;
 }

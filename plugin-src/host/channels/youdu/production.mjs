@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 import { YouduConfigStore } from '../../../../src/channels/youdu/config-store.mjs';
+import { YouduDeliveryStore } from '../../../../src/channels/youdu/delivery-store.mjs';
 import { YouduHarnessClient } from '../../../../src/channels/youdu/harness-client.mjs';
 import { YouduController } from '../../../../src/channels/youdu/youdu-controller.mjs';
 import { YouduRuntime } from '../../../../src/channels/youdu/youdu-runtime.mjs';
@@ -17,6 +18,7 @@ import {
 } from '../../../../src/channels/shared/context-enhancement.mjs';
 import { createConnectionSupervisor } from './connection-supervisor.mjs';
 import { harnessConnection } from '../../harness-connection.mjs';
+import { createDeliveryAdapter } from '../../delivery-adapter.mjs';
 import { createHarnessSessionExecutors } from '../../harness-session-coordinator.mjs';
 import {
   getInboundTtlRuntime,
@@ -144,6 +146,12 @@ export async function createProductionController(ctx, config = {}, internals = {
     resolve(paths.bots, 'settings.json'),
     { defaultWorkspace, defaultAgentPreset: config.agentPreset },
   ).load();
+  // 投递目标存储：bot 是否存在以 configStore 为准，避免两份 bot 列表漂移。
+  const DeliveryStore = internals.DeliveryStore ?? YouduDeliveryStore;
+  const deliveryStore = await new DeliveryStore(
+    resolve(paths.bots, 'delivery.json'),
+    { knownBotIds: () => configStore.list().map((bot) => bot.botId) },
+  ).load();
   // 入站附件（图片/文件）经同进程 fileIngressExecutor 落到会话工作区；
   // 缺少它时 HarnessClient 会抛 "Harness file ingress is unavailable"。
   const inboundTtl = internals.inboundTtl ?? getInboundTtlRuntime(ctx, config);
@@ -207,6 +215,18 @@ export async function createProductionController(ctx, config = {}, internals = {
             // 群记录失败不影响消息处理。
           }
         },
+        onPersonSeen: (person) => {
+          // 观察到的私聊联系人（chatId / 账号名 / 昵称），供投递目标建议与设置页展示。
+          try {
+            const task = state.recordPerson?.(person.chatId, {
+              account: person.account,
+              name: person.name,
+            });
+            if (task && typeof task.catch === 'function') task.catch(() => undefined);
+          } catch {
+            // 联系人记录失败不影响消息处理。
+          }
+        },
         logger: {
           error: (...args) => logger.error?.(`[${botId}]`, ...args),
           warn: (...args) => logger.warn?.(`[${botId}]`, ...args),
@@ -240,8 +260,38 @@ export async function createProductionController(ctx, config = {}, internals = {
     retryDelaysMs: config.retryDelaysMs,
     healthyIntervalMs: config.healthyIntervalMs,
   }).start();
+  // 主动投递适配器：把有度的 send_msg 接进 DeliveryService（与其它 10 个渠道同一条通路）。
+  const CreateDeliveryAdapter = internals.createDeliveryAdapter ?? createDeliveryAdapter;
+  const baseDeliveryAdapter = CreateDeliveryAdapter({
+    channel: 'youdu',
+    workspaces: deliveryStore,
+    coreController: controller,
+    stateFor,
+  });
+  const deliveryAdapter = Object.freeze({
+    ...baseDeliveryAdapter,
+    // 建议目标里补上联系人可读名字（观察到的 account / name）。
+    async listSuggestions(botId) {
+      const suggestions = await baseDeliveryAdapter.listSuggestions(botId);
+      let people = [];
+      try {
+        const state = await stateFor(botId);
+        people = typeof state?.peopleSnapshot === 'function' ? state.peopleSnapshot() : [];
+      } catch {
+        // 名字只是展示信息，读不到就退化为纯 ID。
+      }
+      const byChatId = new Map(people.map((person) => [person.chatId, person]));
+      return suggestions.map((suggestion) => {
+        if (suggestion?.kind !== 'user') return suggestion;
+        const person = byChatId.get(suggestion.route?.chatId);
+        const label = person?.name ?? person?.account;
+        return label ? { ...suggestion, name: label } : suggestion;
+      });
+    },
+  });
   return {
     controller,
+    deliveryAdapter,
     ready: supervisor.ready,
     async close() {
       await supervisor.close();
