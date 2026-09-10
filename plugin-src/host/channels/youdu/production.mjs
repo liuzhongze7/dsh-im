@@ -16,6 +16,9 @@ import {
 import {
   normalizeContextEnhancementConfig,
 } from '../../../../src/channels/shared/context-enhancement.mjs';
+import {
+  normalizeGroupHistoryConfig,
+} from '../../../../src/channels/shared/group-history.mjs';
 import { createConnectionSupervisor } from './connection-supervisor.mjs';
 import { harnessConnection } from '../../harness-connection.mjs';
 import { createDeliveryAdapter } from '../../delivery-adapter.mjs';
@@ -68,6 +71,14 @@ function createYouduContextEnhancement(settingsStore, botId) {
     getSettings: () => normalizeContextEnhancementConfig(
       settingsStore.contextEnhancementFor(botId),
     ),
+  };
+}
+
+/** 群聊上下文缓存设置（开关 + 条数）：bridge 每次记录/注入时实时读取，保存后即时生效。 */
+function createYouduGroupHistory(settingsStore, botId) {
+  return {
+    botId,
+    getSettings: () => normalizeGroupHistoryConfig(settingsStore.groupHistoryFor(botId)),
   };
 }
 
@@ -204,6 +215,7 @@ export async function createProductionController(ctx, config = {}, internals = {
         connectTimeoutMs: config.connectTimeoutMs ?? 20_000,
         botId: botConfig.sourceBotId ?? botConfig.botId ?? botId,
         contextEnhancement: createYouduContextEnhancement(settingsStore, botId),
+        groupHistory: createYouduGroupHistory(settingsStore, botId),
         accessPolicy: createYouduAccessPolicy(settingsStore, botId, botConfig, config.groupResponseMode ?? 'mention'),
         groupAccess: createYouduGroupAccess(settingsStore, botId),
         onGroupSeen: (chatId, info = {}) => {

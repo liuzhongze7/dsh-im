@@ -124,3 +124,55 @@ test('youdu runtime surfaces send_msg failures as delivery-failed', async () => 
   );
   await runtime.stop();
 });
+
+function groupFrame(messageId, text, atUser = []) {
+  return {
+    headers: { reqId: `req-${messageId}` },
+    body: {
+      msgId: messageId,
+      chatId: 'g-1',
+      chatType: 'group',
+      from: { userId: '10086', name: '张三' },
+      msgType: 'text',
+      text: { content: text },
+      raw: { decoded: { msgType: 0, atUser } },
+    },
+  };
+}
+
+async function waitFor(predicate, attempts = 400) {
+  for (let index = 0; index < attempts; index += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => { setTimeout(resolve, 5); });
+  }
+  throw new Error('timed out waiting for the runtime to settle');
+}
+
+test('youdu runtime carries pending group context into the next mention', async () => {
+  const socket = new FakeSocket();
+  const contents = [];
+  const runtime = new YouduRuntime({
+    config: { botId: 'yd_bot', wsHost: 'push.example.com' },
+    secret: 'secret-1',
+    harness: {
+      ensureRunning: async () => true,
+      sessionExists: async () => true,
+      createSession: async () => 'session-1',
+      ask: async (sessionId, content) => { contents.push(content); return 'answer'; },
+    },
+    state: fakeState(),
+    botId: 'yd_bot',
+    groupHistory: { botId: 'yd_bot', getSettings: () => ({ enabled: true, limit: 50 }) },
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+    connectTimeoutMs: 1_000,
+    createSocket: () => socket,
+  });
+  await runtime.start();
+  socket.emit('message', groupFrame('m1', '下午三点评审'));
+  socket.emit('message', groupFrame('m2', '帮我总结', ['yd_bot']));
+  await waitFor(() => contents.length === 1);
+  assert.match(contents[0], /下午三点评审/);
+  assert.match(contents[0], /\[Current message - respond to this\]\n帮我总结$/);
+  await waitFor(() => socket.sent.some(({ kind }) => kind === 'reply'));
+  await runtime.stop();
+});

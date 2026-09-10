@@ -41,6 +41,7 @@ export class YouduRuntime {
   #connectTimeoutMs;
   #botId;
   #contextEnhancement;
+  #groupHistory;
   #accessPolicy;
   #groupAccess;
   #onGroupSeen;
@@ -63,6 +64,7 @@ export class YouduRuntime {
     connectTimeoutMs = 20_000,
     botId = '',
     contextEnhancement,
+    groupHistory,
     accessPolicy,
     groupAccess,
     onGroupSeen,
@@ -81,6 +83,7 @@ export class YouduRuntime {
     this.#connectTimeoutMs = connectTimeoutMs;
     this.#botId = botId ?? '';
     this.#contextEnhancement = contextEnhancement;
+    this.#groupHistory = groupHistory ?? null;
     this.#accessPolicy = accessPolicy;
     this.#groupAccess = groupAccess ?? null;
     this.#onGroupSeen = typeof onGroupSeen === 'function' ? onGroupSeen : null;
@@ -184,6 +187,7 @@ export class YouduRuntime {
         url: this.#config.wsHost,
       },
       contextEnhancement: this.#contextEnhancement,
+      groupHistory: this.#groupHistory,
       accessPolicy: this.#accessPolicy,
       groupAccess: this.#groupAccess,
       onGroupSeen: this.#onGroupSeen,

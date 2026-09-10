@@ -60,6 +60,15 @@ import {
   evaluateInboundAccess,
 } from '../shared/inbound-access.mjs';
 import { isSharedLocalCommand } from '../shared/command-permission.mjs';
+import {
+  appendGroupHistoryContext,
+  createGroupHistory,
+  DEFAULT_GROUP_HISTORY_CONFIG,
+  DISABLED_GROUP_HISTORY_CONFIG,
+  formatGroupHistoryBlock,
+  groupHistoryActive,
+  normalizeGroupHistoryConfig,
+} from '../shared/group-history.mjs';
 import { evaluateGroupAccess } from './group-access.mjs';
 import { t } from '../shared/i18n.mjs';
 import { prepareMessageBody } from './youdu-protocol/index.js';
@@ -164,6 +173,25 @@ function messageTarget(message) {
   };
 }
 
+/**
+ * 消息时间（Unix 毫秒）：优先用服务端下发的时间，缺字段的推送类型回退到接收时刻。
+ * 群聊上下文的时间前缀只用于让模型分清先后，不参与任何判定。
+ */
+function youduMessageTime(frame) {
+  const body = frame?.body ?? {};
+  const candidates = [
+    body.createTime,
+    body.raw?.push?.Msg?.sendTime,
+    body.raw?.decoded?.sendTime,
+    body.sendTime,
+  ];
+  for (const candidate of candidates) {
+    const value = typeof candidate === 'number' ? candidate : Number(candidate);
+    if (Number.isFinite(value) && value > 0) return value;
+  }
+  return Date.now();
+}
+
 function hasMediaImages(media) {
   return Array.isArray(media) && media.some((item) => item?.kind === 'image');
 }
@@ -193,6 +221,8 @@ export class YouduBridge {
   #kbAccount;
   #gid = '';
   #contextEnhancement;
+  #groupHistory;
+  #groupHistoryBuffer = createGroupHistory();
   #accessPolicy;
   #groupAccess;
   #onGroupSeen;
@@ -219,6 +249,7 @@ export class YouduBridge {
     botId = '',
     kbAccount,
     contextEnhancement,
+    groupHistory,
     accessPolicy,
     groupAccess,
     onGroupSeen,
@@ -242,6 +273,7 @@ export class YouduBridge {
       ? kbAccount
       : null;
     this.#contextEnhancement = contextEnhancement;
+    this.#groupHistory = groupHistory ?? null;
     this.#accessPolicy = accessPolicy;
     this.#groupAccess = groupAccess ?? null;
     this.#onGroupSeen = typeof onGroupSeen === 'function' ? onGroupSeen : null;
@@ -280,6 +312,7 @@ export class YouduBridge {
       media,
       msgType: msgType ?? undefined,
       atUserIds: extractAtUserIds(frame),
+      timestamp: youduMessageTime(frame),
       reqId: clean(frame.headers?.reqId) ?? '',
     };
     if (!message.messageId || !message.senderId || this.#state.hasSeen(message.messageId)
@@ -297,6 +330,9 @@ export class YouduBridge {
         this.#acceptedMessageIds.set(message.messageId, null);
         return this.#finishAccessDecision(message, access);
       }
+    } else {
+      // 没有寻址机器人的群消息不触发回复，但仍是下一条 @ 消息的上下文。
+      this.#rememberPendingGroupMessage(message, key);
     }
     this.#acceptedMessageIds.set(message.messageId, captureContextEnhancement(
       this.#contextEnhancement,
@@ -455,6 +491,62 @@ export class YouduBridge {
       .filter(Boolean);
     return message.atUserIds.some((id) => identities.includes(id)
       || (identities.length > 0 && `user:${identities[0]}` === id));
+  }
+
+  /**
+   * 群聊上下文设置：优先读实时设置（设置页保存后即时生效），读取失败按关闭处理。
+   */
+  #groupHistorySettings() {
+    const source = this.#groupHistory;
+    if (!source) return DEFAULT_GROUP_HISTORY_CONFIG;
+    try {
+      const raw = typeof source.getSettings === 'function' ? source.getSettings() : source;
+      return normalizeGroupHistoryConfig(raw);
+    } catch {
+      // 读不到设置时宁可不带上下文，也不把未经确认的群消息送进模型。
+      return DISABLED_GROUP_HISTORY_CONFIG;
+    }
+  }
+
+  /**
+   * 记录一条没有寻址机器人的群消息（pending-only），供下一条 @ 消息理解上下文。
+   * 只缓存该群允许发给机器人的消息：走与寻址消息相同的访问判定，被拒的群一律不入缓存。
+   */
+  #rememberPendingGroupMessage(message, key) {
+    if (message.kind !== 'group') return 0;
+    const settings = this.#groupHistorySettings();
+    if (!groupHistoryActive(settings)) return 0;
+    let allowed = false;
+    try {
+      allowed = this.#evaluateAccess(message)?.allowed === true;
+    } catch {
+      allowed = false;
+    }
+    if (!allowed) return 0;
+    return this.#groupHistoryBuffer.record(key, {
+      sender: message.senderName || message.senderAccount || message.senderId,
+      body: message.text || placeholderForMedia(message.media),
+      timestamp: message.timestamp,
+      messageId: message.messageId,
+    }, { limit: settings.limit });
+  }
+
+  /** 当前群聊待注入的上下文快照；不在群聊、未开启或缓存为空时返回 null。 */
+  #pendingGroupHistory(message, key) {
+    if (message.kind !== 'group') return null;
+    const settings = this.#groupHistorySettings();
+    if (!groupHistoryActive(settings)) return null;
+    const entries = this.#groupHistoryBuffer.snapshot(key, { limit: settings.limit });
+    if (entries.length === 0) return null;
+    const block = formatGroupHistoryBlock(entries);
+    if (!block) return null;
+    return Object.freeze({ key, entries, block });
+  }
+
+  /** 回合结束（无论成败）后消费已注入的条目；注入期间新到的消息保留给下一轮。 */
+  #consumeGroupHistory(pending) {
+    if (!pending) return;
+    this.#groupHistoryBuffer.consume(pending.key, pending.entries);
   }
 
   /** 按群规则（设置页配置）：显式配置的群优先于共享的群聊访问设置。 */
@@ -812,6 +904,9 @@ export class YouduBridge {
       let answer;
       let artifacts = [];
       let boundKbSessionId = null;
+      // 群聊上下文：取快照并拼在正文之前，回合结束后消费掉这份快照。
+      const groupHistory = this.#pendingGroupHistory(message, key);
+      if (groupHistory) content = appendGroupHistoryContext(content, groupHistory.block);
       try {
         ({ answer, artifacts } = await askInWorkspaceSession({
           harness: this.#harness,
@@ -845,6 +940,7 @@ export class YouduBridge {
         }));
       } finally {
         if (boundKbSessionId) releaseYouduKbRunContext(boundKbSessionId);
+        this.#consumeGroupHistory(groupHistory);
       }
       if (batchSubmission) {
         this.#batchInputs.complete(key, batchSubmission.token);

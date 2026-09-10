@@ -6,6 +6,7 @@ import test from 'node:test';
 
 import { createProductionController } from '../../../plugin-src/host/channels/youdu/production.mjs';
 import { DeliveryService } from '../../../plugin-src/host/delivery-service.mjs';
+import { DEFAULT_GROUP_HISTORY_CONFIG } from '../../../src/channels/shared/group-history.mjs';
 
 test('Youdu production injects a file ingress executor for inbound attachments', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'dsh-youdu-production-'));
@@ -152,6 +153,79 @@ test('Youdu production exposes a delivery adapter that only owns configured bots
 
   unregister();
   await production.close();
+});
+
+test('Youdu production hands each runtime a live group history provider', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-youdu-production-group-history-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const dataDir = join(root, 'data');
+  const bot = { botId: 'yd_1a7d8037a6758b93fe17c1cc', sourceBotId: 'oc86aed821c86345e4' };
+  const runtimeOptions = [];
+  let controllerOptions;
+
+  class ConfigStore {
+    async load() { return this; }
+    list() { return [bot]; }
+    get(botId) { return botId === bot.botId ? bot : null; }
+    async save(value) { return value; }
+    async remove() { return null; }
+  }
+  class StateStore {
+    async load() { return this; }
+  }
+  class Harness {
+    stopManagedProcess() {}
+  }
+  class Controller {
+    constructor(options) { this.options = options; controllerOptions = options; }
+    async close() {}
+    status() { return { bots: [{ botId: bot.botId }] }; }
+    // 与真实 controller 一样把保存写进设置存储，provider 直接读同一个存储。
+    async updateGroupHistory(botId, config) {
+      return this.options.settingsStore.setGroupHistory(botId, config);
+    }
+  }
+  class Runtime {
+    constructor(options) { runtimeOptions.push(options); }
+  }
+  const ctx = {
+    credentials: {
+      async resolve() { return { value: 'secret-1' }; },
+      async set() {},
+      async unset() {},
+    },
+    apiProxy: {},
+    logger: () => ({ error() {}, warn() {}, info() {}, debug() {} }),
+  };
+
+  const production = await createProductionController(ctx, { dataDir, workspace: join(root, 'w') }, {
+    ConfigStore,
+    StateStore,
+    HarnessClient: Harness,
+    Controller,
+    Runtime,
+    createConnectionSupervisor: () => ({
+      ready: Promise.resolve(),
+      start() { return this; },
+      async close() {},
+    }),
+  });
+  t.after(() => production.close());
+
+  await controllerOptions.createRuntime({ botId: bot.botId, config: bot, secret: 'secret-1' });
+  assert.equal(runtimeOptions.length, 1);
+  const provider = runtimeOptions[0].groupHistory;
+  assert.equal(provider.botId, bot.botId);
+  assert.deepEqual(provider.getSettings(), DEFAULT_GROUP_HISTORY_CONFIG);
+
+  await controllerOptions.createRuntime({ botId: bot.botId, config: bot, secret: 'secret-1' });
+  assert.notEqual(runtimeOptions[1].groupHistory, provider, 'each runtime owns its own provider');
+  assert.equal(runtimeOptions[1].groupHistory.botId, bot.botId);
+
+  // 设置页保存后即时生效，不需要重建 runtime 或重连机器人。
+  await production.controller.updateGroupHistory(bot.botId, { enabled: true, limit: 8 });
+  assert.deepEqual(provider.getSettings(), { enabled: true, limit: 8 });
+  assert.equal(runtimeOptions.length, 2);
 });
 
 test('Youdu production rejects inbound staging without a workspace', async (t) => {

@@ -5,6 +5,10 @@ import {
   normalizeContextEnhancementConfig,
 } from '../shared/context-enhancement.mjs';
 import {
+  DEFAULT_GROUP_HISTORY_CONFIG,
+  normalizeGroupHistoryConfig,
+} from '../shared/group-history.mjs';
+import {
   normalizeAccessPolicy,
 } from '../shared/access-policy.mjs';
 import { validateAgentPresetId } from '../shared/agent-preset.mjs';
@@ -14,7 +18,7 @@ const EMPTY_DOCUMENT = Object.freeze({ version: 1, bots: Object.freeze({}) });
 
 /**
  * 有度(Youdu) 轻量设置存储（文件持久化）：为每个已接入的 bot 保存
- * workspace / agentPreset / contextEnhancement / accessPolicy / groupAccess。
+ * workspace / agentPreset / contextEnhancement / groupHistory / accessPolicy / groupAccess。
  *
  * 这是 youdu 专属持久化（非 bot-workspace-store 完整接线），设置页的 set*
  * 端点写入会在下次读取/重启后保留；bridge/runtime 从这里读取，改动即时生效。
@@ -32,6 +36,7 @@ export class YouduSettingsStore {
       workspace: resolve(defaultWorkspace),
       agentPreset: validateAgentPresetId(defaultAgentPreset),
       contextEnhancement: DEFAULT_CONTEXT_ENHANCEMENT_CONFIG,
+      groupHistory: DEFAULT_GROUP_HISTORY_CONFIG,
       accessPolicy: null,
       groupAccess: null,
     };
@@ -49,6 +54,7 @@ export class YouduSettingsStore {
               : this.#defaults.workspace,
             agentPreset: validateAgentPresetId(value?.agentPreset),
             contextEnhancement: normalizeContextEnhancementConfig(value?.contextEnhancement),
+            groupHistory: normalizeGroupHistoryConfig(value?.groupHistory),
             accessPolicy: normalizeAccessPolicy(value?.accessPolicy),
             groupAccess: normalizeGroupAccess(value?.groupAccess),
           });
@@ -79,6 +85,10 @@ export class YouduSettingsStore {
     return normalizeContextEnhancementConfig(this.ensure(botId).contextEnhancement);
   }
 
+  groupHistoryFor(botId) {
+    return normalizeGroupHistoryConfig(this.ensure(botId).groupHistory);
+  }
+
   accessPolicyFor(botId) {
     return this.ensure(botId).accessPolicy;
   }
@@ -103,6 +113,13 @@ export class YouduSettingsStore {
   async setContextEnhancement(botId, config) {
     const normalized = normalizeContextEnhancementConfig(config);
     this.ensure(botId).contextEnhancement = normalized;
+    await this.#persist();
+    return normalized;
+  }
+
+  async setGroupHistory(botId, config) {
+    const normalized = normalizeGroupHistoryConfig(config);
+    this.ensure(botId).groupHistory = normalized;
     await this.#persist();
     return normalized;
   }
@@ -136,6 +153,7 @@ export class YouduSettingsStore {
         workspace: this.workspaceFor(bot.botId),
         agentPreset: this.agentPresetFor(bot.botId),
         contextEnhancement: this.contextEnhancementFor(bot.botId),
+        groupHistory: this.groupHistoryFor(bot.botId),
         accessPolicy: this.accessPolicyFor(bot.botId),
         groupAccess: this.groupAccessFor(bot.botId),
       } : bot)),
@@ -149,6 +167,7 @@ export class YouduSettingsStore {
         workspace: value.workspace,
         ...(value.agentPreset ? { agentPreset: value.agentPreset } : {}),
         ...(value.contextEnhancement ? { contextEnhancement: value.contextEnhancement } : {}),
+        ...(value.groupHistory ? { groupHistory: value.groupHistory } : {}),
         ...(value.accessPolicy ? { accessPolicy: value.accessPolicy } : {}),
         ...(value.groupAccess ? { groupAccess: value.groupAccess } : {}),
       };
