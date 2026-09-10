@@ -16,6 +16,40 @@ When enabled, group messages that did not address the bot are remembered in chat
 
 That batch is consumed when the turn ends, so it is never injected twice — those messages are already part of the current Harness Session. Group messages that arrive during the turn stay for the next one. The cache only applies to group chats: direct messages, commands, approvals, and question answers keep their existing control paths, and unmentioned group messages still never trigger a reply by themselves.
 
+## Images and files
+
+Images, files, voice notes, and videos posted without mentioning the bot are **downloaded through the same media interface used for message attachments** into a temporary directory inside that bot's workspace:
+
+```text
+<workspace>/.dsh-im/group-context/<group>/<20260910-141230-messageId>/01-photo.png
+```
+
+When the bot is mentioned, the history block is followed by an attachment manifest listing every downloaded file with its name, workspace-relative path, sender, and time:
+
+```text
+<dsh_im_group_history note="...">
+[2026-09-10 14:12] 张三: [图片] photo.png
+</dsh_im_group_history>
+<dsh_im_group_files>
+{"description":"Attachments from the cached group messages above; paths are relative to the current Harness workspace.","files":[{"name":"photo.png","path":".dsh-im/group-context/.../01-photo.png","sender":"张三","time":"2026-09-10 14:12"}]}
+</dsh_im_group_files>
+
+[Current message - respond to this]
+这张图什么意思
+```
+
+The model can read those paths directly and move the files wherever they are needed. The cached history line keeps its `[图片] photo.png` placeholder; the manifest only lists files that were staged successfully.
+
+| Situation | Behavior |
+| --- | --- |
+| Download succeeded | History line plus a `<dsh_im_group_files>` manifest with usable relative paths |
+| Download failed, rejected, or timed out | The text placeholder stays and the reply is unaffected |
+| Redelivered message | Downloaded only once |
+| Group rejected by access rules, feature off, or limit 0 | Nothing is downloaded or written |
+| Direct messages | Keep the existing inbound-file pipeline, unrelated to this cache |
+
+Attachment count and size are not capped beyond the ordinary message limits. The files are temporary and age out by retention: seven days by default, configurable through the plugin's `groupContextRetentionHours` (`-1` keeps them forever, `0` deletes on the next sweep). Sweeping shares the staging path: every new attachment write also sweeps expired directories at most once per interval (six hours by default, `groupContextSweepIntervalMs`), so an idle bot defers the sweep until the next write.
+
 ## Boundaries and defaults
 
 | Item | Behavior |
