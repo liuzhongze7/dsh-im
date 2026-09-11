@@ -287,6 +287,8 @@ export class YouduBridge {
   #groupAccess;
   #onGroupSeen;
   #onPersonSeen;
+  #onConversationSeen;
+  #onSessionBound;
   #groupResponseMode;
   #signal;
   #queues = new Map();
@@ -317,6 +319,8 @@ export class YouduBridge {
     groupAccess,
     onGroupSeen,
     onPersonSeen,
+    onConversationSeen,
+    onSessionBound,
     groupResponseMode = 'mention',
     signal,
   }) {
@@ -348,6 +352,8 @@ export class YouduBridge {
     this.#groupAccess = groupAccess ?? null;
     this.#onGroupSeen = typeof onGroupSeen === 'function' ? onGroupSeen : null;
     this.#onPersonSeen = typeof onPersonSeen === 'function' ? onPersonSeen : null;
+    this.#onConversationSeen = typeof onConversationSeen === 'function' ? onConversationSeen : null;
+    this.#onSessionBound = typeof onSessionBound === 'function' ? onSessionBound : null;
     const resolvedGroupMode = groupResponseMode
       ?? (typeof accessPolicy === 'object' && accessPolicy !== null ? accessPolicy.groupResponseMode : undefined);
     this.#groupResponseMode = resolvedGroupMode === 'all' ? 'all' : 'mention';
@@ -389,6 +395,13 @@ export class YouduBridge {
       || this.#acceptedMessageIds.has(message.messageId)) {
       return Promise.resolve();
     }
+    // 先记住这条消息的回传路由：用户之后从 DSH 网页端继续这个会话时，
+    // 回复没有入站回调 reqId，只能按这条路由主动投递回有度。
+    this.#onConversationSeen?.({
+      chatId: message.chatId,
+      chatType: message.chatType,
+      senderId: message.senderId,
+    });
     const key = conversationKey(message);
     if (message.kind === 'group') this.#recordGroup(message.chatId, message.chatName);
     else this.#recordPerson(message);
@@ -870,6 +883,31 @@ export class YouduBridge {
     return task;
   }
 
+  /**
+   * 会话与有度会话绑定完成后登记出站路由：用户之后从 DSH 网页端继续这个会话时，
+   * 模型可以用 dsh_im_send_to_youdu 把文字/文件显式发回这条有度会话。
+   * 绑定关系只在「会话已存在/已创建」时成立，因此这里同步读取 state。
+   */
+  #bindSessionOutbound(key, message) {
+    if (!this.#onSessionBound) return;
+    try {
+      const sessionId = typeof this.#state?.sessionFor === 'function'
+        ? this.#state.sessionFor(key)
+        : null;
+      if (!sessionId) return;
+      this.#onSessionBound({
+        sessionId,
+        key,
+        chatId: message.chatId,
+        chatType: message.chatType,
+        senderId: message.senderId,
+        kind: message.kind,
+      });
+    } catch {
+      // 出站绑定失败不影响入站消息处理。
+    }
+  }
+
   /** 记录观察到的群（供设置页按群配置），失败不影响消息处理。 */
   #recordGroup(chatId, name = '') {
     if (!chatId) return;
@@ -1035,6 +1073,8 @@ export class YouduBridge {
       await this.#state.markSeen(messageId);
       messageRecorded = true;
     };
+    // 会话已存在时（同一会话的后续消息）先把出站路由登记好，新会话在 onSessionReady 里再登记一次。
+    this.#bindSessionOutbound(key, message);
 
     const target = messageTarget(message);
     const promptMessage = preparedMessage ?? buildPromptMessage(message, this.#bot);
@@ -1148,6 +1188,8 @@ export class YouduBridge {
           createOptions: { signal: this.#signal },
           existsOptions: { signal: this.#signal },
           onSessionReady: (binding) => {
+            // 新会话已经绑定：登记这个会话的出站路由，DSH 侧的显式发送才有目标。
+            this.#bindSessionOutbound(key, message);
             if (!this.#kbAccount) return;
             boundKbSessionId = binding.sessionId;
             bindYouduKbRunContext(binding.sessionId, buildYouduKbRunContext(this.#kbAccount, message));

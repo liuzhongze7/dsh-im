@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events';
 import test from 'node:test';
 
 import { YouduRuntime } from '../../../src/channels/youdu/youdu-runtime.mjs';
+import { getYouduOutboundRoute } from '../../../src/channels/youdu/send-tool.mjs';
 
 class FakeSocket extends EventEmitter {
   sent = [];
@@ -313,4 +314,44 @@ test('youdu runtime keeps a doubly-failed reply visible instead of dropping it',
     /callback context not found -> send_msg: WebSocket not connected/,
   );
   await runtime.stop();
+});
+
+test('youdu runtime exposes the bound session outbound route for explicit sends', async () => {
+  const socket = new FakeSocket();
+  const runtime = new YouduRuntime({
+    // botId 是群消息 @ 判定用的机器人标识（有度 @ 里就是机器人账号）。
+    config: { botId: 'oc-bot', sourceBotId: 'oc-bot', wsHost: 'push.example.com' },
+    secret: 'secret-1',
+    harness: {
+      ensureRunning: async () => true,
+      sessionExists: async () => true,
+      createSession: async () => 'session-42',
+      ask: async () => 'answer',
+    },
+    state: {
+      ...fakeState(),
+      // 会话已经与这个群绑定：出站绑定要能立刻登记，供 dsh_im_send_to_youdu 使用。
+      sessionFor: () => 'session-42',
+    },
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+    connectTimeoutMs: 1_000,
+    createSocket: () => socket,
+  });
+  await runtime.start();
+
+  socket.emit('message', groupFrame('m9', '帮我发个东西', ['oc-bot']));
+  await waitFor(() => getYouduOutboundRoute('session-42') !== undefined);
+
+  const binding = getYouduOutboundRoute('session-42');
+  assert.equal(binding.kind, 'group');
+  await binding.sendText('显式发回群里');
+  assert.deepEqual(socket.sent.at(-1), {
+    kind: 'message',
+    chatId: 'g-1',
+    body: { chatType: 'group', msgType: 'text', text: { content: '显式发回群里' } },
+  });
+
+  // 断开后绑定必须释放：停用的机器人不能再往有度发。
+  await runtime.stop();
+  assert.equal(getYouduOutboundRoute('session-42'), undefined);
 });

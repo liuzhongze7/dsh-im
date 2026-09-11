@@ -1,11 +1,19 @@
+import { readFile } from 'node:fs/promises';
+import { basename, isAbsolute, resolve } from 'node:path';
+
 import {
   buildMediaMessageBody,
   downloadMedia as youduDownloadMedia,
+  inferContentTypeFromName,
   normalizeWsHost,
   uploadMedia as youduUploadMedia,
   YouduSocket,
 } from './youdu-protocol/index.js';
 import { t } from '../shared/i18n.mjs';
+import {
+  bindYouduOutboundRoute,
+  releaseYouduOutboundRoute,
+} from './send-tool.mjs';
 import {
   createYouduBridgeStatus,
   YouduBridge,
@@ -45,6 +53,16 @@ function replyFallbackRoute(target, ownBotIds = []) {
   const ownIds = [ownBotIds].flat().map(cleanId).filter(Boolean);
   if (!senderId || senderId === '*' || ownIds.includes(senderId)) return null;
   return { chatType: 'single', chatId: senderId };
+}
+
+/** 会话路由键：与 bridge 的 conversationKey 一致（群聊按 chatId、私聊按对方 userId）。 */
+function conversationRouteKey(target) {
+  const chatId = cleanId(target?.chatId);
+  if (!chatId) return null;
+  if (String(target?.chatType ?? '').toLowerCase() === 'group') return `group:${chatId}`;
+  const senderId = cleanId(target?.senderId);
+  if (!senderId) return null;
+  return `direct:${senderId}`;
 }
 
 function cleanId(value) {
@@ -98,6 +116,12 @@ export class YouduRuntime {
   #abortController = null;
   #starting = null;
   #mediaTransport = null;
+  /** 每个会话最近一次入站消息留下的回传路由（chatId/chatType/senderId），按 LRU 截断。 */
+  #replyRoutes = new Map();
+  #routeFallbacks = 0;
+  #lastRouteFallbackAt = null;
+  /** 会话 → 有度出站路由的绑定，供 dsh_im_send_to_youdu 使用（sessionId → binding）。 */
+  #outboundRoutes = new Map();
 
   constructor({
     config,
@@ -187,14 +211,17 @@ export class YouduRuntime {
     });
     this.#socket = socket;
 
-    // 统一出站：先按入站回调回传（respond_msg），失败再按会话主动投递（send_msg）。
-    const deliverOutbound = async (target, body) => {
+    // 统一出站：先按入站回调回传（respond_msg），失败或没有回调再按会话主动投递（send_msg）。
+    const deliverOutbound = async (target, body, { kind = 'text' } = {}) => {
       const reqId = cleanId(target?.reqId) ?? '';
-      // 没有 reqId 时（例如从 Web 端继续这个会话）没有可用的回调通道，直接主动投递。
+      // 没有 reqId（例如用户从 DSH 网页端继续这个 IM 会话）时没有可用的回调通道，
+      // 按这个会话最近一次入站消息留下的路由主动投递。
       if (!reqId) {
-        const route = replyFallbackRoute(target, this.#ownBotIds());
+        const route = this.#replyRouteFor(target);
         if (!route) throw new Error('Youdu reply target is missing a usable conversation route');
-        return socket.sendMessage(route.chatId, { chatType: route.chatType, ...body });
+        const result = await socket.sendMessage(route.chatId, { chatType: route.chatType, ...body });
+        this.#recordRoutedReply(target, route, kind);
+        return result;
       }
       let replyFailure = null;
       try {
@@ -204,7 +231,7 @@ export class YouduRuntime {
         if (isMissingReplyQueue(error)) throw error;
         replyFailure = error;
       }
-      const route = replyFallbackRoute(target, this.#ownBotIds());
+      const route = this.#replyRouteFor(target);
       if (!route) {
         this.#recordReplyFallbackFailure(replyFailure, reqId);
         throw replyFailure;
@@ -286,6 +313,11 @@ export class YouduRuntime {
       groupAccess: this.#groupAccess,
       onGroupSeen: this.#onGroupSeen,
       onPersonSeen: this.#onPersonSeen,
+      // 记住每个会话最近一次入站路由：用户从 DSH 网页端继续这个 IM 会话时，
+      // 回复没有回调 reqId，只能靠这条记住的会话路由把文字/文件送回有度。
+      onConversationSeen: (seen) => this.#rememberReplyRoute(seen),
+      // 会话与有度会话绑定后登记出站路由，供 dsh_im_send_to_youdu 显式发送。
+      onSessionBound: (bound) => this.#bindOutboundRoute(bound),
       signal: controller.signal,
     });
     this.#bridge = bridge;
@@ -420,6 +452,10 @@ export class YouduRuntime {
     this.#abortController = null;
     this.#socket = null;
     this.#bridge = null;
+    // 断开时释放本 bot 的全部出站路由绑定，避免停用后还能往有度发。
+    for (const sessionId of this.#outboundRoutes.keys()) releaseYouduOutboundRoute(sessionId);
+    this.#outboundRoutes.clear();
+    this.#replyRoutes.clear();
     await bridge?.waitForIdle().catch(() => undefined);
     socket?.disconnect();
     await mediaTransport?.close?.().catch(() => undefined);
@@ -435,6 +471,145 @@ export class YouduRuntime {
       this.#config.botId,
       this.#botId,
     ];
+  }
+
+  /** bridge 每收到一条入站消息就调用一次：记住该会话的回传路由。 */
+  #rememberReplyRoute(seen) {
+    const key = conversationRouteKey(seen);
+    if (!key) return;
+    const route = replyFallbackRoute(seen, this.#ownBotIds());
+    if (!route) return;
+    this.#replyRoutes.delete(key);
+    this.#replyRoutes.set(key, route);
+    while (this.#replyRoutes.size > 500) {
+      const oldest = this.#replyRoutes.keys().next();
+      if (oldest.done) break;
+      this.#replyRoutes.delete(oldest.value);
+    }
+  }
+
+  /** 回复目标对应的会话路由：优先用这条消息自己的 chatId/senderId，退化到该会话最近一次的入站路由。 */
+  #replyRouteFor(target) {
+    const direct = replyFallbackRoute(target, this.#ownBotIds());
+    if (direct) return direct;
+    const key = conversationRouteKey(target);
+    if (key) {
+      const remembered = this.#replyRoutes.get(key);
+      if (remembered) return remembered;
+    }
+    // 目标里没有会话信息时（例如 Web 端继续的会话）只有一条会话可用，就直接用它。
+    if (!cleanId(target?.chatId) && this.#replyRoutes.size === 1) {
+      return [...this.#replyRoutes.values()][0];
+    }
+    return null;
+  }
+
+  /**
+   * 会话与有度会话绑定后登记出站路由：
+   * `dsh_im_send_to_youdu` 通过 sessionId 找到这里，把显式指定要发到有度的文字/文件投递出去。
+   */
+  #bindOutboundRoute({ sessionId, chatId, chatType, senderId }) {
+    const id = cleanId(sessionId);
+    if (!id) return;
+    const group = String(chatType ?? '').toLowerCase() === 'group';
+    const targetChatId = group ? cleanId(chatId) : cleanId(senderId);
+    if (!targetChatId) return;
+    const route = { chatType: group ? 'group' : 'single', chatId: targetChatId };
+    const binding = Object.freeze({
+      botId: this.#config.sourceBotId,
+      kind: group ? 'group' : 'user',
+      describeRoute: () => `${group ? '群' : '私聊'} ${targetChatId}`,
+      sendText: async (text, { signal } = {}) => {
+        signal?.throwIfAborted();
+        const socketRef = this.#socket;
+        if (!socketRef) throw new Error('Youdu bot is not connected');
+        await socketRef.sendMessage(route.chatId, {
+          chatType: route.chatType,
+          msgType: 'text',
+          text: { content: text },
+        });
+      },
+      sendFile: async (filePath, { fileName, workspace, signal } = {}) => {
+        const file = await this.#materializeOutboundFile(filePath, { fileName, workspace, signal });
+        await this.#deliverExplicitFile(route, file);
+      },
+    });
+    this.#outboundRoutes.set(id, binding);
+    if (this.#outboundRoutes.size > 500) {
+      const oldest = this.#outboundRoutes.keys().next();
+      if (!oldest.done) this.#outboundRoutes.delete(oldest.value);
+    }
+    try {
+      bindYouduOutboundRoute(id, binding);
+    } catch (error) {
+      this.#logger.warn?.('[dsh-im:youdu] unable to register the Youdu send route:', error?.message ?? error);
+    }
+  }
+
+  /** 解析并读取一个要发到有度的文件（工作区相对路径按会话工作区解析）。 */
+  async #materializeOutboundFile(filePath, { fileName, workspace, signal } = {}) {
+    const raw = cleanId(filePath);
+    if (!raw) {
+      const error = new TypeError('A file path is required to send a file to Youdu');
+      error.code = 'youdu-send-path-required';
+      throw error;
+    }
+    const base = cleanId(workspace) ?? cleanId(this.#config.workspace) ?? process.cwd();
+    const absolute = isAbsolute(raw) ? raw : resolve(base, raw);
+    signal?.throwIfAborted();
+    let bytes;
+    try {
+      bytes = await readFile(absolute, signal ? { signal } : undefined);
+    } catch (error) {
+      if (error?.code === 'ENOENT') {
+        const missing = new Error(`File not found: ${absolute}`);
+        missing.code = 'youdu-send-file-missing';
+        throw missing;
+      }
+      throw error;
+    }
+    const name = cleanId(fileName) ?? basename(absolute);
+    return Object.freeze({
+      fileName: name,
+      mediaType: inferContentTypeFromName(name),
+      size: bytes.byteLength,
+      bytes,
+    });
+  }
+
+  /** 用当前 socket 把显式出站文件按媒体消息投递到指定会话。 */
+  async #deliverExplicitFile(route, file) {
+    const socketRef = this.#socket;
+    if (!socketRef) throw new Error('Youdu bot is not connected');
+    const host = normalizeWsHost(this.#config.wsHost);
+    const media = await youduUploadMedia({
+      host,
+      token: socketRef.getToken(),
+      fileName: file.fileName,
+      contentType: file.mediaType,
+      content: file.bytes,
+      kind: 'file',
+      transport: this.#mediaTransport,
+    });
+    await socketRef.sendMessage(route.chatId, {
+      chatType: route.chatType,
+      ...buildMediaMessageBody(media),
+    });
+  }
+
+  /** 记录一次「没有回调 reqId、按记住的会话路由主动投递」的回复。 */
+  #recordRoutedReply(target, route, kind) {
+    const at = new Date().toISOString();
+    this.#routeFallbacks += 1;
+    this.#lastRouteFallbackAt = at;
+    this.#status.replyFallbacks = this.#routeFallbacks;
+    if (!this.#status.firstReplyFallbackAt) this.#status.firstReplyFallbackAt = at;
+    this.#status.lastReplyFallbackAt = at;
+    this.#status.lastReplyFallbackReason = `no callback reqId (${kind}); routed to ${route.chatType} ${route.chatId}`;
+    this.#logger.info?.(
+      `[dsh-im:youdu] delivered a ${kind} reply without a callback reqId via send_msg `
+      + `(${route.chatType} ${route.chatId})`,
+    );
   }
 
   /** 记录一次「入站回调回传失败、已改用主动投递」的降级（设置页可见）。 */

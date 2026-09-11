@@ -1,6 +1,7 @@
 import { createProductionController } from './production.mjs';
 import { installYouduRpc } from './rpc.mjs';
 import { installYouduKbTool } from '../../../../src/channels/youdu/kb/tool.mjs';
+import { installYouduSendTool } from '../../../../src/channels/youdu/send-tool.mjs';
 
 export const name = 'dsh-im-youdu-host';
 export const inject = ['connection', 'credentials', 'typertGateway'];
@@ -26,9 +27,13 @@ export async function apply(ctx, config = {}) {
   if (typeof ctx?.inject === 'function') {
     ctx.inject(['tools', 'systemPrompt'], (toolCtx) => {
       installYouduKbTool(toolCtx);
+      // 显式出站工具：会话绑定有度后，模型可以把文字/文件发回该有度会话
+      // （DSH 网页端发起的回合也能发），不依赖入站回调 reqId。
+      installYouduSendTool(toolCtx);
     });
   } else {
     installYouduKbTool(ctx);
+    installYouduSendTool(ctx);
   }
   const disposeRpc = installYouduRpc(
     ctx,
