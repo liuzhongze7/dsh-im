@@ -18,6 +18,47 @@ function timeoutError() {
   return error;
 }
 
+/** 回复队列没有对应队列项时抛出的错误：属于无法判断是否需要降级的失败。 */
+function isMissingReplyQueue(error) {
+  return /queue item not found for reqId/i.test(String(error?.message ?? ''));
+}
+
+/**
+ * 回复可靠性兜底（send_msg 降级）。
+ *
+ * 入站回调回传（respond_msg）依赖服务端还留着这条消息的「回调上下文」：
+ * ng_bot 只按 LRU 淘汰（runtime_cache.go，上限 200、无 TTL），连接重置时整表清空。
+ * 长回合（一条回复要跑几分钟）或拥挤群里上下文一旦失效，回复就永久丢失且没有任何提示。
+ * 因此 respond_msg 明确失败（ack 错误或 5s ack 超时）时，改写按会话主动投递的 send_msg。
+ * 只在 ack 超时/协议拒绝这类「确定没送出去」的失败上降级，避免重复消息。
+ */
+function replyFallbackRoute(target, ownBotIds = []) {
+  const chatId = cleanId(target?.chatId);
+  if (!chatId) return null;
+  if (String(target?.chatType ?? '').toLowerCase() === 'group') {
+    // 群聊必须显式声明 chatType，否则服务端按单聊把群 ID 当用户 ID（wss_outbound.go:207-219）。
+    return { chatType: 'group', chatId };
+  }
+  const senderId = cleanId(target?.senderId);
+  // 单聊的接收方就是发消息的人；机器人自身的账号（有度 botId / 内部 botId）绝不能作为接收方，
+  // 否则会给自己发消息成环。
+  const ownIds = [ownBotIds].flat().map(cleanId).filter(Boolean);
+  if (!senderId || senderId === '*' || ownIds.includes(senderId)) return null;
+  return { chatType: 'single', chatId: senderId };
+}
+
+function cleanId(value) {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function describeSendFailure(error) {
+  if (!error) return 'unknown error';
+  const code = cleanId(error.code) ?? (Number.isFinite(error.errCode) ? String(error.errCode) : null);
+  const message = cleanId(error.errMsg) ?? cleanId(error.message);
+  if (code && message) return `${code}: ${message}`;
+  return code ?? message ?? String(error);
+}
+
 export function createYouduRuntimeStatus() {
   return {
     startedAt: null,
@@ -27,6 +68,7 @@ export function createYouduRuntimeStatus() {
     lastCheckedAt: null,
     lastConnectedAt: null,
     lastError: null,
+    // 出站可靠性字段（replyFallbacks / lastReplyFallback*）来自 bridge 状态。
     ...createYouduBridgeStatus(),
   };
 }
@@ -145,12 +187,52 @@ export class YouduRuntime {
     });
     this.#socket = socket;
 
+    // 统一出站：先按入站回调回传（respond_msg），失败再按会话主动投递（send_msg）。
+    const deliverOutbound = async (target, body) => {
+      const reqId = cleanId(target?.reqId) ?? '';
+      // 没有 reqId 时（例如从 Web 端继续这个会话）没有可用的回调通道，直接主动投递。
+      if (!reqId) {
+        const route = replyFallbackRoute(target, this.#ownBotIds());
+        if (!route) throw new Error('Youdu reply target is missing a usable conversation route');
+        return socket.sendMessage(route.chatId, { chatType: route.chatType, ...body });
+      }
+      let replyFailure = null;
+      try {
+        return await socket.sendReply(reqId, body);
+      } catch (error) {
+        // 队列项缺失说明该 reqId 已经处理完，属于编程错误：不降级，避免重复发送。
+        if (isMissingReplyQueue(error)) throw error;
+        replyFailure = error;
+      }
+      const route = replyFallbackRoute(target, this.#ownBotIds());
+      if (!route) {
+        this.#recordReplyFallbackFailure(replyFailure, reqId);
+        throw replyFailure;
+      }
+      try {
+        const result = await socket.sendMessage(route.chatId, { chatType: route.chatType, ...body });
+        this.#recordReplyFallback(replyFailure, reqId, route);
+        return result;
+      } catch (fallbackError) {
+        this.#recordReplyFallbackFailure(replyFailure, reqId, fallbackError);
+        const error = new Error(
+          `Youdu reply was not delivered: respond_msg failed (${describeSendFailure(replyFailure)}), `
+          + `send_msg failed (${describeSendFailure(fallbackError)})`,
+          { cause: fallbackError },
+        );
+        error.code = 'youdu-reply-undeliverable';
+        error.replyError = replyFailure;
+        error.fallbackError = fallbackError;
+        throw error;
+      }
+    };
+
     const bridge = new YouduBridge({
       bot: {
-        sendReply: (target, text, options = {}) => {
-          const body = { msgType: 'text', text: { content: text } };
-          return socket.sendReply(target.reqId, body);
-        },
+        sendReply: (target, text, options = {}) => deliverOutbound(
+          target,
+          { msgType: 'text', text: { content: text } },
+        ),
         sendMessage: (chatId, text) => {
           const body = { msgType: 'text', text: { content: text } };
           return socket.sendMessage(chatId, body);
@@ -180,7 +262,7 @@ export class YouduRuntime {
             transport: mediaTransport,
           });
           const body = buildMediaMessageBody(media);
-          return socket.sendReply(target.reqId, body);
+          return deliverOutbound(target, body);
         },
       },
       harness: this.#harness,
@@ -344,5 +426,42 @@ export class YouduRuntime {
     this.#status.ready = false;
     this.#status.youduConnectionState = 'idle';
     return this.status;
+  }
+
+  /** 本机器人的所有身份标识（有度 botId 与内部派生 botId），用于避免把回复发给自己。 */
+  #ownBotIds() {
+    return [
+      this.#config.sourceBotId,
+      this.#config.botId,
+      this.#botId,
+    ];
+  }
+
+  /** 记录一次「入站回调回传失败、已改用主动投递」的降级（设置页可见）。 */
+  #recordReplyFallback(replyFailure, reqId, route) {
+    const at = new Date().toISOString();
+    this.#status.replyFallbacks += 1;
+    if (!this.#status.firstReplyFallbackAt) this.#status.firstReplyFallbackAt = at;
+    this.#status.lastReplyFallbackAt = at;
+    this.#status.lastReplyFallbackReason = describeSendFailure(replyFailure);
+    const scope = route.chatType === 'group' ? 'group' : 'direct';
+    this.#logger.warn?.(
+      `[dsh-im:youdu] respond_msg failed for ${scope} reply (${describeSendFailure(replyFailure)}); `
+      + `delivered with send_msg instead (reqId=${reqId}, chatId=${route.chatId})`,
+    );
+  }
+
+  /** 记录一次彻底发不出去的回复（respond_msg 与 send_msg 都失败）。 */
+  #recordReplyFallbackFailure(replyFailure, reqId, fallbackFailure = null) {
+    const at = new Date().toISOString();
+    const reason = describeSendFailure(replyFailure);
+    this.#status.lastReplyFallbackAt = at;
+    this.#status.lastReplyFallbackReason = reason;
+    this.#status.lastReplyFallbackError = fallbackFailure
+      ? `${reason} -> send_msg: ${describeSendFailure(fallbackFailure)}`
+      : `${reason} -> no fallback route (reqId=${reqId})`;
+    this.#logger.error?.(
+      `[dsh-im:youdu] reply could not be delivered (reqId=${reqId}): ${this.#status.lastReplyFallbackError}`,
+    );
   }
 }

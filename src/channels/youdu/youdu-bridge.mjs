@@ -122,11 +122,52 @@ export function createYouduBridgeStatus() {
     lastReplyAt: null,
     lastError: null,
     lastMessageError: null,
+    // 回复可靠性：respond_msg（入站回调回传）失败后改走 send_msg 主动投递的次数与结果。
+    // 服务端的回调上下文只有 LRU 淘汰、没有 TTL（ng_bot runtime_cache.go），
+    // 长回合或拥挤会话里会失效；失败必须可见，且要有可用的降级通道。
+    replyFallbacks: 0,
+    firstReplyFallbackAt: null,
+    lastReplyFallbackAt: null,
+    lastReplyFallbackReason: null,
+    lastReplyFallbackError: null,
   };
+}
+
+/**
+ * respond_msg 降级投递（send_msg）。
+ *
+ * 入站回调回传只在「服务端仍持有该 reqId 的回调上下文」时可用；上下文过期/被淘汰后
+ * 只能按会话主动投递。群聊必须带 chatType='group'，否则服务端会把群 ID 当用户 ID
+ * 按单聊发送（ng_bot wss_outbound.go:207-219）；单聊接收方是发送这条消息的人。
+ */
+function fallbackRoute(target, ownBotId) {
+  const chatId = clean(target?.chatId);
+  if (!chatId) return null;
+  if (String(target?.chatType ?? '').toLowerCase() === 'group') {
+    return { chatType: 'group', chatId };
+  }
+  const senderId = clean(target?.senderId);
+  // 有度的 bot 自身也会出现在会话里：绝不能把回复发给机器人自己。
+  if (!senderId || senderId === '*' || senderId === ownBotId) return null;
+  return { chatType: 'single', chatId: senderId };
+}
+
+function describeSendError(error) {
+  if (!error) return 'unknown error';
+  const code = clean(error.code) ?? numericErrorCode(error.errCode);
+  const message = clean(error.errMsg) ?? clean(error.message);
+  if (code && message) return `${code}: ${message}`;
+  return code ?? message ?? String(error);
 }
 
 function clean(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+/** 数字型错误码（有度 ack 帧用 errCode 而不是 code）。 */
+function numericErrorCode(value) {
+  const code = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(code) ? String(code) : null;
 }
 
 /** 剥掉有度群聊 @ 提及包装（形如 `@oc86aed...(显示名)`），只留真正正文。 */

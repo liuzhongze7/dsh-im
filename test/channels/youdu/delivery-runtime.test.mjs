@@ -176,3 +176,141 @@ test('youdu runtime carries pending group context into the next mention', async 
   await waitFor(() => socket.sent.some(({ kind }) => kind === 'reply'));
   await runtime.stop();
 });
+
+// --- 出站可靠性：respond_msg 失败后的 send_msg 降级 -------------------------
+// 服务端的回调上下文只按 LRU 淘汰、没有 TTL（ng_bot runtime_cache.go），
+// 长回合或拥挤群里 respond_msg 会失败，而原来既没有降级路径也没有任何日志。
+
+async function mentionRuntime({ ensureRunning } = {}) {
+  const socket = new FakeSocket();
+  const runtime = new YouduRuntime({
+    config: { botId: 'yd_bot', wsHost: 'push.example.com' },
+    secret: 'secret-1',
+    harness: {
+      ensureRunning: ensureRunning ?? (async () => true),
+      sessionExists: async () => true,
+      createSession: async () => 'session-1',
+      ask: async () => 'answer',
+    },
+    state: fakeState(),
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+    connectTimeoutMs: 1_000,
+    createSocket: () => socket,
+  });
+  await runtime.start();
+  return { runtime, socket };
+}
+
+test('youdu runtime falls back to send_msg in the group when respond_msg fails', async () => {
+  const { runtime, socket } = await mentionRuntime();
+  socket.sendReply = () => Promise.reject(
+    new Error('Reply ack timeout (5000ms) for reqId: req-m1'),
+  );
+
+  socket.emit('message', groupFrame('m1', '帮我总结', ['yd_bot']));
+  await waitFor(() => socket.sent.some(({ kind }) => kind === 'message'));
+
+  assert.deepEqual(socket.sent.at(-1), {
+    kind: 'message',
+    chatId: 'g-1',
+    // 群聊必须显式声明 chatType，否则服务端按单聊把群 ID 当用户 ID（wss_outbound.go:207-219）。
+    body: { chatType: 'group', msgType: 'text', text: { content: 'answer' } },
+  });
+  const status = runtime.status;
+  assert.equal(status.replyFallbacks, 1);
+  assert.ok(status.firstReplyFallbackAt);
+  assert.ok(status.lastReplyFallbackAt);
+  assert.match(status.lastReplyFallbackReason, /ack timeout/i);
+  assert.equal(status.lastReplyFallbackError, null);
+  await runtime.stop();
+});
+
+test('youdu runtime falls back to send_msg in a direct chat when respond_msg fails', async () => {
+  const { runtime, socket } = await mentionRuntime();
+  socket.sendReply = () => Promise.reject({ errCode: 1001, errMsg: 'callback context not found' });
+
+  socket.emit('message', {
+    headers: { reqId: 'req-d1' },
+    body: {
+      msgId: 'd1',
+      chatId: '6463894',
+      chatType: 'single',
+      from: { userId: '6463894', name: '刘钟泽' },
+      msgType: 'text',
+      text: { content: '你好' },
+      raw: { decoded: { msgType: 0 } },
+    },
+  });
+  await waitFor(() => socket.sent.some(({ kind }) => kind === 'message'));
+
+  assert.deepEqual(socket.sent.at(-1), {
+    kind: 'message',
+    // 单聊的接收方是发消息的人，而不是会话 ID 之外的任何东西。
+    chatId: '6463894',
+    body: { chatType: 'single', msgType: 'text', text: { content: 'answer' } },
+  });
+  assert.equal(runtime.status.replyFallbacks, 1);
+  assert.match(runtime.status.lastReplyFallbackReason, /1001: callback context not found/);
+  await runtime.stop();
+});
+
+test('youdu runtime refuses to answer the bot itself when the callback route is gone', async () => {
+  const socket = new FakeSocket();
+  const runtime = new YouduRuntime({
+    // sourceBotId 是有度侧的机器人账号：它出现在会话里时，回复降级必须被拒绝而不是自问自答。
+    config: { botId: 'yd_bot', sourceBotId: 'oc86aed821c86345e4', wsHost: 'push.example.com' },
+    secret: 'secret-1',
+    harness: {
+      ensureRunning: async () => true,
+      sessionExists: async () => true,
+      createSession: async () => 'session-1',
+      ask: async () => 'answer',
+    },
+    state: fakeState(),
+    botId: 'oc86aed821c86345e4',
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+    connectTimeoutMs: 1_000,
+    createSocket: () => socket,
+  });
+  await runtime.start();
+  socket.sendReply = () => Promise.reject(new Error('callback context not found'));
+
+  socket.emit('message', {
+    headers: { reqId: 'req-d2' },
+    body: {
+      msgId: 'd2',
+      chatId: 'oc86aed821c86345e4',
+      chatType: 'single',
+      from: { userId: 'oc86aed821c86345e4', name: 'lewis.liu的智能机器人' },
+      msgType: 'text',
+      text: { content: 'loop' },
+      raw: { decoded: { msgType: 0 } },
+    },
+  });
+  await waitFor(() => runtime.status.lastReplyFallbackError !== null);
+
+  assert.equal(
+    socket.sent.some(({ kind }) => kind === 'message'),
+    false,
+    'self-addressed replies must never be sent with send_msg',
+  );
+  assert.equal(runtime.status.replyFallbacks, 0);
+  assert.match(runtime.status.lastReplyFallbackError, /no fallback route/i);
+  await runtime.stop();
+});
+
+test('youdu runtime keeps a doubly-failed reply visible instead of dropping it', async () => {
+  const { runtime, socket } = await mentionRuntime();
+  socket.sendReply = () => Promise.reject(new Error('callback context not found'));
+  socket.sendMessage = () => Promise.reject(new Error('WebSocket not connected, unable to send data'));
+
+  socket.emit('message', groupFrame('m2', '群里再问一次', ['yd_bot']));
+  await waitFor(() => runtime.status.lastReplyFallbackError !== null);
+
+  assert.equal(runtime.status.replyFallbacks, 0, 'fallback that also failed is not counted as recovered');
+  assert.match(
+    runtime.status.lastReplyFallbackError,
+    /callback context not found -> send_msg: WebSocket not connected/,
+  );
+  await runtime.stop();
+});

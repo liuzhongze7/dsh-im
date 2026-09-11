@@ -13,6 +13,11 @@ This file records the notable changes in each dsh-im release. Its format follows
 - 有度渠道新增 `/context` 与 `/context clear`，并让 `/new`、`/help`、`/status` 在群聊里正常生效：`/context` 本地回复本群上下文缓存状态（开关、条数、待带入消息数、可带入附件数、附件保留期），`/context clear` 清空本群待带入的消息（已下载的附件仍按保留期保留），群聊里的 `/new` 换新会话的同时清空待带入的消息。三条命令都在本地处理、不发给模型，也不改变会话绑定（`/new` 除外），并与其他命令一样受群访问规则与命令权限约束；以前群里发 `/new`、`/help`、`/status` 会被当成提问交给模型，现在不会。
   The Youdu channel gains `/context` and `/context clear`, and `/new`, `/help` and `/status` now work in group chats: `/context` replies locally with this group's cache state (switch, limit, messages held for context, attachments offered, attachment retention), `/context clear` drops the messages held for this group while downloaded attachments stay until retention, and `/new` in a group starts a fresh Session and drops the held context at the same time. All three are answered locally, never sent to the model, and keep the Session binding except `/new`; they obey the group access rules and command permissions like every other command. Previously `/new`, `/help` and `/status` sent from a group were forwarded to the model as a prompt; they are not any more.
 
+### Fixed / 修复
+
+- 修复有度渠道的回复与结果文件可能悄悄发不出去：回复原来只走「入站消息回调回传」（`respond_msg` 按该条消息的 `reqId` 回传），而服务端只为回调保留有限的上下文，长回合或繁忙会话里该上下文会失效，之后回复就永久丢失且没有任何日志——界面里助手答了，有度里什么都没有。现在 `respond_msg` 明确失败（回执报错或 5 秒回执超时）时自动改用按会话主动投递（`send_msg`，群聊带 `chatType=group`、私聊发给发消息的人，并用机器人自身账号做自问自答保护），降级次数、最近一次降级原因和彻底发不出去的原因记入渠道状态并写入日志，结果文件回传同样适用。
+  Fixed Youdu replies and result files silently failing to send. A reply only used the inbound-callback path (`respond_msg` keyed by that message's `reqId`), and the server keeps only a bounded callback context: once it expires — a long turn or a busy group is enough — the reply was lost forever with no log at all, so the answer looked delivered while nothing reached Youdu. A failed `respond_msg` (error acknowledgement or five-second acknowledgement timeout) now falls back to direct conversation delivery (`send_msg`, with `chatType=group` for groups and the sender for direct chats, guarded against answering the bot itself); fallback counts, the latest fallback reason, and the reason an answer could not be delivered at all are recorded in the channel status and the log, and result-file delivery follows the same path.
+
 ## [4.17.1] - 2026-09-09
 
 ### Fixed / 修复
