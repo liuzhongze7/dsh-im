@@ -40,6 +40,11 @@ import {
   registerInboundTtlWorkspaces,
 } from '../../inbound-ttl-runtime.mjs';
 
+/** 取非空字符串（用于建议目标的可读名字）。 */
+function cleanString(value) {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
 /**
  * 有度的访问策略：直接复用共享 provider（ownerUserId 的种子策略由
  * `initialAccessPolicyFor('youdu', …)` 统一生成），只补 groupResponseMode。
@@ -332,21 +337,32 @@ export async function createProductionController(ctx, config = {}, internals = {
   });
   const deliveryAdapter = Object.freeze({
     ...baseDeliveryAdapter,
-    // 建议目标里补上联系人可读名字（观察到的 account / name）。
+    // 建议目标补上可读名字：单聊用观察到的账号名/昵称，群聊用群名/会话标题。
+    // 目标本身仍以 chatId 为准（服务端不保证名字唯一），这里只解决"选目标时看着是
+    // 一串 ID"的问题；按名字直接投递由上层挑选目标完成，不在渠道里另造解析器。
     async listSuggestions(botId) {
       const suggestions = await baseDeliveryAdapter.listSuggestions(botId);
       let people = [];
+      let groups = [];
       try {
         const state = await stateFor(botId);
         people = typeof state?.peopleSnapshot === 'function' ? state.peopleSnapshot() : [];
+        groups = typeof state?.groupsSnapshot === 'function' ? state.groupsSnapshot() : [];
       } catch {
         // 名字只是展示信息，读不到就退化为纯 ID。
       }
-      const byChatId = new Map(people.map((person) => [person.chatId, person]));
+      const labels = new Map();
+      for (const group of groups) {
+        const label = cleanString(group?.name);
+        if (label) labels.set(`group:${group.chatId}`, label);
+      }
+      for (const person of people) {
+        const label = cleanString(person?.name) ?? cleanString(person?.account);
+        if (label) labels.set(`user:${person.chatId}`, label);
+      }
       return suggestions.map((suggestion) => {
-        if (suggestion?.kind !== 'user') return suggestion;
-        const person = byChatId.get(suggestion.route?.chatId);
-        const label = person?.name ?? person?.account;
+        const chatId = suggestion?.route?.chatId;
+        const label = labels.get(`${suggestion?.kind}:${chatId}`);
         return label ? { ...suggestion, name: label } : suggestion;
       });
     },

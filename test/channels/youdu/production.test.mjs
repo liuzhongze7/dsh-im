@@ -93,8 +93,17 @@ test('Youdu production exposes a delivery adapter that only owns configured bots
     async load() { return this; }
     async recordGroup() {}
     async recordPerson() {}
-    snapshot() { return { sessions: { 'direct:6463894': 'session-user' }, groups: {}, people: {} }; }
+    snapshot() {
+      return {
+        sessions: { 'direct:6463894': 'session-user', 'group:2048': 'session-group' },
+        groups: {},
+        people: {},
+      };
+    }
     peopleSnapshot() { return [{ chatId: '6463894', account: 'lewis.liu', name: '刘钟泽', lastSeenAt: null }]; }
+    groupsSnapshot() {
+      return [{ chatId: '2048', name: '研发群', lastSeenAt: null, messages: 3 }];
+    }
   }
   class Harness {
     stopManagedProcess() {}
@@ -143,12 +152,13 @@ test('Youdu production exposes a delivery adapter that only owns configured bots
     text: '定时结果',
   }]);
 
-  // 建议目标带上观察到的联系人名字，方便设置页展示。
+  // 建议目标带上观察到的联系人/群名，选目标时不用再对着 chatId 猜。
   assert.deepEqual(await service.listSuggestions(bot.botId), {
     botId: bot.botId,
     channel: 'youdu',
     suggestions: [
       { kind: 'user', route: { chatId: '6463894' }, name: '刘钟泽' },
+      { kind: 'group', route: { chatId: '2048' }, name: '研发群' },
     ],
   });
 
