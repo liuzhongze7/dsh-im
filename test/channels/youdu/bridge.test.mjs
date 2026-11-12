@@ -29,11 +29,17 @@ function frame(messageId, text, overrides = {}) {
   return { headers: { reqId: `req-${messageId}` }, body };
 }
 
+// 1x1 透明 PNG：图片管线会按魔数嗅探格式，测试里必须是真图字节。
+const TINY_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64',
+);
+
 function makeBot(sent = []) {
   return {
     sendReply: async (target, text) => sent.push({ target, text }),
     sendMessage: async () => {},
-    downloadMedia: async () => Buffer.from('x'),
+    downloadMedia: async () => TINY_PNG,
   };
 }
 
@@ -244,8 +250,8 @@ test('batch collect then /send submits a combined prompt to the session', async 
   assert.deepEqual(await submission, undefined);
 });
 
-// 入站图片走「自己下载 + 落盘成工作区文件」，不把图片块交给宿主（非视觉模型会拒收）。
-test('inbound image is handed to the file pipeline with an analysis hint', async () => {
+// 入站图片与其它渠道一致：以图片块交给宿主，非视觉模型的拒收由 HarnessClient 回退成工作区文件。
+test('inbound image travels to the Harness as an image block', async () => {
   const { state } = stateFixture();
   const sent = [];
   const calls = [];
@@ -265,10 +271,11 @@ test('inbound image is handed to the file pipeline with an analysis hint', async
 
   assert.equal(calls.length, 1);
   const { content, options } = calls[0];
-  assert.equal(options?.images, undefined, 'images must not be sent to the Harness');
-  assert.equal(Array.isArray(options?.files), true, 'the image must travel as an inbound file');
-  assert.equal(options.files.length, 1);
-  assert.equal(options.files[0].name, 'shot.png');
-  assert.equal(typeof options.files[0].load, 'function');
-  assert.match(String(content), /图片/);
+  const blocks = Array.isArray(content) ? content : [{ type: 'text', text: content }];
+  const image = blocks.find((block) => block.type === 'image');
+  assert.equal(image?.mediaType, 'image/png', 'the image must travel as an image block');
+  assert.equal(image?.name, 'shot.png');
+  assert.equal(options?.files, undefined, 'images no longer travel as inbound files');
+  const text = blocks.filter((block) => block.type === 'text').map((block) => block.text).join('\n');
+  assert.doesNotMatch(text, /工作区文件/, 'images must not be pre-emptively downgraded to files');
 });
