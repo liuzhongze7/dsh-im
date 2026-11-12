@@ -355,3 +355,56 @@ test('youdu runtime exposes the bound session outbound route for explicit sends'
   await runtime.stop();
   assert.equal(getYouduOutboundRoute('session-42'), undefined);
 });
+
+test('youdu runtime splits a long proactive text into frames under the limit', async () => {
+  const { runtime, socket } = await startedRuntime();
+  const text = Array.from({ length: 20 }, (_, index) => `第 ${index} 段：${'内容'.repeat(100)}`).join('\n\n');
+  assert.ok(text.length > 4000);
+  await runtime.sendProactiveText({ kind: 'group', route: { chatId: 'g-1' } }, text);
+  const frames = socket.sent.filter(({ kind }) => kind === 'message');
+  assert.ok(frames.length > 1, 'long text must be split');
+  for (const frame of frames) {
+    assert.equal(frame.body.chatType, 'group');
+    assert.equal(frame.body.msgType, 'text');
+    assert.ok(frame.body.text.content.length <= 4000);
+  }
+  assert.equal(
+    frames.map(({ body }) => body.text.content).join('').replace(/\s+/gu, ''),
+    text.replace(/\s+/gu, ''),
+    'splitting must not drop content',
+  );
+  await runtime.stop();
+});
+
+test('a long group answer keeps the callback chunk and delivers the rest via send_msg', async () => {
+  const socket = new FakeSocket();
+  const answer = Array.from({ length: 20 }, (_, index) => `第 ${index} 段：${'结果'.repeat(150)}`).join('\n\n');
+  const runtime = new YouduRuntime({
+    config: { botId: 'yd_bot', wsHost: 'push.example.com' },
+    secret: 'secret-1',
+    harness: {
+      ensureRunning: async () => true,
+      sessionExists: async () => true,
+      createSession: async () => 'session-1',
+      ask: async () => answer,
+    },
+    state: fakeState(),
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+    connectTimeoutMs: 1_000,
+    createSocket: () => socket,
+  });
+  await runtime.start();
+  socket.emit('message', groupFrame('m9', '帮我总结', ['yd_bot']));
+  await waitFor(() => socket.sent.some(({ kind }) => kind === 'message'));
+
+  const replies = socket.sent.filter(({ kind }) => kind === 'reply');
+  const messages = socket.sent.filter(({ kind }) => kind === 'message');
+  assert.equal(replies.length, 1, 'the first chunk still uses respond_msg');
+  assert.ok(messages.length >= 1, 'the remaining chunks use send_msg on the remembered route');
+  const delivered = [...replies, ...messages].map(({ body }) => body.text.content);
+  assert.equal(delivered.join('').replace(/\s+/gu, ''), answer.replace(/\s+/gu, ''));
+  for (const frame of [...replies, ...messages]) {
+    assert.ok(frame.body.text.content.length <= 4000);
+  }
+  await runtime.stop();
+});

@@ -19,6 +19,7 @@ import {
   YouduBridge,
 } from './youdu-bridge.mjs';
 import { buildYouduTlsOptions, createYouduTransport } from './youdu-tls.mjs';
+import { splitTextForYoudu } from './text-chunking.mjs';
 
 function timeoutError() {
   const error = new Error('Youdu WebSocket did not become ready in time');
@@ -212,7 +213,7 @@ export class YouduRuntime {
     this.#socket = socket;
 
     // 统一出站：先按入站回调回传（respond_msg），失败或没有回调再按会话主动投递（send_msg）。
-    const deliverOutbound = async (target, body, { kind = 'text' } = {}) => {
+    const sendOutbound = async (target, body, { kind = 'text' } = {}) => {
       const reqId = cleanId(target?.reqId) ?? '';
       // 没有 reqId（例如用户从 DSH 网页端继续这个 IM 会话）时没有可用的回调通道，
       // 按这个会话最近一次入站消息留下的路由主动投递。
@@ -254,16 +255,45 @@ export class YouduRuntime {
       }
     };
 
+    // 一条发不完的长回复会被有度整条丢弃（不截断、不报错），所以按上限切分后逐条发送：
+    // 第一段仍走回调优先的链路，后续段按同一会话路由主动投递。
+    const deliverContinuation = async (target, body) => {
+      const route = this.#replyRouteFor(target);
+      if (route) {
+        const result = await socket.sendMessage(route.chatId, { chatType: route.chatType, ...body });
+        this.#recordRoutedReply(target, route, 'text');
+        return result;
+      }
+      const reqId = cleanId(target?.reqId);
+      if (!reqId) throw new Error('Youdu reply target is missing a usable conversation route');
+      return socket.sendReply(reqId, body);
+    };
+
+    const deliverOutbound = async (target, body, { kind = 'text' } = {}) => {
+      const content = kind === 'text' ? body?.text?.content : undefined;
+      const chunks = typeof content === 'string' ? splitTextForYoudu(content) : [];
+      if (chunks.length <= 1) return sendOutbound(target, body, { kind });
+      let result;
+      for (const [index, chunk] of chunks.entries()) {
+        const part = { ...body, text: { ...body.text, content: chunk } };
+        result = index === 0
+          ? await sendOutbound(target, part, { kind })
+          : await deliverContinuation(target, part);
+      }
+      return result;
+    };
+
     const bridge = new YouduBridge({
       bot: {
         sendReply: (target, text, options = {}) => deliverOutbound(
           target,
           { msgType: 'text', text: { content: text } },
         ),
-        sendMessage: (chatId, text) => {
-          const body = { msgType: 'text', text: { content: text } };
-          return socket.sendMessage(chatId, body);
-        },
+        sendMessage: (chatId, text, options = {}) => this.#sendChatText(
+          chatId,
+          options.chatType === 'group' ? 'group' : 'single',
+          text,
+        ),
         downloadMedia: async (attachment, { signal, maxBytes } = {}) => {
           const host = normalizeWsHost(this.#config.wsHost);
           const { buffer } = await youduDownloadMedia({
@@ -404,11 +434,7 @@ export class YouduRuntime {
     }
     // 主动发送必须显式带 chatType：服务端只按 `chatType === 'group'` 走会话发送，
     // 否则一律按单聊处理（把群 ID 当用户 ID），见 ng_bot/internal/api/openclaw/wss_outbound.go:207-219。
-    await this.#socket.sendMessage(chatId, {
-      chatType: 'single',
-      msgType: 'text',
-      text: { content: text },
-    });
+    await this.#sendChatText(chatId, 'single', text);
     return { sent: true };
   }
 
@@ -429,12 +455,8 @@ export class YouduRuntime {
     }
     signal?.throwIfAborted();
     try {
-      await this.#socket.sendMessage(chatId, {
-        // 群聊必须声明 chatType，否则服务端按单聊投递，消息发不到群里。
-        chatType: target.kind === 'group' ? 'group' : 'single',
-        msgType: 'text',
-        text: { content: text },
-      });
+      // 群聊必须声明 chatType，否则服务端按单聊投递，消息发不到群里。
+      await this.#sendChatText(chatId, target.kind === 'group' ? 'group' : 'single', text);
     } catch (cause) {
       const error = new Error('Youdu rejected the proactive delivery', { cause });
       error.code = 'delivery-failed';
@@ -521,13 +543,7 @@ export class YouduRuntime {
       describeRoute: () => `${group ? '群' : '私聊'} ${targetChatId}`,
       sendText: async (text, { signal } = {}) => {
         signal?.throwIfAborted();
-        const socketRef = this.#socket;
-        if (!socketRef) throw new Error('Youdu bot is not connected');
-        await socketRef.sendMessage(route.chatId, {
-          chatType: route.chatType,
-          msgType: 'text',
-          text: { content: text },
-        });
+        await this.#sendChatText(route.chatId, route.chatType, text);
       },
       sendFile: async (filePath, { fileName, workspace, signal } = {}) => {
         const file = await this.#materializeOutboundFile(filePath, { fileName, workspace, signal });
@@ -577,8 +593,22 @@ export class YouduRuntime {
     });
   }
 
-  /** 用当前 socket 把显式出站文件按媒体消息投递到指定会话。 */
-  async #deliverExplicitFile(route, file) {
+  /** 按有度单条上限切分后逐条主动投递；返回最后一条的结果。 */
+  async #sendChatText(chatId, chatType, text) {
+    const socketRef = this.#socket;
+    if (!socketRef) throw new Error('Youdu bot is not connected');
+    let result;
+    for (const chunk of splitTextForYoudu(text)) {
+      result = await socketRef.sendMessage(chatId, {
+        chatType,
+        msgType: 'text',
+        text: { content: chunk },
+      });
+    }
+    return result;
+  }
+
+  /** 用当前 socket 把显式出站文件按媒体消息投递到指定会话。 */  async #deliverExplicitFile(route, file) {
     const socketRef = this.#socket;
     if (!socketRef) throw new Error('Youdu bot is not connected');
     const host = normalizeWsHost(this.#config.wsHost);
