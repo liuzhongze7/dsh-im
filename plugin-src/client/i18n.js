@@ -1050,6 +1050,8 @@ const EN = Object.freeze({
   '留空表示不修改': 'Leave empty to keep the current value',
   '允许的私聊用户 ID (可选)': 'Allowed direct-message user ID (optional)',
   '留空表示不限制（*）': 'Leave empty for no restriction (*)',
+  '可执行命令的用户 ID（可选）': 'User IDs allowed to run commands (optional)',
+  '留空表示命令默认关闭；填 * 表示不限制': 'Leave blank to keep commands off; use * for no restriction',
   '保存连接信息': 'Save connection',
   '正在读取有度机器人列表': 'Loading the Youdu bot list',
   '正在读取有度连接状态…': 'Loading the Youdu connection status…',
@@ -1185,6 +1187,48 @@ function translateDynamic(text) {
   if (match) return `Connection check failed: ${match[1]}`;
   match = /^移除失败：(.+)$/.exec(text);
   if (match) return `Removal failed: ${match[1]}`;
+
+  // 有度：访问策略摘要由片段拼成（"私聊：开放（命令默认关闭） | 群聊：…"），
+  // 源码里是模板字面量，字典查不到，这里按整串翻译。
+  const youduScene = /^(私聊|群聊)：(开放|白名单)（(.+)）(?: \| (私聊|群聊)：(开放|白名单)（(.+)）)?$/.exec(text);
+  if (youduScene) {
+    const scene = (prefix, mode, command) => {
+      const where = prefix === '私聊' ? 'Direct' : 'Group';
+      const how = mode === '白名单' ? 'allowlist' : 'open';
+      let detail = command === '命令默认关闭' ? 'commands off by default'
+        : command === '命令默认开启' ? 'commands on by default'
+          : command === '仅白名单用户可发消息' ? 'allowlisted users can message'
+            : null;
+      if (!detail) {
+        const count = /^(\d+) 个白名单用户$/.exec(command);
+        detail = count ? `${count[1]} allowlisted user(s)` : command;
+      }
+      return `${where}: ${how} (${detail})`;
+    };
+    const first = scene(youduScene[1], youduScene[2], youduScene[3]);
+    const second = youduScene[4] ? scene(youduScene[4], youduScene[5], youduScene[6]) : null;
+    return second ? `${first} | ${second}` : first;
+  }
+  // 有度：按群计数摘要 "1 个群仅名单内用户，1 个群允许所有人"。
+  if (/^\d+ 个群/.test(text)) {
+    const parts = text.split('，').map((part) => {
+      const hit = /^(\d+) 个群(仅名单内用户|允许所有人|被忽略)$/.exec(part);
+      if (!hit) return null;
+      const label = hit[2] === '仅名单内用户' ? 'allowlisted only'
+        : hit[2] === '允许所有人' ? 'open to everyone' : 'ignored';
+      return `${hit[1]} group(s) ${label}`;
+    });
+    if (parts.every(Boolean)) return parts.join(', ');
+  }
+  // 有度：群列表行尾 "12 条消息 · 最近 10:31:12"。
+  const youduMessages = /^(\d+) 条消息(?: · 最近 (.+))?$/.exec(text);
+  if (youduMessages) {
+    return youduMessages[2]
+      ? `${youduMessages[1]} messages · last ${youduMessages[2]}`
+      : `${youduMessages[1]} messages`;
+  }
+  const currentSecret = /^留空表示不修改（当前 (.+)）$/.exec(text);
+  if (currentSecret) return `Leave blank to keep the current ${currentSecret[1]}`;
 
   const phrases = [
     ['企业微信', 'WeCom'], ['DeepSeek Harness', 'DeepSeek Harness'],

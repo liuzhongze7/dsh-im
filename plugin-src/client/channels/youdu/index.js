@@ -1,6 +1,6 @@
 import * as React from 'react';
 
-import { h } from '../../i18n.js';
+import { h, isEnglish } from '../../i18n.js';
 import youduLogo from './youdu-logo.js';
 import { CredentialActionIcon } from '../../credential-binding.js';
 import {
@@ -64,7 +64,7 @@ function field(labelText, inputProps, extra) {
 function checkedTime(value) {
   if (!value) return '尚未检查';
   try {
-    return new Intl.DateTimeFormat('zh-CN', {
+    return new Intl.DateTimeFormat(isEnglish() ? 'en-US' : 'zh-CN', {
       hour: '2-digit', minute: '2-digit', second: '2-digit',
     }).format(new Date(value));
   } catch {
@@ -391,12 +391,12 @@ function ConnectionEditor({ account, disabled, onSave, onCancel }) {
       value: secret,
       onChange: (e) => setSecret(e.target.value),
       placeholder: '留空表示不修改',
-      maxLength: 1024,
+      maxLength: 512,
     }),
-    field('允许的私聊用户 ID (可选)', {
+    field('可执行命令的用户 ID（可选）', {
       value: owner,
       onChange: (e) => setOwner(e.target.value),
-      placeholder: '留空表示不限制（*）',
+      placeholder: '留空表示命令默认关闭；填 * 表示不限制',
       maxLength: 128,
     }),
     error ? h('p', { className: 'dim-credentialError', role: 'alert' },
@@ -640,17 +640,25 @@ export function YouduSettingsTab({ rpcCall }) {
     try {
       const snapshot = normalizeSnapshot(await statusWithTimeout(signal));
       if (!mounted.current || signal?.aborted) return;
-      setModel((current) => ({
-        ...current,
-        phase: 'ready',
-        revision: snapshot.revision,
-        bots: snapshot.bots,
-        totals: snapshot.totals,
-        modelCatalog: snapshot.modelCatalog,
-        agentPresetCatalog: snapshot.agentPresetCatalog ?? EMPTY_AGENT_PRESET_CATALOG,
-        pageError: null,
-        statusError: null,
-      }));
+      setModel((current) => {
+        // 保存操作在途时的静默刷新可能带着旧快照晚到：按 revision 丢弃，
+        // 否则会把刚保存的别名/模型/工作区回退成旧值（最长 15 秒自愈，用户却看到"已保存"）。
+        if (current.phase === 'ready'
+          && Number.isSafeInteger(current.revision)
+          && Number.isSafeInteger(snapshot.revision)
+          && snapshot.revision < current.revision) return current;
+        return {
+          ...current,
+          phase: 'ready',
+          revision: snapshot.revision,
+          bots: snapshot.bots,
+          totals: snapshot.totals,
+          modelCatalog: snapshot.modelCatalog,
+          agentPresetCatalog: snapshot.agentPresetCatalog ?? EMPTY_AGENT_PRESET_CATALOG,
+          pageError: null,
+          statusError: null,
+        };
+      });
     } catch (cause) {
       // 卸载 / 定时器清理导致的中止不算失败，也不要写状态。
       if (!mounted.current || signal?.aborted || cause?.name === 'AbortError') return;
@@ -871,10 +879,10 @@ export function YouduSettingsTab({ rpcCall }) {
               placeholder: '机器人密钥',
               maxLength: 1024,
             }),
-            field('允许的私聊用户 ID (可选)', {
+            field('可执行命令的用户 ID（可选）', {
               value: ownerUserId,
               onChange: (e) => setOwnerUserId(e.target.value),
-              placeholder: '或留空为 *',
+              placeholder: '留空表示命令默认关闭；填 * 表示不限制',
               maxLength: 128,
             }),
             credentialError ? h('p', { className: 'dim-credentialError', role: 'alert' },
