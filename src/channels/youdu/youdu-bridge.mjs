@@ -391,8 +391,16 @@ export class YouduBridge {
       timestamp: youduMessageTime(frame),
       reqId: clean(frame.headers?.reqId) ?? '',
     };
-    if (!message.messageId || !message.senderId || this.#state.hasSeen(message.messageId)
-      || this.#acceptedMessageIds.has(message.messageId)) {
+    if (!message.messageId || !message.senderId) {
+      // 缺 messageId 无法去重、缺 senderId 无法判定权限：直接丢弃，但要留痕，
+      // 否则线上出现「机器人不回消息」时完全看不出是哪一帧被扔掉了。
+      this.#logger.warn?.(
+        `[dsh-im:youdu] dropping an inbound frame without ${message.messageId ? 'senderId' : 'messageId'}`
+        + ` (chatId=${message.chatId || '-'}, msgType=${msgType ?? '-'})`,
+      );
+      return Promise.resolve();
+    }
+    if (this.#state.hasSeen(message.messageId) || this.#acceptedMessageIds.has(message.messageId)) {
       return Promise.resolve();
     }
     // 先记住这条消息的回传路由：用户之后从 DSH 网页端继续这个会话时，
