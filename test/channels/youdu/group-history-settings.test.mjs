@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import { YouduConfigStore } from '../../../src/channels/youdu/config-store.mjs';
-import { YouduSettingsStore } from '../../../src/channels/youdu/settings-store.mjs';
+import { YouduGroupSettingsStore } from '../../../src/channels/youdu/group-settings-store.mjs';
 import { YouduController } from '../../../src/channels/youdu/youdu-controller.mjs';
 import { DEFAULT_GROUP_HISTORY_CONFIG, DISABLED_GROUP_HISTORY_CONFIG } from '../../../src/channels/shared/group-history.mjs';
 import { createYouduRpcHandler, YOUDU_ENDPOINTS } from '../../../plugin-src/host/channels/youdu/rpc.mjs';
@@ -33,8 +33,8 @@ function fakeCredentials() {
 
 test('settings store persists the group history switch and limit per bot', async () => {
   await withDirectory(async (dir) => {
-    const path = join(dir, 'settings.json');
-    const store = await new YouduSettingsStore(path, { defaultWorkspace: dir }).load();
+    const path = join(dir, 'group-settings.json');
+    const store = await new YouduGroupSettingsStore(path).load();
     assert.deepEqual(store.groupHistoryFor(BOT_ID), DEFAULT_GROUP_HISTORY_CONFIG);
     assert.deepEqual(store.groupHistoryFor('unknown'), DEFAULT_GROUP_HISTORY_CONFIG);
 
@@ -43,10 +43,10 @@ test('settings store persists the group history switch and limit per bot', async
     const persisted = JSON.parse(await readFile(path, 'utf8'));
     assert.deepEqual(persisted.bots[BOT_ID].groupHistory, { enabled: true, limit: 20 });
 
-    const reloaded = await new YouduSettingsStore(path, { defaultWorkspace: dir }).load();
+    const reloaded = await new YouduGroupSettingsStore(path).load();
     assert.deepEqual(reloaded.groupHistoryFor(BOT_ID), { enabled: true, limit: 20 });
     assert.deepEqual(
-      reloaded.decorateStatus({ bots: [{ botId: BOT_ID }] }).bots[0].groupHistory,
+      reloaded.groupHistoryFor(BOT_ID),
       { enabled: true, limit: 20 },
     );
 
@@ -57,7 +57,7 @@ test('settings store persists the group history switch and limit per bot', async
       { enabled: true, limit: 0 },
     );
     assert.deepEqual(
-      (await new YouduSettingsStore(path, { defaultWorkspace: dir }).load()).groupHistoryFor(BOT_ID),
+      (await new YouduGroupSettingsStore(path).load()).groupHistoryFor(BOT_ID),
       { enabled: true, limit: 0 },
     );
   });
@@ -65,7 +65,7 @@ test('settings store persists the group history switch and limit per bot', async
 
 test('settings store drops damaged group history values instead of trusting them', async () => {
   await withDirectory(async (dir) => {
-    const path = join(dir, 'settings.json');
+    const path = join(dir, 'group-settings.json');
     const damaged = [
       null, [], 'enabled', true, 3,
       { enabled: 'yes', limit: 20 },
@@ -77,7 +77,7 @@ test('settings store drops damaged group history values instead of trusting them
         version: 1,
         bots: { [BOT_ID]: { workspace: dir, groupHistory: value } },
       }));
-      const store = await new YouduSettingsStore(path, { defaultWorkspace: dir }).load();
+      const store = await new YouduGroupSettingsStore(path).load();
       const normalized = store.groupHistoryFor(BOT_ID);
       assert.equal(typeof normalized.enabled, 'boolean', `enabled for ${JSON.stringify(value)}`);
       assert.equal(Number.isSafeInteger(normalized.limit), true, `limit for ${JSON.stringify(value)}`);
@@ -89,7 +89,7 @@ test('settings store drops damaged group history values instead of trusting them
       bots: { [BOT_ID]: { workspace: dir, groupHistory: { enabled: true, limit: 9999 } } },
     });
     await writeFile(path, original);
-    await new YouduSettingsStore(path, { defaultWorkspace: dir }).load();
+    await new YouduGroupSettingsStore(path).load();
     assert.equal(await readFile(path, 'utf8'), original);
     assert.equal(DISABLED_GROUP_HISTORY_CONFIG.limit, 0);
   });
@@ -98,13 +98,11 @@ test('settings store drops damaged group history values instead of trusting them
 test('controller saves group history settings and reports them in the status', async () => {
   await withDirectory(async (dir) => {
     const configStore = await new YouduConfigStore(join(dir, 'config.json')).load();
-    const settingsStore = await new YouduSettingsStore(join(dir, 'settings.json'), {
-      defaultWorkspace: dir,
-    }).load();
+    const groupStore = await new YouduGroupSettingsStore(join(dir, 'group-settings.json')).load();
     const controller = new YouduController({
       credentials: fakeCredentials(),
       configStore,
-      settingsStore,
+      groupStore,
       createRuntime: async () => ({
         start: async () => {},
         stop: async () => {},
@@ -121,7 +119,7 @@ test('controller saves group history settings and reports them in the status', a
     assert.deepEqual(saved.bots[0].groupHistory, { enabled: false, limit: 10 });
     assert.deepEqual(controller.status().bots[0].groupHistory, { enabled: false, limit: 10 });
     assert.deepEqual(
-      (await new YouduSettingsStore(join(dir, 'settings.json')).load()).groupHistoryFor(botId),
+      (await new YouduGroupSettingsStore(join(dir, 'group-settings.json')).load()).groupHistoryFor(botId),
       { enabled: false, limit: 10 },
     );
     await assert.rejects(controller.updateGroupHistory('yd_000000000000000000000000', { enabled: true, limit: 10 }));

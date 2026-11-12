@@ -5,6 +5,7 @@ import {
 import { normalizeBotAlias } from '../../../../src/channels/shared/bot-alias.mjs';
 import { normalizeGroupHistoryConfig } from '../../../../src/channels/shared/group-history.mjs';
 import { normalizeModelCatalog, normalizeModelSelection } from '../../model-setting.js';
+import { normalizeAgentPresetCatalog } from '../../agent-preset.js';
 
 export const YOUDU_RPC_CHANNEL = '/youdu';
 
@@ -130,6 +131,7 @@ export function normalizeSnapshot(value) {
     bots,
     totals: { configured: bots.length, connected: bots.filter((bot) => bot.connected).length },
     modelCatalog: normalizeModelCatalog(source.modelCatalog),
+    agentPresetCatalog: normalizeAgentPresetCatalog(source.agentPresetCatalog),
     ...(testMessage ? { testMessage } : {}),
   };
 }

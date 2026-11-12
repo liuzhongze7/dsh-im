@@ -9,7 +9,10 @@ import TestRenderer from 'react-test-renderer';
 
 import { YouduConfigStore } from '../../../src/channels/youdu/config-store.mjs';
 import { YouduController } from '../../../src/channels/youdu/youdu-controller.mjs';
-import { YouduSettingsStore } from '../../../src/channels/youdu/settings-store.mjs';
+import {
+  BotWorkspaceStore,
+  createWorkspaceAwareController,
+} from '../../../src/channels/shared/bot-workspace-store.mjs';
 import { YOUDU_ENDPOINTS as CLIENT_ENDPOINTS, normalizeSnapshot } from '../../../plugin-src/client/channels/youdu/api.js';
 import { YouduSettingsTab } from '../../../plugin-src/client/channels/youdu/index.js';
 import {
@@ -62,69 +65,31 @@ async function withController(run, { modelCatalog = () => CATALOG } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-im-youdu-bot-settings-'));
   try {
     const configStore = await new YouduConfigStore(join(dir, 'config.json')).load();
-    const settingsStore = await new YouduSettingsStore(
-      join(dir, 'settings.json'),
+    const workspaces = await new BotWorkspaceStore(
+      join(dir, 'workspaces.json'),
       { defaultWorkspace: dir },
     ).load();
-    const controller = new YouduController({
+    const state = { sessionFor: () => null };
+    const raw = new YouduController({
       credentials: fakeCredentials(),
       configStore,
-      settingsStore,
       createRuntime: fakeRuntimeFactory(),
-      modelCatalog,
+      ensureBot: (botConfig) => workspaces.ensure(botConfig.botId),
       logger: { info() {}, warn() {}, error() {} },
     });
-    await controller.attachBot({ botId: 'oc_demo', secret: 'secret-1', wsHost: 'push.example.com' });
-    await run({ controller, settingsStore });
-    await controller.close();
+    const controller = createWorkspaceAwareController(raw, {
+      workspaces,
+      stateFor: () => state,
+      agentPresetCatalog: () => ({ items: [] }),
+      modelCatalog,
+    });
+    await raw.attachBot({ botId: 'oc_demo', secret: 'secret-1', wsHost: 'push.example.com' });
+    await run({ controller, workspaces });
+    await raw.close();
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
 }
-
-test('the settings store persists a per-bot model and alias', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'dsh-im-youdu-settings-'));
-  try {
-    const path = join(dir, 'settings.json');
-    const store = await new YouduSettingsStore(path, { defaultWorkspace: dir }).load();
-    await store.setModel('yd_bot', SELECTION);
-    await store.setAlias('yd_bot', '客服小度');
-
-    const reloaded = await new YouduSettingsStore(path, { defaultWorkspace: dir }).load();
-    assert.deepEqual(reloaded.modelFor('yd_bot'), SELECTION);
-    assert.equal(reloaded.aliasFor('yd_bot'), '客服小度');
-
-    assert.equal(await reloaded.setModel('yd_bot', null), null);
-    assert.equal(await reloaded.setAlias('yd_bot', ''), '');
-    assert.equal(reloaded.modelFor('yd_bot'), null);
-    assert.equal(reloaded.aliasFor('yd_bot'), '');
-
-    await assert.rejects(() => reloaded.setAlias('yd_bot', '带\n换行'), /别名不能包含换行/);
-    await assert.rejects(() => reloaded.setModel('yd_bot', { provider: 'deepseek' }), /模型无效/);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
-test('decorateStatus exposes the alias and model for each bot', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'dsh-im-youdu-settings-'));
-  try {
-    const store = await new YouduSettingsStore(
-      join(dir, 'settings.json'),
-      { defaultWorkspace: dir },
-    ).load();
-    await store.setModel('yd_bot', SELECTION);
-    await store.setAlias('yd_bot', '客服小度');
-    const decorated = store.decorateStatus({
-      bots: [{ botId: 'yd_bot', bot: { name: '有度机器人', wsHostMasked: 'push.example.com' } }],
-    });
-    assert.equal(decorated.bots[0].bot.name, '客服小度');
-    assert.equal(decorated.bots[0].bot.originalName, '有度机器人');
-    assert.deepEqual(decorated.bots[0].model, SELECTION);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
 
 test('updateModel validates the model against the Harness catalog', async () => {
   await withController(async ({ controller }) => {

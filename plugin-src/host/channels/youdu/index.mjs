@@ -1,29 +1,22 @@
 import { createProductionController } from './production.mjs';
-import { installYouduRpc } from './rpc.mjs';
+import {
+  createYouduRpcHandler,
+  installYouduRpc,
+  YOUDU_RPC_CHANNEL,
+} from './rpc.mjs';
+import { installProductionChannel } from '../shared/startup.mjs';
 import { installYouduKbTool } from '../../../../src/channels/youdu/kb/tool.mjs';
 import { installYouduSendTool } from '../../../../src/channels/youdu/send-tool.mjs';
 
 export const name = 'dsh-im-youdu-host';
 export const inject = ['connection', 'credentials', 'typertGateway'];
 
-export async function apply(ctx, config = {}) {
-  let log = console;
-  try { if (typeof ctx?.logger === 'function') log = ctx.logger('dsh-im:youdu'); } catch { log = console; }
-  log.info('[dsh-im-youdu] apply() called');
-  if (config?.controller) {
-    log.info('[dsh-im-youdu] apply() -> installYouduRpc (controller provided)');
-    return installYouduRpc(ctx, config.controller, config.rpcOptions, config.rpcAuthority);
-  }
-  const production = await createProductionController(ctx, config, config.internals);
-  log.info('[dsh-im-youdu] production controller created');
-  // 把有度的主动发送接入统一的 DeliveryService（与其它渠道同一条通路）。
-  const unregisterDelivery = config.deliveryService && production.deliveryAdapter
-    ? config.deliveryService.registerAdapter(production.deliveryAdapter)
-    : undefined;
-  if (unregisterDelivery) log.info('[dsh-im-youdu] delivery adapter registered');
-  // Register the youdu_kb knowledge-base tool host-globally. It resolves its
-  // account + gids from the per-session run context bound by the YouDu bridge;
-  // absent a bound context it fails closed (YOUDU_IM_CONTEXT_REQUIRED).
+/**
+ * 注册有度专属的出站工具（知识库查询 + 会话内主动发送）。
+ * 工具只依赖 ctx 与每个会话绑定的有度上下文，与连接初始化无关，因此先于
+ * production 安装：连接初始化失败时工具仍在，错误信息由工具自身给出。
+ */
+function installYouduTools(ctx) {
   if (typeof ctx?.inject === 'function') {
     ctx.inject(['tools', 'systemPrompt'], (toolCtx) => {
       installYouduKbTool(toolCtx);
@@ -31,25 +24,25 @@ export async function apply(ctx, config = {}) {
       // （DSH 网页端发起的回合也能发），不依赖入站回调 reqId。
       installYouduSendTool(toolCtx);
     });
-  } else {
-    installYouduKbTool(ctx);
-    installYouduSendTool(ctx);
+    return;
   }
-  const disposeRpc = installYouduRpc(
-    ctx,
-    production.controller,
-    config.rpcOptions,
-    config.rpcAuthority,
-  );
-  log.info('[dsh-im-youdu] /youdu RPC installed');
-  ctx.effect(() => async () => {
-    try {
-      await unregisterDelivery?.();
-    } finally {
-      await production.close();
-    }
-  }, 'dsh-im: close Youdu bot connections');
-  return disposeRpc;
+  installYouduKbTool(ctx);
+  installYouduSendTool(ctx);
+}
+
+export async function apply(ctx, config = {}) {
+  if (config?.controller) {
+    return installYouduRpc(ctx, config.controller, config.rpcOptions, config.rpcAuthority);
+  }
+  installYouduTools(ctx);
+  // 与其它渠道同一条启动通路：先挂管理 RPC（连接未就绪时也能给出错误），
+  // 再初始化 production 并注册投递适配器与关闭钩子。
+  return installProductionChannel(ctx, config, {
+    channel: 'youdu',
+    rpcChannel: YOUDU_RPC_CHANNEL,
+    createProduction: () => createProductionController(ctx, config, config.internals),
+    createHandler: (controller) => createYouduRpcHandler(controller, config.rpcOptions),
+  });
 }
 
 export function createYouduHostPlugin(config) {

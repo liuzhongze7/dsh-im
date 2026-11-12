@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { YouduSettingsStore } from '../../../src/channels/youdu/settings-store.mjs';
+import { YouduGroupSettingsStore } from '../../../src/channels/youdu/group-settings-store.mjs';
 import { YouduStateStore } from '../../../src/channels/youdu/state-store.mjs';
 import { YouduController } from '../../../src/channels/youdu/youdu-controller.mjs';
 import { YouduConfigStore } from '../../../src/channels/youdu/config-store.mjs';
@@ -26,21 +26,20 @@ async function withDirectory(run) {
   }
 }
 
-test('settings store persists per-group access and decorates the status', async () => {
+test('settings store persists per-group access for a bot', async () => {
   await withDirectory(async (dir) => {
-    const path = join(dir, 'settings.json');
-    const store = await new YouduSettingsStore(path, { defaultWorkspace: dir }).load();
+    const path = join(dir, 'group-settings.json');
+    const store = await new YouduGroupSettingsStore(path).load();
     assert.equal(store.groupAccessFor(BOT_ID), null, 'fresh bots inherit everywhere');
 
     await store.setGroupAccess(BOT_ID, DOCUMENT);
     const persisted = JSON.parse(await readFile(path, 'utf8'));
     assert.deepEqual(persisted.bots[BOT_ID].groupAccess.groups['g-1'].users, ['1001', 'lewis.liu']);
 
-    const reloaded = await new YouduSettingsStore(path, { defaultWorkspace: dir }).load();
+    const reloaded = await new YouduGroupSettingsStore(path).load();
     assert.deepEqual(reloaded.groupAccessFor(BOT_ID).groups['g-1'].mode, 'allowlist');
 
-    const decorated = reloaded.decorateStatus({ bots: [{ botId: BOT_ID }] });
-    assert.deepEqual(decorated.bots[0].groupAccess.groups['g-1'].users, ['1001', 'lewis.liu']);
+    assert.deepEqual(reloaded.groupAccessFor(BOT_ID).groups['g-1'].users, ['1001', 'lewis.liu']);
 
     // 清空后回到“全部沿用群聊访问设置”。
     await reloaded.setGroupAccess(BOT_ID, null);
@@ -52,9 +51,9 @@ test('settings store persists per-group access and decorates the status', async 
 
 test('settings store drops damaged per-group data instead of trusting it', async () => {
   await withDirectory(async (dir) => {
-    const path = join(dir, 'settings.json');
-    await new YouduSettingsStore(path, { defaultWorkspace: dir }).load();
-    const store = await new YouduSettingsStore(path, { defaultWorkspace: dir }).load();
+    const path = join(dir, 'group-settings.json');
+    await new YouduGroupSettingsStore(path).load();
+    const store = await new YouduGroupSettingsStore(path).load();
     assert.equal(store.groupAccessFor('unknown'), null);
     assert.throws(() => validateGroupAccess({ version: 1, groups: { a: { mode: 'allowlist', users: [] } } }));
   });
@@ -127,15 +126,13 @@ function fakeCredentials() {
 test('controller saves per-group access and reports observed groups', async () => {
   await withDirectory(async (dir) => {
     const configStore = await new YouduConfigStore(join(dir, 'config.json')).load();
-    const settingsStore = await new YouduSettingsStore(join(dir, 'settings.json'), {
-      defaultWorkspace: dir,
-    }).load();
+    const groupStore = await new YouduGroupSettingsStore(join(dir, 'group-settings.json')).load();
     const state = await new YouduStateStore(join(dir, 'state.json')).load();
     await state.recordGroup('g-observed', { name: '机器人小队', now: () => new Date('2026-09-09T09:00:00.000Z') });
     const controller = new YouduController({
       credentials: fakeCredentials(),
       configStore,
-      settingsStore,
+      groupStore,
       createRuntime: async () => ({
         start: async () => {},
         stop: async () => {},
@@ -157,7 +154,7 @@ test('controller saves per-group access and reports observed groups', async () =
 
     const saved = await controller.updateGroupAccess(botId, DOCUMENT, () => controller.status());
     assert.deepEqual(saved.bots[0].groupAccess.groups['g-1'].users, ['1001', 'lewis.liu']);
-    assert.equal((await new YouduSettingsStore(join(dir, 'settings.json')).load()).groupAccessFor(botId).groups['g-1'].mode, 'allowlist');
+    assert.equal((await new YouduGroupSettingsStore(join(dir, 'group-settings.json')).load()).groupAccessFor(botId).groups['g-1'].mode, 'allowlist');
 
     await controller.updateGroupAccess(botId, null, () => controller.status());
     assert.equal(controller.status().bots[0].groupAccess, null);

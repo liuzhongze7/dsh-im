@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { YouduDeliveryStore } from '../../../src/channels/youdu/delivery-store.mjs';
+import { BotWorkspaceStore } from '../../../src/channels/shared/bot-workspace-store.mjs';
 import { YouduStateStore } from '../../../src/channels/youdu/state-store.mjs';
 import { createDeliveryAdapter } from '../../../plugin-src/host/delivery-adapter.mjs';
 import { DeliveryService } from '../../../plugin-src/host/delivery-service.mjs';
@@ -15,9 +15,10 @@ const GROUP_ID = '{0798E01E-CD68-42BB-813C-EB51593BB0F5}';
 async function withYouduDelivery(run) {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-im-youdu-adapter-'));
   try {
-    const store = await new YouduDeliveryStore(join(dir, 'delivery.json'), {
-      knownBotIds: () => [BOT_ID],
+    const store = await new BotWorkspaceStore(join(dir, 'workspaces.json'), {
+      defaultWorkspace: dir,
     }).load();
+    await store.ensure(BOT_ID);
     const state = await new YouduStateStore(join(dir, 'state.json')).load();
     const sends = [];
     const controller = {

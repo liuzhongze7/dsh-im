@@ -1,8 +1,6 @@
 import { deriveYouduBotIdentity, maskYouduBotId } from './config-store.mjs';
-import { validateBotAlias, withBotAlias } from '../shared/bot-alias.mjs';
 import { t } from '../shared/i18n.mjs';
 import { publicMessageFailure } from '../shared/message-failure.mjs';
-import { modelSelectionError, validateModelSelection } from '../shared/model-setting.mjs';
 
 function cleanString(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
@@ -16,11 +14,11 @@ export class YouduController {
   #credentials;
   #configStore;
   #createRuntime;
-  #settingsStore;
+  #groupStore;
+  #ensureBot;
   #deleteState;
   #clearSessions;
   #knownGroupsFor;
-  #modelCatalog;
   #logger;
   #runtimes = new Map();
   #errors = new Map();
@@ -32,11 +30,11 @@ export class YouduController {
     credentials,
     configStore,
     createRuntime,
-    settingsStore,
+    groupStore = null,
+    ensureBot = null,
     deleteState = async () => {},
     clearSessions = async () => {},
     knownGroupsFor = null,
-    modelCatalog = null,
     logger = console,
   }) {
     if (!credentials || typeof credentials.resolve !== 'function'
@@ -51,11 +49,11 @@ export class YouduController {
     this.#credentials = credentials;
     this.#configStore = configStore;
     this.#createRuntime = createRuntime;
-    this.#settingsStore = settingsStore ?? null;
+    this.#groupStore = groupStore ?? null;
+    this.#ensureBot = typeof ensureBot === 'function' ? ensureBot : null;
     this.#deleteState = deleteState;
     this.#clearSessions = clearSessions;
     this.#knownGroupsFor = typeof knownGroupsFor === 'function' ? knownGroupsFor : null;
-    this.#modelCatalog = typeof modelCatalog === 'function' ? modelCatalog : null;
     this.#logger = logger;
   }
 
@@ -123,6 +121,7 @@ export class YouduController {
         await this.#restoreCredential(identity.secretRef, previousSecret);
         throw error;
       }
+      if (this.#ensureBot) await this.#ensureBot(config);
       try {
         await this.#startRuntime(config, normalizedSecret);
         this.#errors.delete(identity.botId);
@@ -240,10 +239,12 @@ export class YouduController {
         lastMessageError: publicMessageFailure(runtimeStatus?.lastMessageError),
         error: structuredClone(this.#errors.get(config.botId) ?? null),
         knownGroups: this.knownGroups(config.botId),
+        groupAccess: this.#groupStore?.groupAccessFor(config.botId) ?? null,
+        groupHistory: this.#groupStore?.groupHistoryFor(config.botId) ?? null,
       };
     });
     const connectedCount = bots.filter((bot) => bot.connected).length;
-    const base = {
+    return {
       schemaVersion: 1,
       revision: this.#revision,
       state: bots.length === 0 ? 'disconnected'
@@ -252,14 +253,13 @@ export class YouduController {
       bots,
       totals: { configured: bots.length, connected: connectedCount },
     };
-    return this.#settingsStore ? this.#settingsStore.decorateStatus(base) : base;
   }
 
   /** 更新机器人按群访问设置（null 表示全部沿用群聊访问设置）。 */
   async updateGroupAccess(botId, groupAccess, projectStatus) {
     this.#assertBot(botId);
-    if (!this.#settingsStore) throw new TypeError('Youdu settings store is required');
-    const result = await this.#settingsStore.setGroupAccess(botId, groupAccess);
+    if (!this.#groupStore) throw new TypeError('Youdu group settings store is required');
+    const result = await this.#groupStore.setGroupAccess(botId, groupAccess);
     this.#revision += 1;
     return typeof projectStatus === 'function'
       ? projectStatus(this.status())
@@ -277,102 +277,18 @@ export class YouduController {
     }
   }
 
-  /** 更新机器人工作区（轻量 config-backed）：写入后清空该 bot 已绑定会话，使下条消息在新工作区新建会话。 */
-  async updateWorkspace(botId, workspace) {
-    this.#assertBot(botId);
-    if (!this.#settingsStore) throw new TypeError('Youdu settings store is required');
-    const value = await this.#settingsStore.setWorkspace(botId, workspace);
-    await this.#clearSessions(botId);
-    return value;
-  }
-
-  /** 更新机器人 Agent Preset。 */
-  async updateAgentPreset(botId, agentPreset) {
-    this.#assertBot(botId);
-    if (!this.#settingsStore) throw new TypeError('Youdu settings store is required');
-    return this.#settingsStore.setAgentPreset(botId, agentPreset);
-  }
-
-  /** 更新机器人上下文增强设置。 */
-  async updateContextEnhancement(botId, config, projectStatus) {
-    this.#assertBot(botId);
-    if (!this.#settingsStore) throw new TypeError('Youdu settings store is required');
-    const result = await this.#settingsStore.setContextEnhancement(botId, config);
-    return typeof projectStatus === 'function'
-      ? projectStatus(this.status())
-      : result;
-  }
-
   /** 更新机器人群聊上下文缓存设置（开关 + 条数，下一条消息即生效）。 */
   async updateGroupHistory(botId, config, projectStatus) {
     this.#assertBot(botId);
-    if (!this.#settingsStore) throw new TypeError('Youdu settings store is required');
-    const result = await this.#settingsStore.setGroupHistory(botId, config);
+    if (!this.#groupStore) throw new TypeError('Youdu group settings store is required');
+    const result = await this.#groupStore.setGroupHistory(botId, config);
     return typeof projectStatus === 'function'
       ? projectStatus(this.status())
       : result;
-  }
-
-  /** 更新机器人访问策略。 */
-  async updateAccessPolicy(botId, policy, projectStatus) {
-    this.#assertBot(botId);
-    if (!this.#settingsStore) throw new TypeError('Youdu settings store is required');
-    const result = await this.#settingsStore.setAccessPolicy(botId, policy);
-    return typeof projectStatus === 'function'
-      ? projectStatus(this.status())
-      : result;
-  }
-
-  /** 设置页用的模型目录；目录不可用时省略字段，客户端沿用上次结果。 */
-  async catalogs() {
-    if (!this.#modelCatalog) return {};
-    try {
-      const modelCatalog = await this.#modelCatalog();
-      return modelCatalog ? { modelCatalog } : {};
-    } catch (error) {
-      this.#logger.warn?.('[dsh-im:youdu] failed to list the model catalog:', error);
-      return {};
-    }
-  }
-
-  /** 更新机器人模型选择（null 表示跟随默认模型）；只影响新建会话。 */
-  async updateModel(botId, model, projectStatus) {
-    this.#assertBot(botId);
-    if (!this.#settingsStore) throw new TypeError('Youdu settings store is required');
-    const selection = validateModelSelection(model);
-    if (selection) {
-      const { modelCatalog } = await this.catalogs();
-      const failure = modelSelectionError(modelCatalog, selection);
-      if (failure) throw failure;
-    }
-    const result = await this.#settingsStore.setModel(botId, selection);
-    this.#revision += 1;
-    return typeof projectStatus === 'function'
-      ? projectStatus(this.status())
-      : result;
-  }
-
-  /** 更新机器人显示别名（空字符串恢复原名）。 */
-  async updateAlias(botId, alias, projectStatus) {
-    this.#assertBot(botId);
-    if (!this.#settingsStore) throw new TypeError('Youdu settings store is required');
-    const value = validateBotAlias(alias);
-    const current = this.status();
-    const renamed = {
-      ...current,
-      bots: current.bots.map((bot) => (bot?.botId === botId
-        ? { ...bot, bot: withBotAlias(bot.bot, value) }
-        : bot)),
-    };
-    const result = typeof projectStatus === 'function' ? projectStatus(renamed) : renamed;
-    await this.#settingsStore.setAlias(botId, value);
-    this.#revision += 1;
-    return result;
   }
 
   #assertBot(botId) {
     if (!this.#configStore.get(botId)) throw new Error('Unknown Youdu bot');
-    if (this.#settingsStore) this.#settingsStore.ensure(botId);
   }
 
   async close() {

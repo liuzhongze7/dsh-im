@@ -11,7 +11,11 @@ import {
 import { WorkspaceEditor } from '../../workspace-editor.js';
 import { BotName } from '../../bot-alias.js';
 import { EMPTY_MODEL_CATALOG, ModelCatalogContext, ModelEditor } from '../../model-setting.js';
-import { AgentPresetEditor } from '../../agent-preset.js';
+import {
+  AgentPresetCatalogContext,
+  EMPTY_AGENT_PRESET_CATALOG,
+  AgentPresetEditor,
+} from '../../agent-preset.js';
 import { ContextEnhancementEditor } from '../../context-enhancement.js';
 import { GroupHistoryEditor } from '../../group-history.js';
 import { AccessPolicySettingsPage } from '../../access-policy-settings.js';
@@ -589,6 +593,7 @@ export function YouduSettingsTab({ rpcCall }) {
     bots: [],
     totals: { configured: 0, connected: 0 },
     modelCatalog: EMPTY_MODEL_CATALOG,
+    agentPresetCatalog: EMPTY_AGENT_PRESET_CATALOG,
     pageError: null,
     statusError: null,
   });
@@ -642,6 +647,7 @@ export function YouduSettingsTab({ rpcCall }) {
         bots: snapshot.bots,
         totals: snapshot.totals,
         modelCatalog: snapshot.modelCatalog,
+        agentPresetCatalog: snapshot.agentPresetCatalog ?? EMPTY_AGENT_PRESET_CATALOG,
         pageError: null,
         statusError: null,
       }));
@@ -823,6 +829,8 @@ export function YouduSettingsTab({ rpcCall }) {
 
   return h(ModelCatalogContext.Provider, {
     value: model.modelCatalog ?? EMPTY_MODEL_CATALOG,
+  }, h(AgentPresetCatalogContext.Provider, {
+    value: model.agentPresetCatalog ?? EMPTY_AGENT_PRESET_CATALOG,
   }, h('section', { className: 'dim-page', 'aria-label': '有度机器人设置' },
     h(ChannelListHeading, {
       className: 'ddt-channel',
@@ -892,5 +900,5 @@ export function YouduSettingsTab({ rpcCall }) {
           h(Button, { size: 'small', onClick: () => refresh({ silent: true }) }, '立即重试'))
       : null,
 
-    content));
+    content)));
 }

@@ -78,18 +78,12 @@ export function createYouduRpcHandler(controller, options = {}) {
     throw new TypeError('Youdu RPC requires a controller');
   }
   const cachedEncode = options?.cachedEncode ?? ((value) => value);
-  // 客户端用 set* 的返回值整体替换快照，模型目录丢了设置页就只剩「跟随默认模型」，
-  // 因此所有会回传状态的端点都要带上目录，而不只是 status。
-  const presentStatus = async (status) => {
-    const catalogs = typeof controller.catalogs === 'function' ? await controller.catalogs() : {};
-    return { ...publicStatus(status, cachedEncode), ...catalogs };
-  };
   return async (endpoint, payload, signal) => {
     const activeSignal = signal ?? payload?.signal ?? options?.signal;
     try {
       let value;
       if (endpoint === YOUDU_ENDPOINTS.status) {
-        value = await presentStatus(controller.status());
+        value = await publicStatus(await controller.status(), cachedEncode);
       } else if (endpoint === YOUDU_ENDPOINTS.attachBot) {
         if (!validSourceBotId(payload?.botId)) {
           throw new TypeError('有度机器人 botId 无效。');
@@ -131,44 +125,25 @@ export function createYouduRpcHandler(controller, options = {}) {
         );
       } else if (endpoint === YOUDU_ENDPOINTS.setModel) {
         if (!validModelPayload(payload)) throw new TypeError('请选择有效模型。');
-        value = await publicStatus(
-          await controller.updateModel(
-            payload.botId,
-            payload.model,
-            presentStatus,
-          ),
-          cachedEncode,
-        );
+        value = await publicStatus(await controller.updateModel(payload.botId, payload.model), cachedEncode);
       } else if (endpoint === YOUDU_ENDPOINTS.setAlias) {
         if (!validAliasPayload(payload)) throw new TypeError('请输入有效的别名（最多 80 个字符）。');
-        value = await publicStatus(
-          await controller.updateAlias(
-            payload.botId,
-            payload.alias,
-            presentStatus,
-          ),
-          cachedEncode,
-        );
+        value = await publicStatus(await controller.updateAlias(payload.botId, payload.alias), cachedEncode);
       } else if (endpoint === YOUDU_ENDPOINTS.setContextEnhancement) {
         if (!validContextEnhancementPayload(payload)) throw new TypeError('请提交有效的上下文增强设置。');
-        value = await controller.updateContextEnhancement(
-          payload.botId,
-          payload.config,
-          presentStatus,
+        value = await publicStatus(
+          await controller.updateContextEnhancement(payload.botId, payload.config),
+          cachedEncode,
         );
       } else if (endpoint === YOUDU_ENDPOINTS.setGroupHistory) {
         if (!validGroupHistoryPayload(payload)) throw new TypeError('请提交有效的群聊上下文设置。');
-        value = await controller.updateGroupHistory(
-          payload.botId,
-          payload.config,
-          presentStatus,
-        );
+        await controller.updateGroupHistory(payload.botId, payload.config);
+        value = await publicStatus(await controller.status(), cachedEncode);
       } else if (endpoint === YOUDU_ENDPOINTS.setAccessPolicy) {
         if (!validAccessPolicyPayload(payload)) throw new TypeError('请提交有效的访问设置。');
-        value = await controller.updateAccessPolicy(
-          payload.botId,
-          payload.policy,
-          presentStatus,
+        value = await publicStatus(
+          await controller.updateAccessPolicy(payload.botId, payload.policy),
+          cachedEncode,
         );
       } else if (endpoint === YOUDU_ENDPOINTS.setGroupAccess) {
         if (!validBotId(payload?.botId)) throw new TypeError('Invalid Youdu bot id');
@@ -178,11 +153,8 @@ export function createYouduRpcHandler(controller, options = {}) {
         if (raw !== null && !groupAccess) {
           throw new TypeError('群访问设置无效：请检查群标识、访问模式与用户名单。');
         }
-        value = await controller.updateGroupAccess(
-          payload.botId,
-          groupAccess,
-          presentStatus,
-        );
+        await controller.updateGroupAccess(payload.botId, groupAccess);
+        value = await publicStatus(await controller.status(), cachedEncode);
       } else {
         throw new Error(`Unknown Youdu RPC endpoint: ${endpoint}`);
       }

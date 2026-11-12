@@ -203,7 +203,8 @@ test('the composed host serves other real channels while Feishu is loading and a
   try {
     // Allow Cordis to enter its activation callback; Feishu stays gated.
     await new Promise(setImmediate);
-    assert.equal(f.routes.size, channels.length);
+    // 有度走 installProductionChannel，会先挂 RPC 路由再初始化，因此即便它的启动在此失败也占一条路由。
+    assert.equal(f.routes.size, channels.length + 1);
     await allLoaded.promise;
     assert.equal((await f.call('feishu')).error.code, 'feishu-initializing');
     // Let the other channels finish their local workspace reconciliation.

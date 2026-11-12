@@ -18,6 +18,7 @@ const PRODUCTION_FILES = [
   'plugin-src/host/channels/slack/production.mjs',
   'plugin-src/host/channels/shared/production.mjs',
   'plugin-src/host/channels/whatsapp/production.mjs',
+  'plugin-src/host/channels/youdu/production.mjs',
 ];
 
 function state(sessionId = 'session-one') {

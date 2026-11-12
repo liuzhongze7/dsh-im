@@ -183,7 +183,7 @@ test('Youdu production hands each runtime a live group history provider', async 
     status() { return { bots: [{ botId: bot.botId }] }; }
     // 与真实 controller 一样把保存写进设置存储，provider 直接读同一个存储。
     async updateGroupHistory(botId, config) {
-      return this.options.settingsStore.setGroupHistory(botId, config);
+      return this.options.groupStore.setGroupHistory(botId, config);
     }
   }
   class Runtime {
@@ -435,7 +435,15 @@ test('removing a Youdu bot also drops its delivery targets', async (t) => {
 
   await production.controller.deleteBot(bot.botId);
   assert.deepEqual(bots, []);
-  const reloaded = JSON.parse(await readFile(join(dataDir, 'bots', 'delivery.json'), 'utf8'));
-  assert.deepEqual(reloaded.bots, {});
+  // 删掉最后一个机器人后共享 store 会清空并移除文件；存在时要保证该 bot 的条目已消失。
+  const stored = await readFile(join(dataDir, 'bots', 'workspaces.json'), 'utf8').catch((error) => {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  });
+  if (stored) {
+    const reloaded = JSON.parse(stored);
+    assert.equal(Object.hasOwn(reloaded.deliveryTargets ?? {}, bot.botId), false);
+    assert.equal(Object.hasOwn(reloaded.workspaces ?? {}, bot.botId), false);
+  }
   await production.close();
 });

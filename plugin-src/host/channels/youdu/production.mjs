@@ -3,31 +3,35 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 import { YouduConfigStore } from '../../../../src/channels/youdu/config-store.mjs';
-import { YouduDeliveryStore } from '../../../../src/channels/youdu/delivery-store.mjs';
+import { YouduGroupSettingsStore } from '../../../../src/channels/youdu/group-settings-store.mjs';
 import { YouduHarnessClient } from '../../../../src/channels/youdu/harness-client.mjs';
+import {
+  migrateLegacyYouduDeliveryTargets,
+  migrateLegacyYouduSettings,
+} from '../../../../src/channels/youdu/legacy-settings.mjs';
 import { YouduController } from '../../../../src/channels/youdu/youdu-controller.mjs';
 import { YouduRuntime } from '../../../../src/channels/youdu/youdu-runtime.mjs';
 import { YouduStateStore } from '../../../../src/channels/youdu/state-store.mjs';
-import { YouduSettingsStore } from '../../../../src/channels/youdu/settings-store.mjs';
+import { listAgentPresetCatalog } from '../../../../src/channels/shared/agent-preset.mjs';
 import {
-  createAccessPolicy,
-  createAccessPolicyScope,
-} from '../../../../src/channels/shared/access-policy.mjs';
-import {
-  normalizeContextEnhancementConfig,
-} from '../../../../src/channels/shared/context-enhancement.mjs';
-import {
-  normalizeGroupHistoryConfig,
-} from '../../../../src/channels/shared/group-history.mjs';
+  BotWorkspaceStore,
+  createBotWorkspaceScope,
+  createWorkspaceAwareController,
+  observeBotWorkspaceRemovals,
+} from '../../../../src/channels/shared/bot-workspace-store.mjs';
+import { normalizeContextEnhancementConfig } from '../../../../src/channels/shared/context-enhancement.mjs';
+import { normalizeGroupHistoryConfig } from '../../../../src/channels/shared/group-history.mjs';
 import {
   createGroupContextFiles,
   normalizeGroupContextRetention,
 } from '../../../../src/channels/shared/group-context-files.mjs';
+import { listModelCatalog } from '../../../../src/channels/shared/model-setting.mjs';
 import {
-  confirmsModelSelection,
-  listModelCatalog,
-} from '../../../../src/channels/shared/model-setting.mjs';
+  accessPolicyProvider,
+  initialAccessPolicyFor,
+} from '../shared/access-policy-production.mjs';
 import { createConnectionSupervisor } from './connection-supervisor.mjs';
+import { createHarnessCommandExecutor } from '../../harness-command-executor.mjs';
 import { harnessConnection } from '../../harness-connection.mjs';
 import { createDeliveryAdapter } from '../../delivery-adapter.mjs';
 import { createHarnessSessionExecutors } from '../../harness-session-coordinator.mjs';
@@ -36,57 +40,45 @@ import {
   registerInboundTtlWorkspaces,
 } from '../../inbound-ttl-runtime.mjs';
 
-/** 从设置存储读取访问策略；未配置时：owner='*'（未配置）→ 命令开放，配置了具体 owner → 仅该 owner 可执行命令。 */
-function createYouduAccessPolicy(settingsStore, botId, botConfig, groupResponseMode = 'mention') {
-  const ownerUserId = typeof botConfig.ownerUserId === 'string' ? botConfig.ownerUserId.trim() : '';
-  const ownerReal = Boolean(ownerUserId && ownerUserId !== '*');
-  const ownerUsers = ownerReal ? [{ id: ownerUserId, canExecuteCommands: true }] : [];
-  // 闭合默认（接受的既有安全姿态）：owner 未配置时命令默认拒绝；配置了具体 owner 时命令仅该 owner 可执行。
-  const defaultCanExecuteCommands = false;
-  const closedScope = createAccessPolicyScope({
-    mode: 'open',
-    open: {
-      defaultCanExecuteCommands,
-      commandPermissionOverrides: ownerUsers,
-    },
-    allowlist: { users: ownerUsers },
+/**
+ * 有度的访问策略：直接复用共享 provider（ownerUserId 的种子策略由
+ * `initialAccessPolicyFor('youdu', …)` 统一生成），只补 groupResponseMode。
+ */
+function createYouduAccessPolicy(workspaces, botId, botConfig, groupResponseMode = 'mention') {
+  const provider = accessPolicyProvider(workspaces, botId, {
+    channel: 'youdu',
+    config: botConfig,
   });
   return Object.freeze({
     botId,
     groupResponseMode,
-    getSettings: () => settingsStore.accessPolicyFor(botId)
-      ?? createAccessPolicy({ direct: closedScope, group: closedScope }),
-    isPrivileged(senderIds, conversationType) {
-      if (!['direct', 'group'].includes(conversationType)) return false;
-      if (!ownerReal) return false;
-      const candidates = Array.isArray(senderIds) ? senderIds : [senderIds];
-      return candidates.some((senderId) => String(senderId) === ownerUserId);
-    },
+    getSettings: () => provider.getSettings() ?? initialAccessPolicyFor('youdu', botConfig),
+    isPrivileged: provider.isPrivileged,
   });
 }
 
-/** 按群访问规则的 provider：每次决策都从设置存储读取，改完即时生效。 */
-function createYouduGroupAccess(settingsStore, botId) {
+/** 按群访问规则的 provider：每次决策都从按群设置存储读取，改完即时生效。 */
+function createYouduGroupAccess(groupStore, botId) {
   return {
     botId,
-    getSettings: () => settingsStore.groupAccessFor(botId),
+    getSettings: () => groupStore.groupAccessFor(botId),
   };
 }
 
-function createYouduContextEnhancement(settingsStore, botId) {
+function createYouduContextEnhancement(workspaces, botId) {
   return {
     botId,
     getSettings: () => normalizeContextEnhancementConfig(
-      settingsStore.contextEnhancementFor(botId),
+      workspaces.contextEnhancementFor(botId),
     ),
   };
 }
 
 /** 群聊上下文缓存设置（开关 + 条数）：bridge 每次记录/注入时实时读取，保存后即时生效。 */
-function createYouduGroupHistory(settingsStore, botId) {
+function createYouduGroupHistory(groupStore, botId) {
   return {
     botId,
-    getSettings: () => normalizeGroupHistoryConfig(settingsStore.groupHistoryFor(botId)),
+    getSettings: () => normalizeGroupHistoryConfig(groupStore.groupHistoryFor(botId)),
   };
 }
 
@@ -95,7 +87,7 @@ function createYouduGroupHistory(settingsStore, botId) {
  * `.dsh-im/group-context/<群>/<时间戳>-<消息>/`，供模型在被 @ 时按相对路径读取。
  * 工作区每次实时读取，跟随设置页的工作区切换；过期清理挂在写入路径上。
  */
-function createYouduGroupContextFiles(settingsStore, botId, {
+function createYouduGroupContextFiles(workspaces, botId, {
   retentionHours, sweepIntervalMs, logger = console,
 } = {}) {
   const store = createGroupContextFiles({
@@ -108,7 +100,7 @@ function createYouduGroupContextFiles(settingsStore, botId, {
     retentionHours: store.retentionHours,
     async stage({ chatId, messageId, sender, timestamp, files, signal }) {
       return store.stage({
-        workspace: settingsStore.workspaceFor(botId),
+        workspace: workspaces.workspaceFor(botId),
         chatId,
         messageId,
         sender,
@@ -119,9 +111,9 @@ function createYouduGroupContextFiles(settingsStore, botId, {
     },
     /** 从磁盘重建“这个群最近的附件”：重启、清单被消费后依然能列出。 */
     async list({ chatId, limit }) {
-      return store.list(settingsStore.workspaceFor(botId), chatId, { limit });
+      return store.list(workspaces.workspaceFor(botId), chatId, { limit });
     },
-    sweep: () => store.sweep(settingsStore.workspaceFor(botId)),
+    sweep: () => store.sweep(workspaces.workspaceFor(botId)),
   };
 }
 
@@ -132,68 +124,6 @@ function pluginPaths(config) {
     config: resolve(config.configPath ?? join(root, 'config.json')),
     bots: resolve(config.botsDir ?? join(root, 'bots')),
   };
-}
-
-/**
- * 每个机器人工区感知的 Harness 代理（轻量版）：
- * - createSession 注入该 bot 在 settingsStore 里的 workspace、agentPreset 与 model，
- *   使消息会话跑在各自配置的工作区/模型上，而不是 Harness 启动时的默认值。
- *   `inheritBotModel: false` 时跳过模型注入（调用方要自己选模型）。
- * - currentWorkspace / switchWorkspace 读写 settingsStore，并让切换工作区时清空
- *   该 bot 的已绑定会话，使下一条消息在新工作区新建会话。
- * 其余方法（listWorkspaces / listWorkspaceSessions / 转发等）原样透传到目标 Harness。
- */
-function createYouduWorkspaceScope(harness, { botId, settingsStore, state }) {
-  if (!harness || !settingsStore) {
-    throw new TypeError('youdu workspace scope requires harness and settingsStore');
-  }
-  return new Proxy(harness, {
-    get(target, property) {
-      if (property === 'createSession') {
-        return async (options = {}) => {
-          const { inheritBotModel = true, ...createOptions } = options;
-          const agentPreset = settingsStore.agentPresetFor(botId);
-          const model = inheritBotModel === false ? null : settingsStore.modelFor(botId);
-          const sessionId = await target.createSession({
-            ...createOptions,
-            workspace: settingsStore.workspaceFor(botId),
-            ...(agentPreset == null ? {} : { agentPreset }),
-          });
-          if (model) {
-            if (typeof target.selectSessionModel !== 'function') {
-              throw new TypeError('Harness does not support model selection');
-            }
-            const selected = await target.selectSessionModel(
-              sessionId,
-              model,
-              options.signal ? { signal: options.signal } : {},
-            );
-            if (!confirmsModelSelection(selected?.selected, model)) {
-              const error = new Error('Harness did not confirm the selected model');
-              error.code = 'model-selection-mismatch';
-              throw error;
-            }
-          }
-          return sessionId;
-        };
-      }
-      if (property === 'currentWorkspace') {
-        return () => settingsStore.workspaceFor(botId);
-      }
-      if (property === 'switchWorkspace') {
-        return async (workspace) => {
-          const next = await settingsStore.setWorkspace(botId, workspace);
-          if (typeof state?.clearSessions === 'function') await state.clearSessions();
-          return next;
-        };
-      }
-      // 其余方法透传到目标 Harness，但必须把 this 绑定到 target：
-      // 共享 HarnessClient 使用 # 私有字段，若以 Proxy 作为 this 调用会抛
-      // "Cannot read private member ... from an object whose class did not declare it"。
-      const value = Reflect.get(target, property, target);
-      return typeof value === 'function' ? value.bind(target) : value;
-    },
-  });
 }
 
 export async function createProductionController(ctx, config = {}, internals = {}) {
@@ -209,41 +139,67 @@ export async function createProductionController(ctx, config = {}, internals = {
   const Harness = internals.HarnessClient ?? YouduHarnessClient;
   const Controller = internals.Controller ?? YouduController;
   const Runtime = internals.Runtime ?? YouduRuntime;
+  const WorkspaceStore = internals.WorkspaceStore ?? BotWorkspaceStore;
+  const GroupStore = internals.GroupStore ?? YouduGroupSettingsStore;
   const createSupervisor = internals.createConnectionSupervisor ?? createConnectionSupervisor;
   const logger = log;
   const paths = pluginPaths(config);
   log.info('[dsh-im-youdu] config path=', paths.config);
   const configStore = await new ConfigStore(paths.config).load();
   const defaultWorkspace = resolve(config.workspace ?? process.cwd());
-  const settingsStore = await new YouduSettingsStore(
-    resolve(paths.bots, 'settings.json'),
-    { defaultWorkspace, defaultAgentPreset: config.agentPreset },
+  // 每 bot 设置与其它渠道一样落在共享 workspace 存储里（workspaces.json）；
+  // 有度独有的按群设置（groupAccess / groupHistory）放在 group-settings.json。
+  const workspaces = internals.workspaces ?? await new WorkspaceStore(
+    resolve(paths.bots, 'workspaces.json'),
+    { defaultWorkspace },
   ).load();
-  // 投递目标存储：bot 是否存在以 configStore 为准，避免两份 bot 列表漂移。
-  const DeliveryStore = internals.DeliveryStore ?? YouduDeliveryStore;
-  const deliveryStore = await new DeliveryStore(
-    resolve(paths.bots, 'delivery.json'),
-    { knownBotIds: () => configStore.list().map((bot) => bot.botId) },
+  const groupStore = internals.groupStore ?? await new GroupStore(
+    resolve(paths.bots, 'group-settings.json'),
   ).load();
+  // 旧版自建 store 的文件：先迁进新存储再把原文件改名，避免设置丢失。
+  await migrateLegacyYouduSettings({
+    legacyPath: resolve(paths.bots, 'settings.json'),
+    workspaces,
+    groups: groupStore,
+    defaultAgentPreset: config.agentPreset,
+  });
+  const botIds = configStore.list().map((bot) => bot.botId);
+  await workspaces.reconcile(botIds);
+  await Promise.all(configStore.list().map((botConfig) => workspaces.ensure(botConfig.botId, {
+    defaultAgentPreset: config.agentPreset,
+    initialAccessPolicy: initialAccessPolicyFor('youdu', botConfig),
+  })));
+  await migrateLegacyYouduDeliveryTargets({
+    legacyPath: resolve(paths.bots, 'delivery.json'),
+    workspaces,
+    knownBotIds: botIds,
+  });
+  // configStore 删除 bot 时同步清掉 workspace 记录（与其它渠道一致）。
+  const observedConfigStore = typeof configStore.remove === 'function'
+    ? observeBotWorkspaceRemovals(configStore, { workspaces })
+    : configStore;
   // 入站附件（图片/文件）经同进程 fileIngressExecutor 落到会话工作区；
   // 缺少它时 HarnessClient 会抛 "Harness file ingress is unavailable"。
   const inboundTtl = internals.inboundTtl ?? getInboundTtlRuntime(ctx, config);
   const inboundTtlService = inboundTtl?.service ?? inboundTtl;
   registerInboundTtlWorkspaces(ctx, inboundTtlService, {
-    workspaces: settingsStore,
-    configStore,
+    workspaces,
+    configStore: observedConfigStore,
     defaultWorkspace,
   });
   const { fileIngressExecutor } = createHarnessSessionExecutors(ctx, {
     fileIngressExecutor: internals.fileIngressExecutor,
     inboundTtlService,
   });
+  // 与其它渠道一致：/compact 等 Host 命令经共享 executor 执行，而不是直连 RPC。
+  const commandExecutor = createHarnessCommandExecutor(ctx, internals.commandExecutor);
   const harness = new Harness({
     ...connection,
     workspace: defaultWorkspace,
     autostart: false,
     dshBin: config.dshBin ?? 'dsh',
     ...(fileIngressExecutor ? { fileIngressExecutor } : {}),
+    ...(commandExecutor ? { commandExecutor } : {}),
   });
   log.info('[dsh-im-youdu] harness created');
   const stateStores = new Map();
@@ -256,39 +212,54 @@ export async function createProductionController(ctx, config = {}, internals = {
     }
     return state;
   };
-  const controller = new Controller({
+  const agentPresetCatalog = () => listAgentPresetCatalog(ctx);
+  const modelCatalog = () => listModelCatalog(harness);
+  const coreController = new Controller({
     credentials: ctx.credentials,
-    configStore,
-    settingsStore,
+    configStore: observedConfigStore,
+    groupStore,
     logger,
     knownGroupsFor: (botId) => {
       const state = stateStores.get(botId);
       return state && typeof state.groupsSnapshot === 'function' ? state.groupsSnapshot() : [];
     },
-    // 每 bot 模型选择：目录来自当前 Harness（不可用时给空目录，客户端沿用上次结果）。
-    modelCatalog: () => listModelCatalog(harness),
+    // 接入/编辑连接后保证该 bot 在 workspace 存储里有记录（seed 访问策略）。
+    ensureBot: (botConfig) => workspaces.ensure(botConfig.botId, {
+      defaultAgentPreset: config.agentPreset,
+      initialAccessPolicy: initialAccessPolicyFor('youdu', botConfig),
+    }),
     createRuntime: async ({ botId, config: botConfig, secret }) => {
       const state = await stateFor(botId);
-      settingsStore.ensure(botId);
+      const workspaceScope = createBotWorkspaceScope(harness, {
+        botId,
+        workspaces,
+        state,
+        agentPresetCatalog,
+      });
       return new Runtime({
         config: botConfig,
         secret,
-        harness: createYouduWorkspaceScope(harness, { botId, settingsStore, state }),
-        state,
+        harness: workspaceScope.harness,
+        state: workspaceScope.state,
         replyTimeoutMs: config.replyTimeoutMs ?? 600_000,
         connectTimeoutMs: config.connectTimeoutMs ?? 20_000,
         botId: botConfig.sourceBotId ?? botConfig.botId ?? botId,
-        contextEnhancement: createYouduContextEnhancement(settingsStore, botId),
-        groupHistory: createYouduGroupHistory(settingsStore, botId),
-        groupContextFiles: createYouduGroupContextFiles(settingsStore, botId, {
+        contextEnhancement: createYouduContextEnhancement(workspaces, botId),
+        groupHistory: createYouduGroupHistory(groupStore, botId),
+        groupContextFiles: createYouduGroupContextFiles(workspaces, botId, {
           retentionHours: config.groupContextRetentionHours,
           sweepIntervalMs: config.groupContextSweepIntervalMs,
           logger,
         }),
         groupHistoryStagingWaitMs: config.groupHistoryStagingWaitMs,
         groupContextRecentLimit: config.groupContextRecentLimit,
-        accessPolicy: createYouduAccessPolicy(settingsStore, botId, botConfig, config.groupResponseMode ?? 'mention'),
-        groupAccess: createYouduGroupAccess(settingsStore, botId),
+        accessPolicy: createYouduAccessPolicy(
+          workspaces,
+          botId,
+          botConfig,
+          config.groupResponseMode ?? 'mention',
+        ),
+        groupAccess: createYouduGroupAccess(groupStore, botId),
         onGroupSeen: (chatId, info = {}) => {
           // 观察到的群写进该 bot 的状态文件，供设置页按群配置时选择；
           // 群名来自会话事件（session title）或消息帧里带的 chatName。
@@ -319,15 +290,11 @@ export async function createProductionController(ctx, config = {}, internals = {
         },
       });
     },
-    clearSessions: async (botId) => {
-      const state = await stateFor(botId);
-      if (typeof state.clearSessions === 'function') await state.clearSessions();
-    },
     deleteState: async ({ botId }) => {
       const state = stateStores.get(botId);
       stateStores.delete(botId);
-      // 移除接入时连同投递目标一起清理。
-      await deliveryStore.remove(botId).catch(() => undefined);
+      // 有度独有的按群设置随 bot 一起清理；workspace / 投递目标由共享存储负责。
+      await groupStore.remove(botId).catch(() => undefined);
       if (state && typeof state.remove === 'function') {
         await state.remove();
       } else {
@@ -338,6 +305,15 @@ export async function createProductionController(ctx, config = {}, internals = {
         }
       }
     },
+  });
+  // 共享包装层：updateWorkspace / updateAgentPreset / updateModel / updateAlias /
+  // updateContextEnhancement / updateAccessPolicy / deleteBot 与其它渠道同一实现，
+  // 并给每次状态回传补上 modelCatalog / agentPresetCatalog。
+  const controller = createWorkspaceAwareController(coreController, {
+    workspaces,
+    stateFor,
+    agentPresetCatalog,
+    modelCatalog,
   });
   const supervisor = createSupervisor({
     controller,
@@ -350,8 +326,8 @@ export async function createProductionController(ctx, config = {}, internals = {
   const CreateDeliveryAdapter = internals.createDeliveryAdapter ?? createDeliveryAdapter;
   const baseDeliveryAdapter = CreateDeliveryAdapter({
     channel: 'youdu',
-    workspaces: deliveryStore,
-    coreController: controller,
+    workspaces,
+    coreController,
     stateFor,
   });
   const deliveryAdapter = Object.freeze({
