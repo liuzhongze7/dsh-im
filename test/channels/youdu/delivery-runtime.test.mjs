@@ -408,3 +408,19 @@ test('a long group answer keeps the callback chunk and delivers the rest via sen
   }
   await runtime.stop();
 });
+
+test('a runtime authentication rejection leaves the bot failed instead of merely offline', async () => {
+  const { runtime, socket } = await startedRuntime();
+  assert.equal(runtime.status.ready, true);
+
+  socket.emit('error', new Error('Authentication failed, errcode=1101'));
+
+  assert.equal(runtime.status.ready, false, 'a rejected secret must leave the ready state');
+  assert.equal(runtime.status.credentialRejected, true);
+  assert.equal(runtime.status.youduConnectionState, 'failed');
+  assert.equal(runtime.status.lastError, 'Authentication failed, errcode=1101');
+
+  socket.emit('disconnected', 'socket closed');
+  assert.equal(runtime.status.youduConnectionState, 'failed', 'the terminal state must survive a disconnect');
+  assert.equal(runtime.status.lastError, 'Authentication failed, errcode=1101');
+});

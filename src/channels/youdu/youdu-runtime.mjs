@@ -397,7 +397,11 @@ export class YouduRuntime {
       // 凭据被拒是终态：继续重连只会用同一份密钥反复失败。
       if (isYouduCredentialRejection(error)) {
         this.#status.credentialRejected = true;
+        // 运行期（已 ready 之后）被拒同样要退出就绪态：socket 不会再自动重连，
+        // 继续把 ready 当 true 会让上层以为只是"暂时离线"，入站静默停收且无人提示。
+        this.#status.ready = false;
         this.#status.youduConnectionState = 'failed';
+        this.#status.lastError = error?.message ?? String(error);
         error.code = 'youdu-credentials-rejected';
       }
       if (!this.#status.ready) readyReject(error);
@@ -408,6 +412,12 @@ export class YouduRuntime {
     });
     socket.on('disconnected', (reason) => {
       this.#logger.warn?.('[dsh-im-youdu] socket disconnected:', reason);
+      // 凭据被拒后的断开不算普通离线：保留 failed 态与原因，UI 才会提示更新密钥。
+      if (this.#status.credentialRejected) {
+        this.#status.youduConnectionState = 'failed';
+        this.#status.lastError = this.#status.lastError ?? (reason || null);
+        return;
+      }
       this.#status.youduConnectionState = 'offline';
       this.#status.lastError = reason || null;
     });

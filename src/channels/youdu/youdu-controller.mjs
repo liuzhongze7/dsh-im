@@ -76,6 +76,18 @@ export class YouduController {
     for (const config of this.#configStore.list()) {
       await this.#withBotTransition(config.botId, async () => {
         if (this.#closed || this.#runtimes.get(config.botId)?.status?.ready) return;
+        // 运行期被服务端拒过密钥：runtime 已退出就绪态，但重连只会用同一份密钥再失败，
+        // 先把终态错误落到 #errors（supervisor/UI 都读它），等用户更新密钥或显式重连。
+        if (this.#runtimes.get(config.botId)?.status?.credentialRejected) {
+          if (this.#errors.get(config.botId)?.code !== 'youdu-credentials-rejected') {
+            this.#errors.set(
+              config.botId,
+              safeError('youdu-credentials-rejected', t(CREDENTIAL_REJECTED)),
+            );
+            this.#touch();
+          }
+          return;
+        }
         const secret = await this.#resolveSecret(config.secretRef);
         if (!secret) {
           this.#errors.set(config.botId, safeError('missing-secret', t('有度机器人凭据缺失，请移除后重新接入。')));
@@ -228,14 +240,19 @@ export class YouduController {
   status() {
     const bots = this.#configStore.list().map((config) => {
       const runtimeStatus = this.#runtimes.get(config.botId)?.status ?? null;
+      // 运行期被拒（socket 已不再重连）时 runtime 自己知道，controller 的 #errors 可能还没写：
+      // 这里一并收敛成终态错误，UI 与 supervisor 才会提示更新密钥并停止无效重试。
+      const failure = this.#errors.get(config.botId)
+        ?? (runtimeStatus?.credentialRejected
+          ? safeError('youdu-credentials-rejected', t(CREDENTIAL_REJECTED))
+          : null);
       const connected = runtimeStatus?.ready === true
         && runtimeStatus.youduConnectionState === 'connected'
         && runtimeStatus.harnessReachable === true;
       const state = connected ? 'connected'
         : runtimeStatus?.youduConnectionState === 'connecting' ? 'connecting'
-          : this.#errors.has(config.botId) || runtimeStatus?.youduConnectionState === 'failed'
+          : failure || runtimeStatus?.youduConnectionState === 'failed'
             ? 'error' : 'offline';
-      const failure = this.#errors.get(config.botId) ?? null;
       const blocked = failure?.code === 'youdu-credentials-rejected';
       return {
         botId: config.botId,
@@ -259,7 +276,7 @@ export class YouduController {
           messagesReplied: runtimeStatus?.messagesReplied ?? 0,
         },
         lastMessageError: publicMessageFailure(runtimeStatus?.lastMessageError),
-        error: structuredClone(this.#errors.get(config.botId) ?? null),
+        error: structuredClone(failure),
         knownGroups: this.knownGroups(config.botId),
         groupAccess: this.#groupStore?.groupAccessFor(config.botId) ?? null,
         groupHistory: this.#groupStore?.groupHistoryFor(config.botId) ?? null,

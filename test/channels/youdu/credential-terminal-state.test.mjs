@@ -128,3 +128,36 @@ test('authentication failures are recognized as credential rejections', () => {
   assert.equal(isYouduCredentialRejection(new Error('WebSocket connection timed out after 20000ms')), false);
   assert.equal(isYouduCredentialRejection(undefined), false);
 });
+
+test('a secret rejected after the runtime is ready stops retries and reports the terminal error', async () => {
+  const created = [];
+  const runtimeStatus = {
+    ready: true,
+    youduConnectionState: 'connected',
+    harnessReachable: true,
+    credentialRejected: false,
+  };
+  await withController(async () => {
+    created.push(runtimeStatus);
+    return { async start() {}, async stop() {}, status: runtimeStatus };
+  }, async ({ controller }) => {
+    await controller.attachBot({ botId: 'oc_live', secret: 'good', wsHost: 'push.example.com' });
+    assert.equal(created.length, 1);
+    assert.equal(controller.status().bots[0].state, 'connected');
+
+    // 服务端在会话中途拒掉密钥：runtime 自己退回未就绪并打上 credentialRejected。
+    runtimeStatus.ready = false;
+    runtimeStatus.youduConnectionState = 'failed';
+    runtimeStatus.credentialRejected = true;
+
+    await controller.initialize();
+    await controller.initialize();
+    assert.equal(created.length, 1, 'a rejected secret must not be retried');
+
+    const status = controller.status();
+    assert.equal(status.bots[0].state, 'error');
+    assert.equal(status.bots[0].blocked, true);
+    assert.equal(status.bots[0].error.code, 'youdu-credentials-rejected');
+    assert.equal(status.totals.blocked, 1);
+  });
+});
