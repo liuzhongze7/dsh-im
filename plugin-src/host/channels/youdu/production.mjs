@@ -151,7 +151,7 @@ export async function createProductionController(ctx, config = {}, internals = {
   const logger = log;
   const paths = pluginPaths(config);
   log.info('[dsh-im-youdu] config path=', paths.config);
-  const configStore = await new ConfigStore(paths.config).load();
+  const configStore = await new ConfigStore(paths.config, { logger: log }).load();
   const defaultWorkspace = resolve(config.workspace ?? process.cwd());
   // 每 bot 设置与其它渠道一样落在共享 workspace 存储里（workspaces.json）；
   // 有度独有的按群设置（groupAccess / groupHistory）放在 group-settings.json。

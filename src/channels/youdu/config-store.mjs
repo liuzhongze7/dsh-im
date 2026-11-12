@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
 import { t } from '../shared/i18n.mjs';
@@ -58,39 +58,78 @@ function normalizeBot(value) {
   });
 }
 
-function normalizeDocument(value) {
-  if (!value || value.version !== 1 || !Array.isArray(value.bots)) return null;
-  const bots = value.bots.map(normalizeBot);
-  if (bots.some((bot) => bot === null)) return null;
+/**
+ * 逐条保留能解析的机器人，坏条目只跳过不拖垮整份配置。
+ * 有度是多机器人渠道，一条手改坏的记录不应该让其余机器人全部掉线。
+ */
+function keepValidBots(value) {
+  if (!value || value.version !== 1 || !Array.isArray(value.bots)) {
+    return { bots: [], rejected: Array.isArray(value?.bots) ? value.bots.length : 0 };
+  }
+  const bots = [];
   const ids = new Set();
   const refs = new Set();
-  for (const bot of bots) {
-    if (ids.has(bot.botId) || refs.has(bot.secretRef)) return null;
+  let rejected = 0;
+  for (const entry of value.bots) {
+    const bot = normalizeBot(entry);
+    if (!bot || ids.has(bot.botId) || refs.has(bot.secretRef)) {
+      rejected += 1;
+      continue;
+    }
     ids.add(bot.botId);
     refs.add(bot.secretRef);
+    bots.push(bot);
   }
-  return Object.freeze({ version: 1, bots: Object.freeze(bots) });
+  return { bots, rejected };
 }
 
 export class YouduConfigStore {
   #path;
+  #logger;
   #value = EMPTY_DOCUMENT;
   #writeQueue = Promise.resolve();
 
-  constructor(path) {
+  constructor(path, { logger = console } = {}) {
     this.#path = path;
+    this.#logger = logger;
   }
 
   async load() {
+    let raw;
     try {
-      const normalized = normalizeDocument(JSON.parse(await readFile(this.#path, 'utf8')));
-      if (!normalized) throw new Error('dsh-im Youdu config contains invalid bot data');
-      this.#value = normalized;
+      raw = JSON.parse(await readFile(this.#path, 'utf8'));
     } catch (error) {
-      if (error?.code !== 'ENOENT') throw error;
+      if (error?.code === 'ENOENT') {
+        this.#value = EMPTY_DOCUMENT;
+        return this;
+      }
+      await this.#quarantine(error);
       this.#value = EMPTY_DOCUMENT;
+      return this;
     }
+    const { bots, rejected } = keepValidBots(raw);
+    if (rejected > 0) {
+      await this.#quarantine(new Error(`${rejected} invalid bot ${rejected === 1 ? 'entry' : 'entries'}`));
+    }
+    this.#value = Object.freeze({ version: 1, bots: Object.freeze(bots) });
     return this;
+  }
+
+  /**
+   * 把读不懂的配置整份留档后继续启动：备份失败也不阻断，只记日志。
+   * 备份文件名固定为 `<config>.invalid`，避免反复启动时堆出一堆副本。
+   */
+  async #quarantine(reason) {
+    const backup = `${this.#path}.invalid`;
+    const detail = reason?.message ?? String(reason);
+    try {
+      await copyFile(this.#path, backup);
+      this.#logger.warn?.(`[dsh-im:youdu] ignoring part of the bot config (${detail}); the original is kept at ${backup}`);
+    } catch (error) {
+      if (error?.code !== 'ENOENT') {
+        this.#logger.error?.(`[dsh-im:youdu] could not back up the bot config after ${detail}: ${error?.message}`);
+      }
+    }
   }
 
   list() {
