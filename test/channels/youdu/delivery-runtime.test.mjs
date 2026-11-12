@@ -202,11 +202,13 @@ async function mentionRuntime({ ensureRunning } = {}) {
   return { runtime, socket };
 }
 
-test('youdu runtime falls back to send_msg in the group when respond_msg fails', async () => {
+test('youdu runtime falls back to send_msg in the group when respond_msg is rejected', async () => {
   const { runtime, socket } = await mentionRuntime();
-  socket.sendReply = () => Promise.reject(
-    new Error('Reply ack timeout (5000ms) for reqId: req-m1'),
-  );
+  socket.sendReply = () => {
+    const error = new Error('Reply ack failed (errcode=1001) for reqId: req-m1');
+    error.code = 'youdu-reply-ack-failed';
+    return Promise.reject(error);
+  };
 
   socket.emit('message', groupFrame('m1', '帮我总结', ['yd_bot']));
   await waitFor(() => socket.sent.some(({ kind }) => kind === 'message'));
@@ -221,8 +223,28 @@ test('youdu runtime falls back to send_msg in the group when respond_msg fails',
   assert.equal(status.replyFallbacks, 1);
   assert.ok(status.firstReplyFallbackAt);
   assert.ok(status.lastReplyFallbackAt);
-  assert.match(status.lastReplyFallbackReason, /ack timeout/i);
+  assert.match(status.lastReplyFallbackReason, /Reply ack failed \(errcode=1001\)/i);
   assert.equal(status.lastReplyFallbackError, null);
+  await runtime.stop();
+});
+
+test('youdu runtime reports an unconfirmed reply instead of resending after an ack timeout', async () => {
+  const { runtime, socket } = await mentionRuntime();
+  socket.sendReply = () => {
+    const error = new Error('Reply ack timeout (5000ms) for reqId: req-m1');
+    error.code = 'youdu-reply-ack-timeout';
+    return Promise.reject(error);
+  };
+
+  socket.emit('message', groupFrame('m1', '帮我总结', ['yd_bot']));
+  await waitFor(() => runtime.status.lastReplyFallbackError);
+
+  assert.equal(
+    socket.sent.some(({ kind }) => kind === 'message'),
+    false,
+    '响应已发出但 ack 丢失时不能再补发，否则用户会收到两遍',
+  );
+  assert.match(String(runtime.status.lastReplyFallbackError), /not resent to avoid duplicate delivery/);
   await runtime.stop();
 });
 

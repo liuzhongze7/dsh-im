@@ -33,13 +33,21 @@ function isMissingReplyQueue(error) {
 }
 
 /**
+ * ack 超时说明不了到底送没送到：帧已经发出，可能是服务端已经投递而 ack 丢了。
+ * 这种时候再补发一条 send_msg 就可能让用户收到两遍，所以只报「未确认」，不降级。
+ */
+function isUnconfirmedReply(error) {
+  return error?.code === 'youdu-reply-ack-timeout';
+}
+
+/**
  * 回复可靠性兜底（send_msg 降级）。
  *
  * 入站回调回传（respond_msg）依赖服务端还留着这条消息的「回调上下文」：
  * ng_bot 只按 LRU 淘汰（runtime_cache.go，上限 200、无 TTL），连接重置时整表清空。
  * 长回合（一条回复要跑几分钟）或拥挤群里上下文一旦失效，回复就永久丢失且没有任何提示。
- * 因此 respond_msg 明确失败（ack 错误或 5s ack 超时）时，改写按会话主动投递的 send_msg。
- * 只在 ack 超时/协议拒绝这类「确定没送出去」的失败上降级，避免重复消息。
+ * 因此 respond_msg 明确失败（ack 报错）时，改写按会话主动投递的 send_msg。
+ * 只在「确定没送出去」的失败上降级；ack 超时只报未确认，避免重复消息。
  */
 function replyFallbackRoute(target, ownBotIds = []) {
   const chatId = cleanId(target?.chatId);
@@ -242,6 +250,18 @@ export class YouduRuntime {
       } catch (error) {
         // 队列项缺失说明该 reqId 已经处理完，属于编程错误：不降级，避免重复发送。
         if (isMissingReplyQueue(error)) throw error;
+        // ack 超时无法判定是否已送达，补发 send_msg 会造成重复投递，只报未确认。
+        if (isUnconfirmedReply(error)) {
+          const unconfirmed = new Error(
+            `Youdu reply was not confirmed (${describeSendFailure(error)}); `
+            + 'it may already be delivered, so it was not resent',
+            { cause: error },
+          );
+          unconfirmed.code = 'youdu-reply-unconfirmed';
+          unconfirmed.replyError = error;
+          this.#recordUnconfirmedReply(unconfirmed, reqId);
+          throw unconfirmed;
+        }
         replyFailure = error;
       }
       const route = this.#replyRouteFor(target);
@@ -682,6 +702,18 @@ export class YouduRuntime {
     this.#logger.warn?.(
       `[dsh-im:youdu] respond_msg failed for ${scope} reply (${describeSendFailure(replyFailure)}); `
       + `delivered with send_msg instead (reqId=${reqId}, chatId=${route.chatId})`,
+    );
+  }
+
+  /** 记录一次「ack 超时、无法确认是否送达」的回复：不补发，只留痕。 */
+  #recordUnconfirmedReply(replyFailure, reqId) {
+    const at = new Date().toISOString();
+    const reason = describeSendFailure(replyFailure);
+    this.#status.lastReplyFallbackAt = at;
+    this.#status.lastReplyFallbackReason = reason;
+    this.#status.lastReplyFallbackError = `${reason} -> not resent to avoid duplicate delivery (reqId=${reqId})`;
+    this.#logger.warn?.(
+      `[dsh-im:youdu] reply was not confirmed (reqId=${reqId}): ${this.#status.lastReplyFallbackError}`,
     );
   }
 

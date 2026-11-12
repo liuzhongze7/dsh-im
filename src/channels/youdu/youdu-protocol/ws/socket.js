@@ -620,10 +620,12 @@ export class YouduSocket extends EventEmitter {
             this.processReplyQueue(reqId);
             return;
         }
-        const timer = setTimeout(() => {
+        const timer = this.scheduleTimeout(() => {
             this.pendingAcks.delete(reqId);
             queue.shift();
-            item.reject(new Error(`Reply ack timeout (${this.replyAckTimeoutMs}ms) for reqId: ${reqId}`));
+            const error = new Error(`Reply ack timeout (${this.replyAckTimeoutMs}ms) for reqId: ${reqId}`);
+            error.code = "youdu-reply-ack-timeout";
+            item.reject(error);
             this.processReplyQueue(reqId);
         }, this.replyAckTimeoutMs);
         this.pendingAcks.set(reqId, {
@@ -636,13 +638,18 @@ export class YouduSocket extends EventEmitter {
         const pending = this.pendingAcks.get(reqId);
         if (!pending)
             return;
-        clearTimeout(pending.timer);
+        this.cancelTimeout(pending.timer);
         this.pendingAcks.delete(reqId);
         const queue = this.replyQueues.get(reqId);
         if (frame.errCode !== WsErrCode.SUCCESS) {
             this.logger.error(`Reply ack error: reqId=${reqId}, errcode=${frame.errCode}`);
             queue?.shift();
-            pending.reject(frame);
+            // 上层按 error.code / error.errcode 判定可重试性，别把协议帧当错误对象抛出去。
+            const error = new Error(`Reply ack failed (errcode=${frame.errCode}) for reqId: ${reqId}`);
+            error.code = "youdu-reply-ack-failed";
+            error.errcode = frame.errCode;
+            error.frame = frame;
+            pending.reject(error);
             if (frame.errCode === WsErrCode.TOKEN_INVALID) {
                 this.reconnectWithFreshAuth("[WS] Token invalid in reply, will reconnect to re-authenticate");
                 return;
@@ -656,7 +663,7 @@ export class YouduSocket extends EventEmitter {
     }
     clearPendingMessages(reason) {
         for (const [, pending] of this.pendingAcks) {
-            clearTimeout(pending.timer);
+            this.cancelTimeout(pending.timer);
         }
         this.pendingAcks.clear();
         for (const [reqId, queue] of this.replyQueues) {
