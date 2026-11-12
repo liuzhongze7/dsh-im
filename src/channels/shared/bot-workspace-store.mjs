@@ -26,7 +26,7 @@ import {
 } from './context-enhancement.mjs';
 import {
   confirmsModelSelection,
-  modelCatalogEntry,
+  modelSelectionError,
   normalizeModelCatalog,
   sameModelSelection,
   validateModelSelection,
@@ -1146,12 +1146,6 @@ function unavailableAgentPreset() {
   return error;
 }
 
-function unavailableModel() {
-  const error = new Error('模型不存在或不可用。');
-  error.code = 'model-selection-unavailable';
-  return error;
-}
-
 function assertCurrentBotScope(isCurrentScope) {
   if (isCurrentScope()) return;
   const error = new Error('找不到要修改的机器人。');
@@ -1676,16 +1670,8 @@ export function createWorkspaceAwareController(controller, {
       const catalog = model && modelCatalog
         ? await resolveModelCatalog(modelCatalog)
         : null;
-      const entry = modelCatalogEntry(catalog, model);
-      if (model && (!modelCatalog || !entry)) {
-        throw unavailableModel();
-      }
-      if (model?.reasoningEffort !== undefined
-        && !entry.reasoning?.efforts.some((effort) => effort.id === model.reasoningEffort)) {
-        const error = new Error('当前模型不支持所选思考强度，请重新选择。');
-        error.code = 'model-reasoning-unavailable';
-        throw error;
-      }
+      const failure = modelSelectionError(catalog, model);
+      if (failure) throw failure;
       await workspaces.setModel(botId, model, { incarnation });
       return decorateResult(
         workspaces,
