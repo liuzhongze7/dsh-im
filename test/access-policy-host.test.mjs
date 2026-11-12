@@ -77,6 +77,14 @@ test('Host initialization preserves the nine channel access baselines and legacy
   }), policy(open(['16505550999@s.whatsapp.net']), open()));
 });
 
+test('Youdu seeds an open policy that grants commands only through the live owner list', () => {
+  const seeded = initialAccessPolicyFor('youdu', { ownerUserId: '123, *' });
+  assert.deepEqual(seeded, policy(open([], false), open([], false)));
+  assert.equal(JSON.stringify(seeded).includes('123'), false, 'owner ids stay host-only');
+  assert.deepEqual(privilegedSenderIdsFor('youdu', { ownerUserId: '123' }), ['123']);
+  assert.deepEqual(privilegedSenderIdsFor('youdu', { ownerUserId: '*' }), []);
+  assert.deepEqual(initialAccessPolicyFor('youdu', {}), policy(open([], false), open([], false)));
+});
 test('Host-only owner identities are not copied into public access-policy rows', () => {
   const cases = [
     ['weixin', { ownerUserId: 'wx-private-owner' }, 'wx-private-owner'],

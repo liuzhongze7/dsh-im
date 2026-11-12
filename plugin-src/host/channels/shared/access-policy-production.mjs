@@ -95,16 +95,14 @@ export function initialAccessPolicyFor(channel, config = {}) {
     return createAccessPolicy({ direct: openScope(), group: openScope() });
   }
   if (key === 'youdu') {
-    // 有度按 ownerUserId 收敛：未配置 owner（'*'）时命令默认拒绝；
-    // 配置了具体 owner 时命令仅该 owner 可执行（与历史行为一致）。
-    const owners = cleanIds(config.ownerUserId).filter((id) => id !== '*');
+    // 有度按 ownerUserId 实时收敛命令权限（`privilegedSenderIdsFor` → provider.isPrivileged），
+    // 这里只播种"默认不执行命令"的开放策略：owner 既不放 commandPermissionOverrides，
+    // 也不复制进 allowlist——否则改 owner 后旧 owner 仍带着持久授权，且 owner 身份会
+    // 出现在可回传前端的策略行里。
     const scope = createAccessPolicyScope({
       mode: 'open',
-      open: {
-        defaultCanExecuteCommands: false,
-        commandPermissionOverrides: policyUsers(owners),
-      },
-      allowlist: { users: policyUsers(owners) },
+      open: { defaultCanExecuteCommands: false, commandPermissionOverrides: [] },
+      allowlist: { users: [] },
     });
     return createAccessPolicy({ direct: scope, group: scope });
   }
