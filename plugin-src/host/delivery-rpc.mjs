@@ -99,7 +99,12 @@ function validPayload(endpoint, payload) {
 
 function publicError(error) {
   const code = PUBLIC_ERRORS.has(error?.code) ? error.code : 'delivery-failed';
-  return { code, message: code, details: {} };
+  // 渠道在错误上标 userMessage 表示"message 是给用户看的原文"（例如名字匹配到多个候选），
+  // 此时透传文案；其余错误沿用固定码充当 message，避免把内部信息带到界面。
+  const message = error?.userMessage === true && typeof error.message === 'string' && error.message
+    ? error.message
+    : code;
+  return { code, message, details: {} };
 }
 
 export function createDeliveryRpcHandler(service) {

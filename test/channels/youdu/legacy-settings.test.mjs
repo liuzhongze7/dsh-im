@@ -92,6 +92,52 @@ test('a damaged legacy document is left in place and reported', async () => {
   });
 });
 
+test('legacy delivery targets stay migratable while a bot is not configured', async () => {
+  await withMigration(async (dir) => {
+    const legacyPath = join(dir, 'delivery.json');
+    await writeFile(legacyPath, JSON.stringify({
+      version: 1,
+      bots: {
+        [BOT_ID]: { alice: { name: '爱丽丝', kind: 'user', route: { chatId: '6463894' } } },
+        yd_missing: { bob: { name: '鲍勃', kind: 'user', route: { chatId: '7000001' } } },
+      },
+    }, null, 2));
+
+    const workspaces = await new BotWorkspaceStore(join(dir, 'workspaces.json'), {
+      defaultWorkspace: dir,
+    }).load();
+    await workspaces.ensure(BOT_ID);
+
+    // 机器人 yd_missing 暂时不在 config 里：这次只迁移已配置的 bot，但必须保留旧文件，
+    // 否则它以后重新接入时目标就永久丢了。
+    const migrated = await migrateLegacyYouduDeliveryTargets({
+      legacyPath,
+      workspaces,
+      knownBotIds: [BOT_ID],
+    });
+    assert.equal(migrated, false);
+    assert.equal(existsSync(legacyPath), true, 'the legacy file must survive a partial migration');
+    assert.equal(existsSync(`${legacyPath}.migrated`), false);
+    assert.deepEqual(
+      workspaces.listDeliveryTargets(BOT_ID).map((target) => target.targetId),
+      ['alice'],
+    );
+
+    // 机器人重新接入后再跑一次，迁移完成并改名。
+    await workspaces.ensure('yd_missing');
+    const finished = await migrateLegacyYouduDeliveryTargets({
+      legacyPath,
+      workspaces,
+      knownBotIds: [BOT_ID, 'yd_missing'],
+    });
+    assert.equal(finished, true);
+    assert.deepEqual(
+      workspaces.listDeliveryTargets('yd_missing').map((target) => target.targetId),
+      ['bob'],
+    );
+    assert.equal(existsSync(legacyPath), false);
+  });
+});
 test('legacy delivery targets move into the shared workspace store', async () => {
   await withMigration(async (dir) => {
     const legacyPath = join(dir, 'delivery.json');

@@ -24,9 +24,15 @@ function lowered(value) {
   return value.toLowerCase();
 }
 
-function targetError(code, message) {
+// 解析失败统一用共享的 invalid-target 码（投递层与 RPC 层都认这个码），
+// 具体原因（没找到 / 重名 / 空值）放在 message 里：
+// 用户填错名字时需要看到"没找到"或"匹配到多个"的原文，而不是折叠后的 delivery-failed。
+function targetError(reason, message) {
   const error = new Error(message);
-  error.code = code;
+  error.code = 'invalid-target';
+  error.reason = reason;
+  // 标记"这条消息可以直接给用户看"，投递 RPC 据此透传 message。
+  error.userMessage = true;
   return error;
 }
 
@@ -34,7 +40,7 @@ function targetError(code, message) {
 function ambiguousError(kind, name, candidates) {
   const details = candidates.join('、');
   return targetError(
-    'youdu-target-ambiguous',
+    'ambiguous',
     kind === 'group'
       ? t('有度群名「{name}」对应多个群：{candidates}。请改用群 ID。', { name, candidates: details })
       : t('有度用户名「{name}」对应多个联系人：{candidates}。请改用用户 ID 或账号名。', {
@@ -46,7 +52,7 @@ function ambiguousError(kind, name, candidates) {
 
 function unknownError(kind, name) {
   return targetError(
-    'youdu-target-unknown',
+    'unknown',
     kind === 'group'
       ? t('找不到有度的群「{name}」。请先让群里有消息，或直接填写群 ID。', { name })
       : t('找不到有度的联系人「{name}」。请先让对方私聊机器人，或直接填写数字用户 ID。', { name }),
@@ -116,7 +122,7 @@ export function resolveYouduRoute(kind, chatId, targets = {}) {
   const raw = cleanString(chatId);
   if (!raw) {
     throw targetError(
-      'youdu-target-empty',
+      'empty',
       t('请填写有度投递目标：用户 ID、昵称、群 ID 或群名。'),
     );
   }

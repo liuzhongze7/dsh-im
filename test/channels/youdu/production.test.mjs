@@ -180,7 +180,7 @@ test('Youdu production exposes a delivery adapter that only owns configured bots
       kind: 'user',
       route: { chatId: '查无此人' },
     }),
-    (error) => error.code === 'youdu-target-unknown',
+    (error) => error.code === 'invalid-target' && error.reason === 'unknown',
   );
 
   // 建议目标带上观察到的联系人/群名，选目标时不用再对着 chatId 猜。

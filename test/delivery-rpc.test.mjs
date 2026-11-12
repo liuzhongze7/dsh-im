@@ -141,3 +141,24 @@ test('delivery RPC uses its own channel and accepts Harness-admitted LAN request
     host: '192.168.1.100:3080', origin: 'http://192.168.1.100:3080',
   }), { ok: true, value: { method: 'listTargets' } });
 });
+
+test('delivery RPC keeps a channel-resolved target message readable', async () => {
+  const { service } = serviceFixture();
+  service.createTarget = async () => {
+    const error = new Error('找不到有度的联系人「查无此人」。请先让对方私聊机器人，或直接填写数字用户 ID。');
+    error.code = 'invalid-target';
+    error.reason = 'unknown';
+    error.userMessage = true;
+    throw error;
+  };
+  const handle = createDeliveryRpcHandler(service);
+
+  const response = await handle('target.create', {
+    botId: 'bot_one',
+    target: { targetId: 'who', name: '有人', kind: 'user', route: { chatId: '查无此人' } },
+  });
+
+  assert.equal(response.ok, false);
+  assert.equal(response.error.code, 'invalid-target');
+  assert.match(response.error.message, /查无此人/);
+});

@@ -389,7 +389,8 @@ test('suggestion parser strictly filters malformed keys, de-duplicates routes, a
   assert.deepEqual(deliverySuggestionsFromSessions('unknown', sessions), []);
 });
 
-test('all eleven adapters list suggestions from reloaded bot state while no runtime is connected', async (t) => {
+// 有度自带 listSuggestions 覆盖（读 people/groups 快照），因此这里覆盖的是另外十个走会话解析的渠道。
+test('all ten session-backed adapters list suggestions from reloaded bot state while no runtime is connected', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'dsh-delivery-suggestions-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   for (const [channel, StateStore] of Object.entries(STATE_STORES)) {

@@ -1,4 +1,4 @@
-﻿import assert from 'node:assert/strict';
+import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { resolveYouduRoute } from '../../../src/channels/youdu/target-resolve.mjs';
@@ -16,9 +16,12 @@ const groups = [
   { chatId: '{99999999-8888-7777-6666-555555555555}', name: '研发群' },
 ];
 
-function failure(fn, code) {
+function failure(fn, reason) {
   assert.throws(fn, (error) => {
-    assert.equal(error.code, code);
+    // 共享投递层只认 invalid-target 一个码，具体原因放在 reason 与 message 里。
+    assert.equal(error.code, 'invalid-target');
+    assert.equal(error.reason, reason);
+    assert.equal(error.userMessage, true);
     return true;
   });
 }
@@ -61,7 +64,8 @@ test('duplicate nicknames are rejected instead of guessed', () => {
   assert.throws(
     () => resolveYouduRoute('user', '张三', { people, groups }),
     (error) => {
-      assert.equal(error.code, 'youdu-target-ambiguous');
+      assert.equal(error.code, 'invalid-target');
+      assert.equal(error.reason, 'ambiguous');
       assert.match(error.message, /zhang\.san, 7000001/);
       assert.match(error.message, /sun\.li, 7000002/);
       return true;
@@ -73,7 +77,8 @@ test('duplicate group names are rejected with their ids', () => {
   assert.throws(
     () => resolveYouduRoute('group', '研发群', { people, groups }),
     (error) => {
-      assert.equal(error.code, 'youdu-target-ambiguous');
+      assert.equal(error.code, 'invalid-target');
+      assert.equal(error.reason, 'ambiguous');
       assert.match(error.message, /\{0798E01E-CD68-42BB-813C-EB51593BB0F5\}/);
       assert.match(error.message, /\{99999999-8888-7777-6666-555555555555\}/);
       return true;
@@ -82,16 +87,16 @@ test('duplicate group names are rejected with their ids', () => {
 });
 
 test('unknown names and empty targets are reported clearly', () => {
-  failure(() => resolveYouduRoute('user', '不存在的人', { people, groups }), 'youdu-target-unknown');
-  failure(() => resolveYouduRoute('group', '不存在的群', { people, groups }), 'youdu-target-unknown');
-  failure(() => resolveYouduRoute('user', '   ', { people, groups }), 'youdu-target-empty');
+  failure(() => resolveYouduRoute('user', '不存在的人', { people, groups }), 'unknown');
+  failure(() => resolveYouduRoute('group', '不存在的群', { people, groups }), 'unknown');
+  failure(() => resolveYouduRoute('user', '   ', { people, groups }), 'empty');
 });
 
 test('a group name is not usable as a direct chat target and vice versa', () => {
-  failure(() => resolveYouduRoute('user', '研发群', { people, groups }), 'youdu-target-unknown');
+  failure(() => resolveYouduRoute('user', '研发群', { people, groups }), 'unknown');
   failure(
     () => resolveYouduRoute('group', '刘钟泽', { people, groups }),
-    'youdu-target-unknown',
+    'unknown',
   );
 });
 

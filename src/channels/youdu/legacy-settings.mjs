@@ -89,6 +89,9 @@ export async function migrateLegacyYouduDeliveryTargets({ legacyPath, workspaces
   }
   const bots = document?.bots;
   if (!bots || typeof bots !== 'object' || Array.isArray(bots)) return false;
+  // 有 bot 还不在 config 里（用户暂时删掉、以后再接入）时保留旧文件：
+  // 一旦改名，这些目标就再也迁不回来了。重复迁移是安全的（冲突只忽略）。
+  const deferred = Object.keys(bots).some((botId) => !knownBotIds.includes(botId));
   for (const [botId, targets] of Object.entries(bots)) {
     if (!knownBotIds.includes(botId)) continue;
     if (!targets || typeof targets !== 'object' || Array.isArray(targets)) continue;
@@ -111,6 +114,7 @@ export async function migrateLegacyYouduDeliveryTargets({ legacyPath, workspaces
       }
     }
   }
+  if (deferred) return false;
   await rename(legacyPath, `${legacyPath}.migrated`);
   return true;
 }
