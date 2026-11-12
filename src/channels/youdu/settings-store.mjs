@@ -12,13 +12,33 @@ import {
   normalizeAccessPolicy,
 } from '../shared/access-policy.mjs';
 import { validateAgentPresetId } from '../shared/agent-preset.mjs';
+import { validateBotAlias, withBotAlias } from '../shared/bot-alias.mjs';
+import {
+  normalizeModelSelection,
+  validateModelSelection,
+} from '../shared/model-setting.mjs';
 import { normalizeGroupAccess } from './group-access.mjs';
 
 const EMPTY_DOCUMENT = Object.freeze({ version: 1, bots: Object.freeze({}) });
 
+/** 别名来自磁盘时不可信：非法值一律按"未设置"处理，避免整份设置读不出来。 */
+function storedAlias(value) {
+  try {
+    return validateBotAlias(value);
+  } catch {
+    return '';
+  }
+}
+
+/** 别名：非空时把显示名换成别名，并保留原名（withBotAlias 负责语义）。 */
+function withAlias(bot, alias) {
+  return alias && bot ? withBotAlias(bot, alias) : bot;
+}
+
 /**
  * 有度(Youdu) 轻量设置存储（文件持久化）：为每个已接入的 bot 保存
- * workspace / agentPreset / contextEnhancement / groupHistory / accessPolicy / groupAccess。
+ * workspace / agentPreset / model / alias / contextEnhancement / groupHistory /
+ * accessPolicy / groupAccess。
  *
  * 这是 youdu 专属持久化（非 bot-workspace-store 完整接线），设置页的 set*
  * 端点写入会在下次读取/重启后保留；bridge/runtime 从这里读取，改动即时生效。
@@ -35,6 +55,8 @@ export class YouduSettingsStore {
     this.#defaults = {
       workspace: resolve(defaultWorkspace),
       agentPreset: validateAgentPresetId(defaultAgentPreset),
+      model: null,
+      alias: '',
       contextEnhancement: DEFAULT_CONTEXT_ENHANCEMENT_CONFIG,
       groupHistory: DEFAULT_GROUP_HISTORY_CONFIG,
       accessPolicy: null,
@@ -53,6 +75,8 @@ export class YouduSettingsStore {
               ? resolve(value.workspace)
               : this.#defaults.workspace,
             agentPreset: validateAgentPresetId(value?.agentPreset),
+            model: normalizeModelSelection(value?.model),
+            alias: storedAlias(value?.alias),
             contextEnhancement: normalizeContextEnhancementConfig(value?.contextEnhancement),
             groupHistory: normalizeGroupHistoryConfig(value?.groupHistory),
             accessPolicy: normalizeAccessPolicy(value?.accessPolicy),
@@ -79,6 +103,16 @@ export class YouduSettingsStore {
 
   agentPresetFor(botId) {
     return this.ensure(botId).agentPreset;
+  }
+
+  modelFor(botId) {
+    const model = this.ensure(botId).model;
+    return model ? { ...model } : null;
+  }
+
+  /** 显示别名；空字符串表示沿用原名。 */
+  aliasFor(botId) {
+    return this.ensure(botId).alias;
   }
 
   contextEnhancementFor(botId) {
@@ -108,6 +142,22 @@ export class YouduSettingsStore {
     this.ensure(botId).agentPreset = agentPreset;
     await this.#persist();
     return agentPreset;
+  }
+
+  /** 写入每 bot 模型；null/空表示跟随默认模型。 */
+  async setModel(botId, value) {
+    const model = validateModelSelection(value);
+    this.ensure(botId).model = model;
+    await this.#persist();
+    return this.modelFor(botId);
+  }
+
+  /** 写入显示别名；空字符串表示恢复原名。 */
+  async setAlias(botId, value) {
+    const alias = validateBotAlias(value);
+    this.ensure(botId).alias = alias;
+    await this.#persist();
+    return alias;
   }
 
   async setContextEnhancement(botId, config) {
@@ -148,15 +198,21 @@ export class YouduSettingsStore {
     if (!status || typeof status !== 'object' || !Array.isArray(status.bots)) return status;
     return {
       ...status,
-      bots: status.bots.map((bot) => (bot?.botId ? {
-        ...bot,
-        workspace: this.workspaceFor(bot.botId),
-        agentPreset: this.agentPresetFor(bot.botId),
-        contextEnhancement: this.contextEnhancementFor(bot.botId),
-        groupHistory: this.groupHistoryFor(bot.botId),
-        accessPolicy: this.accessPolicyFor(bot.botId),
-        groupAccess: this.groupAccessFor(bot.botId),
-      } : bot)),
+      bots: status.bots.map((bot) => {
+        if (!bot?.botId) return bot;
+        const alias = this.aliasFor(bot.botId);
+        return {
+          ...bot,
+          ...(alias ? { bot: withAlias(bot.bot, alias) } : {}),
+          workspace: this.workspaceFor(bot.botId),
+          agentPreset: this.agentPresetFor(bot.botId),
+          model: this.modelFor(bot.botId),
+          contextEnhancement: this.contextEnhancementFor(bot.botId),
+          groupHistory: this.groupHistoryFor(bot.botId),
+          accessPolicy: this.accessPolicyFor(bot.botId),
+          groupAccess: this.groupAccessFor(bot.botId),
+        };
+      }),
     };
   }
 
@@ -166,6 +222,8 @@ export class YouduSettingsStore {
       bots[botId] = {
         workspace: value.workspace,
         ...(value.agentPreset ? { agentPreset: value.agentPreset } : {}),
+        ...(value.model ? { model: value.model } : {}),
+        ...(value.alias ? { alias: value.alias } : {}),
         ...(value.contextEnhancement ? { contextEnhancement: value.contextEnhancement } : {}),
         ...(value.groupHistory ? { groupHistory: value.groupHistory } : {}),
         ...(value.accessPolicy ? { accessPolicy: value.accessPolicy } : {}),

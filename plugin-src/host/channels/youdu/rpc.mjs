@@ -6,6 +6,8 @@ import { SET_AGENT_PRESET_ENDPOINT, validAgentPresetPayload } from '../shared/ag
 import { SET_CONTEXT_ENHANCEMENT_ENDPOINT, validContextEnhancementPayload } from '../shared/context-enhancement-rpc.mjs';
 import { SET_GROUP_HISTORY_ENDPOINT, validGroupHistoryPayload } from '../shared/group-history-rpc.mjs';
 import { SET_ACCESS_POLICY_ENDPOINT, validAccessPolicyPayload } from '../shared/access-policy-rpc.mjs';
+import { SET_ALIAS_ENDPOINT, validAliasPayload } from '../shared/bot-alias-rpc.mjs';
+import { SET_MODEL_ENDPOINT, validModelPayload } from '../shared/model-setting-rpc.mjs';
 
 export const YOUDU_RPC_CHANNEL = '/youdu';
 export const YOUDU_ENDPOINTS = Object.freeze({
@@ -16,6 +18,8 @@ export const YOUDU_ENDPOINTS = Object.freeze({
   connectionTest: 'bot.connection-test',
   setWorkspace: SET_WORKSPACE_ENDPOINT,
   setAgentPreset: SET_AGENT_PRESET_ENDPOINT,
+  setModel: SET_MODEL_ENDPOINT,
+  setAlias: SET_ALIAS_ENDPOINT,
   setContextEnhancement: SET_CONTEXT_ENHANCEMENT_ENDPOINT,
   setGroupHistory: SET_GROUP_HISTORY_ENDPOINT,
   setAccessPolicy: SET_ACCESS_POLICY_ENDPOINT,
@@ -74,12 +78,18 @@ export function createYouduRpcHandler(controller, options = {}) {
     throw new TypeError('Youdu RPC requires a controller');
   }
   const cachedEncode = options?.cachedEncode ?? ((value) => value);
+  // 客户端用 set* 的返回值整体替换快照，模型目录丢了设置页就只剩「跟随默认模型」，
+  // 因此所有会回传状态的端点都要带上目录，而不只是 status。
+  const presentStatus = async (status) => {
+    const catalogs = typeof controller.catalogs === 'function' ? await controller.catalogs() : {};
+    return { ...publicStatus(status, cachedEncode), ...catalogs };
+  };
   return async (endpoint, payload, signal) => {
     const activeSignal = signal ?? payload?.signal ?? options?.signal;
     try {
       let value;
       if (endpoint === YOUDU_ENDPOINTS.status) {
-        value = await publicStatus(controller.status(), cachedEncode);
+        value = await presentStatus(controller.status());
       } else if (endpoint === YOUDU_ENDPOINTS.attachBot) {
         if (!validSourceBotId(payload?.botId)) {
           throw new TypeError('有度机器人 botId 无效。');
@@ -119,26 +129,46 @@ export function createYouduRpcHandler(controller, options = {}) {
           await controller.updateAgentPreset(payload.botId, payload.agentPreset),
           cachedEncode,
         );
+      } else if (endpoint === YOUDU_ENDPOINTS.setModel) {
+        if (!validModelPayload(payload)) throw new TypeError('请选择有效模型。');
+        value = await publicStatus(
+          await controller.updateModel(
+            payload.botId,
+            payload.model,
+            presentStatus,
+          ),
+          cachedEncode,
+        );
+      } else if (endpoint === YOUDU_ENDPOINTS.setAlias) {
+        if (!validAliasPayload(payload)) throw new TypeError('请输入有效的别名（最多 80 个字符）。');
+        value = await publicStatus(
+          await controller.updateAlias(
+            payload.botId,
+            payload.alias,
+            presentStatus,
+          ),
+          cachedEncode,
+        );
       } else if (endpoint === YOUDU_ENDPOINTS.setContextEnhancement) {
         if (!validContextEnhancementPayload(payload)) throw new TypeError('请提交有效的上下文增强设置。');
         value = await controller.updateContextEnhancement(
           payload.botId,
           payload.config,
-          (status) => publicStatus(status, cachedEncode),
+          presentStatus,
         );
       } else if (endpoint === YOUDU_ENDPOINTS.setGroupHistory) {
         if (!validGroupHistoryPayload(payload)) throw new TypeError('请提交有效的群聊上下文设置。');
         value = await controller.updateGroupHistory(
           payload.botId,
           payload.config,
-          (status) => publicStatus(status, cachedEncode),
+          presentStatus,
         );
       } else if (endpoint === YOUDU_ENDPOINTS.setAccessPolicy) {
         if (!validAccessPolicyPayload(payload)) throw new TypeError('请提交有效的访问设置。');
         value = await controller.updateAccessPolicy(
           payload.botId,
           payload.policy,
-          (status) => publicStatus(status, cachedEncode),
+          presentStatus,
         );
       } else if (endpoint === YOUDU_ENDPOINTS.setGroupAccess) {
         if (!validBotId(payload?.botId)) throw new TypeError('Invalid Youdu bot id');
@@ -151,7 +181,7 @@ export function createYouduRpcHandler(controller, options = {}) {
         value = await controller.updateGroupAccess(
           payload.botId,
           groupAccess,
-          (status) => publicStatus(status, cachedEncode),
+          presentStatus,
         );
       } else {
         throw new Error(`Unknown Youdu RPC endpoint: ${endpoint}`);

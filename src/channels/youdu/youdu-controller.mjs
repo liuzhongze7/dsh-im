@@ -1,6 +1,8 @@
 import { deriveYouduBotIdentity, maskYouduBotId } from './config-store.mjs';
+import { validateBotAlias, withBotAlias } from '../shared/bot-alias.mjs';
 import { t } from '../shared/i18n.mjs';
 import { publicMessageFailure } from '../shared/message-failure.mjs';
+import { modelSelectionError, validateModelSelection } from '../shared/model-setting.mjs';
 
 function cleanString(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
@@ -18,6 +20,7 @@ export class YouduController {
   #deleteState;
   #clearSessions;
   #knownGroupsFor;
+  #modelCatalog;
   #logger;
   #runtimes = new Map();
   #errors = new Map();
@@ -33,6 +36,7 @@ export class YouduController {
     deleteState = async () => {},
     clearSessions = async () => {},
     knownGroupsFor = null,
+    modelCatalog = null,
     logger = console,
   }) {
     if (!credentials || typeof credentials.resolve !== 'function'
@@ -51,6 +55,7 @@ export class YouduController {
     this.#deleteState = deleteState;
     this.#clearSessions = clearSessions;
     this.#knownGroupsFor = typeof knownGroupsFor === 'function' ? knownGroupsFor : null;
+    this.#modelCatalog = typeof modelCatalog === 'function' ? modelCatalog : null;
     this.#logger = logger;
   }
 
@@ -316,6 +321,53 @@ export class YouduController {
     return typeof projectStatus === 'function'
       ? projectStatus(this.status())
       : result;
+  }
+
+  /** 设置页用的模型目录；目录不可用时省略字段，客户端沿用上次结果。 */
+  async catalogs() {
+    if (!this.#modelCatalog) return {};
+    try {
+      const modelCatalog = await this.#modelCatalog();
+      return modelCatalog ? { modelCatalog } : {};
+    } catch (error) {
+      this.#logger.warn?.('[dsh-im:youdu] failed to list the model catalog:', error);
+      return {};
+    }
+  }
+
+  /** 更新机器人模型选择（null 表示跟随默认模型）；只影响新建会话。 */
+  async updateModel(botId, model, projectStatus) {
+    this.#assertBot(botId);
+    if (!this.#settingsStore) throw new TypeError('Youdu settings store is required');
+    const selection = validateModelSelection(model);
+    if (selection) {
+      const { modelCatalog } = await this.catalogs();
+      const failure = modelSelectionError(modelCatalog, selection);
+      if (failure) throw failure;
+    }
+    const result = await this.#settingsStore.setModel(botId, selection);
+    this.#revision += 1;
+    return typeof projectStatus === 'function'
+      ? projectStatus(this.status())
+      : result;
+  }
+
+  /** 更新机器人显示别名（空字符串恢复原名）。 */
+  async updateAlias(botId, alias, projectStatus) {
+    this.#assertBot(botId);
+    if (!this.#settingsStore) throw new TypeError('Youdu settings store is required');
+    const value = validateBotAlias(alias);
+    const current = this.status();
+    const renamed = {
+      ...current,
+      bots: current.bots.map((bot) => (bot?.botId === botId
+        ? { ...bot, bot: withBotAlias(bot.bot, value) }
+        : bot)),
+    };
+    const result = typeof projectStatus === 'function' ? projectStatus(renamed) : renamed;
+    await this.#settingsStore.setAlias(botId, value);
+    this.#revision += 1;
+    return result;
   }
 
   #assertBot(botId) {

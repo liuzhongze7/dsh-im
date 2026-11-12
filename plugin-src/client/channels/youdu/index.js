@@ -9,6 +9,8 @@ import {
   LastMessageErrorSummary,
 } from '../../channel-card-meta.js';
 import { WorkspaceEditor } from '../../workspace-editor.js';
+import { BotName } from '../../bot-alias.js';
+import { EMPTY_MODEL_CATALOG, ModelCatalogContext, ModelEditor } from '../../model-setting.js';
 import { AgentPresetEditor } from '../../agent-preset.js';
 import { ContextEnhancementEditor } from '../../context-enhancement.js';
 import { GroupHistoryEditor } from '../../group-history.js';
@@ -474,6 +476,8 @@ function AccountCard({
   onReconnect,
   onWorkspaceSave,
   onAgentPresetSave,
+  onModelSave,
+  onAliasSave,
   onContextEnhancementSave,
   onGroupHistorySave,
   onAccessPolicySaved,
@@ -494,7 +498,7 @@ function AccountCard({
         h('div', { className: 'ydt-accountIdentity dim-botIdentity' },
           h(BotAvatar),
           h('div', { className: 'dim-botName' },
-            h('h3', null, account.bot.name),
+            h(BotName, { bot: account.bot, disabled, onSave: onAliasSave }),
             h('p', { title: account.bot.wsHostMasked }, account.bot.wsHostMasked ?? '服务器已安全保存'))),
         h('div', { className: 'dim-botCardTools' },
           h(BotStatusMeta, {
@@ -521,6 +525,11 @@ function AccountCard({
         workspace: account.workspace,
         disabled,
         onSave: onWorkspaceSave,
+      }),
+      h(ModelEditor, {
+        model: account.model,
+        disabled,
+        onSave: onModelSave,
       }),
       h(AgentPresetEditor, {
         agentPreset: account.agentPreset,
@@ -579,6 +588,7 @@ export function YouduSettingsTab({ rpcCall }) {
     revision: 0,
     bots: [],
     totals: { configured: 0, connected: 0 },
+    modelCatalog: EMPTY_MODEL_CATALOG,
     pageError: null,
     statusError: null,
   });
@@ -631,6 +641,7 @@ export function YouduSettingsTab({ rpcCall }) {
         revision: snapshot.revision,
         bots: snapshot.bots,
         totals: snapshot.totals,
+        modelCatalog: snapshot.modelCatalog,
         pageError: null,
         statusError: null,
       }));
@@ -798,6 +809,8 @@ export function YouduSettingsTab({ rpcCall }) {
                 onReconnect: () => runBotAction(YOUDU_ENDPOINTS.reconnectBot, bot),
                 onWorkspaceSave: (workspace) => saveBotSetting(YOUDU_ENDPOINTS.setWorkspace, bot, { workspace }, 'workspace'),
                 onAgentPresetSave: (agentPreset) => saveBotSetting(YOUDU_ENDPOINTS.setAgentPreset, bot, { agentPreset }, 'preset'),
+                onModelSave: (model) => saveBotSetting(YOUDU_ENDPOINTS.setModel, bot, { model }, 'model'),
+                onAliasSave: (alias) => saveBotSetting(YOUDU_ENDPOINTS.setAlias, bot, { alias }, 'alias'),
                 onContextEnhancementSave: (config) => saveBotSetting(YOUDU_ENDPOINTS.setContextEnhancement, bot, { config }, 'context'),
                 onGroupHistorySave: (config) => saveBotSetting(YOUDU_ENDPOINTS.setGroupHistory, bot, { config }, 'context'),
                 onAccessPolicySaved: (policy) => updateBotAccessPolicy(bot.botId, policy),
@@ -808,7 +821,9 @@ export function YouduSettingsTab({ rpcCall }) {
                 onCancelRemove: () => setRemoveTarget(null),
               }))));
 
-  return h('section', { className: 'dim-page', 'aria-label': '有度机器人设置' },
+  return h(ModelCatalogContext.Provider, {
+    value: model.modelCatalog ?? EMPTY_MODEL_CATALOG,
+  }, h('section', { className: 'dim-page', 'aria-label': '有度机器人设置' },
     h(ChannelListHeading, {
       className: 'ddt-channel',
       title: '有度机器人',
@@ -877,5 +892,5 @@ export function YouduSettingsTab({ rpcCall }) {
           h(Button, { size: 'small', onClick: () => refresh({ silent: true }) }, '立即重试'))
       : null,
 
-    content);
+    content));
 }

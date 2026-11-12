@@ -23,6 +23,10 @@ import {
   createGroupContextFiles,
   normalizeGroupContextRetention,
 } from '../../../../src/channels/shared/group-context-files.mjs';
+import {
+  confirmsModelSelection,
+  listModelCatalog,
+} from '../../../../src/channels/shared/model-setting.mjs';
 import { createConnectionSupervisor } from './connection-supervisor.mjs';
 import { harnessConnection } from '../../harness-connection.mjs';
 import { createDeliveryAdapter } from '../../delivery-adapter.mjs';
@@ -132,8 +136,9 @@ function pluginPaths(config) {
 
 /**
  * 每个机器人工区感知的 Harness 代理（轻量版）：
- * - createSession 注入该 bot 在 settingsStore 里的 workspace 与 agentPreset，
- *   使消息会话跑在各自配置的工作区，而不是 Harness 启动时的默认工作区。
+ * - createSession 注入该 bot 在 settingsStore 里的 workspace、agentPreset 与 model，
+ *   使消息会话跑在各自配置的工作区/模型上，而不是 Harness 启动时的默认值。
+ *   `inheritBotModel: false` 时跳过模型注入（调用方要自己选模型）。
  * - currentWorkspace / switchWorkspace 读写 settingsStore，并让切换工作区时清空
  *   该 bot 的已绑定会话，使下一条消息在新工作区新建会话。
  * 其余方法（listWorkspaces / listWorkspaceSessions / 转发等）原样透传到目标 Harness。
@@ -146,12 +151,30 @@ function createYouduWorkspaceScope(harness, { botId, settingsStore, state }) {
     get(target, property) {
       if (property === 'createSession') {
         return async (options = {}) => {
+          const { inheritBotModel = true, ...createOptions } = options;
           const agentPreset = settingsStore.agentPresetFor(botId);
-          return target.createSession({
-            ...options,
+          const model = inheritBotModel === false ? null : settingsStore.modelFor(botId);
+          const sessionId = await target.createSession({
+            ...createOptions,
             workspace: settingsStore.workspaceFor(botId),
             ...(agentPreset == null ? {} : { agentPreset }),
           });
+          if (model) {
+            if (typeof target.selectSessionModel !== 'function') {
+              throw new TypeError('Harness does not support model selection');
+            }
+            const selected = await target.selectSessionModel(
+              sessionId,
+              model,
+              options.signal ? { signal: options.signal } : {},
+            );
+            if (!confirmsModelSelection(selected?.selected, model)) {
+              const error = new Error('Harness did not confirm the selected model');
+              error.code = 'model-selection-mismatch';
+              throw error;
+            }
+          }
+          return sessionId;
         };
       }
       if (property === 'currentWorkspace') {
@@ -242,6 +265,8 @@ export async function createProductionController(ctx, config = {}, internals = {
       const state = stateStores.get(botId);
       return state && typeof state.groupsSnapshot === 'function' ? state.groupsSnapshot() : [];
     },
+    // 每 bot 模型选择：目录来自当前 Harness（不可用时给空目录，客户端沿用上次结果）。
+    modelCatalog: () => listModelCatalog(harness),
     createRuntime: async ({ botId, config: botConfig, secret }) => {
       const state = await stateFor(botId);
       settingsStore.ensure(botId);

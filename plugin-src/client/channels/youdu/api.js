@@ -2,7 +2,9 @@ import {
   normalizeGroupAccess,
   resolveGroupAccessRule,
 } from '../../../../src/channels/youdu/group-access.mjs';
+import { normalizeBotAlias } from '../../../../src/channels/shared/bot-alias.mjs';
 import { normalizeGroupHistoryConfig } from '../../../../src/channels/shared/group-history.mjs';
+import { normalizeModelCatalog, normalizeModelSelection } from '../../model-setting.js';
 
 export const YOUDU_RPC_CHANNEL = '/youdu';
 
@@ -14,6 +16,8 @@ export const YOUDU_ENDPOINTS = Object.freeze({
   connectionTest: 'bot.connection-test',
   setWorkspace: 'bot.workspace.set',
   setAgentPreset: 'bot.preset.set',
+  setModel: 'bot.model.set',
+  setAlias: 'bot.alias.set',
   setContextEnhancement: 'bot.context-enhancement.set',
   setGroupHistory: 'bot.group-history.set',
   setAccessPolicy: 'bot.access-policy.set',
@@ -64,6 +68,7 @@ function normalizeBot(value) {
     connected,
     state: connected ? 'connected' : state,
     bot: {
+      ...normalizeBotAlias(value.bot),
       name: text(value.bot?.name, '有度机器人', 100),
       wsHostMasked: text(value.bot?.wsHostMasked, '服务器已安全保存', 140),
     },
@@ -81,6 +86,7 @@ function normalizeBot(value) {
     } : null,
     workspace: typeof value.workspace === 'string' ? value.workspace : undefined,
     agentPreset: value.agentPreset ?? undefined,
+    model: normalizeModelSelection(value.model),
     contextEnhancement: isRecord(value.contextEnhancement) ? value.contextEnhancement : undefined,
     groupHistory: normalizeGroupHistoryConfig(value.groupHistory),
     accessPolicy: isRecord(value.accessPolicy) ? value.accessPolicy : undefined,
@@ -123,6 +129,7 @@ export function normalizeSnapshot(value) {
     revision: Number.isSafeInteger(source.revision) ? source.revision : 0,
     bots,
     totals: { configured: bots.length, connected: bots.filter((bot) => bot.connected).length },
+    modelCatalog: normalizeModelCatalog(source.modelCatalog),
     ...(testMessage ? { testMessage } : {}),
   };
 }
