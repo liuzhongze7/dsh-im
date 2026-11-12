@@ -5,6 +5,7 @@
 
 import { spawn as nodeSpawn } from 'node:child_process';
 
+import { resolveYouDuCliBinary } from './cli-binary.mjs';
 import { buildYouDuKbEndpoint } from './endpoint.mjs';
 import { BridgeJsonlParser } from './protocol.mjs';
 
@@ -63,8 +64,7 @@ function redactDiagnostic(value, request) {
 }
 
 async function defaultResolveBinary() {
-  const module = await import('@youdu/cli/platform');
-  return module.resolveYouDuCliBinary();
+  return resolveYouDuCliBinary();
 }
 
 export async function runYouDuCliBridge(request, options = {}) {

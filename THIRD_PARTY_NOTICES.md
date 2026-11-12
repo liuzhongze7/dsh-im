@@ -16,6 +16,8 @@ The WhatsApp channel uses Baileys to implement WhatsApp Web linked-device QR log
 
 This project is an independent DeepSeek Harness integration. It does not bundle OpenClaw and is not endorsed by Tencent, WeCom, Feishu, DingTalk, QQ, Telegram, Discord, Meta, or WhatsApp.
 
+The YouDu knowledge-base bridge runs the YouDu CLI binary vendored at `vendor/youdu-cli/bin`, published by YouDu as [`@youdu/cli`](https://www.npmjs.com/package/@youdu/cli) 2026.9.15 and licensed under the MIT License. Its `skills/` documentation is copied unchanged next to the binary so the plugin installs without reaching a package registry.
+
 The WeChat, QQ, Telegram, Discord, and WhatsApp marks use path data published by Simple Icons under the CC0 1.0 Universal license. The Feishu, DingTalk, and WeCom marks are inline vectors used for channel identification. Product names and logos remain trademarks of their respective owners.
 
 The Host bundle also includes [semver](https://www.npmjs.com/package/semver) 7.8.5 for npm release comparison, licensed under the ISC License reproduced below.
