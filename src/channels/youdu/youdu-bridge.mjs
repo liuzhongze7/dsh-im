@@ -1219,8 +1219,23 @@ export class YouduBridge {
         batchSettled = true;
       }
       this.#signal?.throwIfAborted();
-      await this.#bot.sendReply(target, answer ?? '');
-      await this.#deliverArtifacts(target, messageId, artifacts);
+      // 文本与附件是两条独立的出站：文本失败（ack 超时/未认证/队列满）不应连带吞掉
+      // 已经生成的结果文件，两者都尝试投递，最后再把第一个错误抛给上层做失败提示。
+      const outboundFailures = [];
+      const replyText = typeof answer === 'string' ? answer : '';
+      if (replyText.trim() !== '') {
+        try {
+          await this.#bot.sendReply(target, replyText);
+        } catch (error) {
+          outboundFailures.push(error);
+        }
+      }
+      try {
+        await this.#deliverArtifacts(target, messageId, artifacts);
+      } catch (error) {
+        outboundFailures.push(error);
+      }
+      if (outboundFailures.length > 0) throw outboundFailures[0];
       this.#status.messagesReplied += 1;
       this.#status.lastReplyAt = new Date().toISOString();
       this.#status.lastError = null;

@@ -1,7 +1,16 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 import { YouduBridge } from '../../../src/channels/youdu/youdu-bridge.mjs';
 import { createAccessPolicy, createAccessPolicyScope } from '../../../src/channels/shared/access-policy.mjs';
+import {
+  OUTBOUND_ARTIFACT_TOOL,
+  OutboundArtifactRegistry,
+  createOutboundArtifactTool,
+  releaseOutboundArtifact,
+} from '../../../src/channels/shared/semantic/artifact.mjs';
 
 function stateFixture(initialSessions = []) {
   const sessions = new Map(initialSessions);
@@ -43,6 +52,35 @@ function makeBot(sent = []) {
   };
 }
 
+async function committedArtifact(t, fileName, content) {
+  const workspace = await mkdtemp(join(tmpdir(), 'dsh-im-youdu-artifact-'));
+  t.after(() => rm(workspace, { recursive: true, force: true }));
+  const registry = new OutboundArtifactRegistry({ uuid: () => 'youdu-artifact-one' });
+  t.after(() => registry.clear());
+  await writeFile(join(workspace, fileName), content);
+  const agent = {
+    session: {
+      header: { id: 'artifact-session', cwd: workspace },
+      events: [
+        { type: 'turn/start', data: { turn: 1 } },
+        { type: 'user/message', data: { turn: 1, source: { rpcId: 'artifact-rpc' } } },
+      ],
+    },
+  };
+  const tool = createOutboundArtifactTool({ registry });
+  const exec = {
+    name: OUTBOUND_ARTIFACT_TOOL,
+    callId: 'youdu-artifact-call',
+    rootCallId: 'youdu-artifact-call',
+    token: Symbol('youdu-artifact-call'),
+    agent,
+  };
+  await tool.definition.execute({ path: fileName }, exec);
+  tool.onResult(exec, { isError: false });
+  const artifact = registry.take('artifact-session', 1)[0];
+  t.after(() => releaseOutboundArtifact(artifact));
+  return artifact;
+}
 function baseHarness(overrides = {}) {
   return {
     ensureRunning: async () => true,
@@ -278,4 +316,33 @@ test('inbound image travels to the Harness as an image block', async () => {
   assert.equal(options?.files, undefined, 'images no longer travel as inbound files');
   const text = blocks.filter((block) => block.type === 'text').map((block) => block.text).join('\n');
   assert.doesNotMatch(text, /工作区文件/, 'images must not be pre-emptively downgraded to files');
+});
+
+test('a failed text reply still delivers the generated result file', async (t) => {
+  const artifact = await committedArtifact(t, 'report.txt', 'youdu-report');
+  const { state } = stateFixture();
+  const delivered = [];
+  const bot = {
+    async sendReply() {
+      const error = new Error('ack timeout');
+      error.code = 'youdu-ack-timeout';
+      throw error;
+    },
+    async sendMessage() {},
+    async downloadMedia() { return TINY_PNG; },
+    async deliverArtifact(target, file, kind) { delivered.push({ target, kind }); },
+  };
+  const harness = baseHarness({
+    ask: async (_sessionId, _text, options) => {
+      await options.onArtifact(artifact);
+      return '结果文件已生成';
+    },
+  });
+  const bridge = new YouduBridge({ bot, harness, state, ownerUserId: '*' });
+
+  await bridge.accept(frame('art-1', '生成文件'));
+
+  assert.equal(delivered.length, 1, 'the result file must still be sent when the text reply fails');
+  assert.equal(delivered[0].kind, 'file');
+  assert.match(String(bridge.status.lastError), /ack timeout/);
 });
