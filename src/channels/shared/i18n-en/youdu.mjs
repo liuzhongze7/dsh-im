@@ -6,6 +6,12 @@ export default {
     'The Youdu bot is connected, but the message connection is not ready yet.',
   '有度机器人已连接 DeepSeek Harness。': 'The Youdu bot is connected to DeepSeek Harness.',
   '有度机器人凭据被拒绝，请更新机器人密钥后重新连接。': 'The YouDu bot credentials were rejected. Update the bot secret and reconnect.',
+  '有度群名「{name}」对应多个群：{candidates}。请改用群 ID。': 'The YouDu group name "{name}" matches several groups: {candidates}. Use the group ID instead.',
+  '有度用户名「{name}」对应多个联系人：{candidates}。请改用用户 ID 或账号名。': 'The YouDu user name "{name}" matches several contacts: {candidates}. Use the user ID or account name instead.',
+  '找不到有度的群「{name}」。请先让群里有消息，或直接填写群 ID。': 'YouDu group "{name}" is unknown. Let the group receive a message first, or enter the group ID.',
+  '找不到有度的联系人「{name}」。请先让对方私聊机器人，或直接填写数字用户 ID。': 'YouDu contact "{name}" is unknown. Ask that person to message the bot first, or enter the numeric user ID.',
+  '请填写有度投递目标：用户 ID、昵称、群 ID 或群名。': 'Enter a YouDu delivery target: user ID, nickname, group ID or group name.',
+  '有度投递目标只支持私聊或群聊。': 'YouDu delivery targets support direct chats and groups only.',
   '有度机器人与 DeepSeek Harness 连接正常。':
     'The Youdu bot is connected to DeepSeek Harness and working normally.',
   '有度机器人尚未连接': 'The Youdu bot is not connected yet',

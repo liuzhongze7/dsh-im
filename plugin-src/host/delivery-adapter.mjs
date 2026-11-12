@@ -197,7 +197,7 @@ function sessionSyncView(channel, target, sessions, configured) {
 }
 
 /** Bind one channel's existing workspace store and unwrapped controller to DeliveryService. */
-export function createDeliveryAdapter({ channel, workspaces, coreController, stateFor }) {
+export function createDeliveryAdapter({ channel, workspaces, coreController, stateFor, resolveTarget }) {
   if (!supportsDeliveryChannel(channel)) throw new TypeError(`Unsupported delivery channel: ${channel}`);
   if (!workspaces || typeof workspaces !== 'object') {
     throw new TypeError('delivery adapter requires a workspace store');
@@ -208,6 +208,18 @@ export function createDeliveryAdapter({ channel, workspaces, coreController, sta
   if (typeof stateFor !== 'function') {
     throw new TypeError('delivery adapter requires a bot state getter');
   }
+  if (resolveTarget !== undefined && typeof resolveTarget !== 'function') {
+    throw new TypeError('delivery adapter resolveTarget must be a function');
+  }
+  // 渠道自己的目标解析（例如有度允许填昵称/群名）：只接管 route，返回权威 ID。
+  // 未提供钩子的渠道行为完全不变。
+  const settledTarget = async (botId, target) => {
+    if (typeof resolveTarget !== 'function') return target;
+    if (target?.route === undefined) return target;
+    const route = await resolveTarget(botId, target);
+    if (route === undefined || route === null) return target;
+    return { ...target, route };
+  };
   return Object.freeze({
     channel,
     ownsBot: (botId) => workspaces.has(botId),
@@ -240,22 +252,35 @@ export function createDeliveryAdapter({ channel, workspaces, coreController, sta
         { targetIdRequired: false },
       ));
     },
-    createTarget: (botId, target) => workspaces.createDeliveryTarget(
-      botId,
-      normalizeDeliveryTarget(channel, target),
-    ),
-    updateTarget: (botId, targetId, replacement) => workspaces.updateDeliveryTarget(
-      botId,
-      targetId,
-      normalizeDeliveryTarget(channel, replacement, { targetIdRequired: false }),
-    ),
+    async createTarget(botId, target) {
+      const normalized = normalizeDeliveryTarget(channel, target);
+      return workspaces.createDeliveryTarget(
+        botId,
+        normalizeDeliveryTarget(channel, await settledTarget(botId, normalized)),
+      );
+    },
+    async updateTarget(botId, targetId, replacement) {
+      const normalized = normalizeDeliveryTarget(channel, replacement, { targetIdRequired: false });
+      return workspaces.updateDeliveryTarget(
+        botId,
+        targetId,
+        normalizeDeliveryTarget(channel, await settledTarget(botId, normalized), {
+          targetIdRequired: false,
+        }),
+      );
+    },
     deleteTarget: (botId, targetId) => workspaces.deleteDeliveryTarget(botId, targetId),
     async sendText(botId, target, text, options = {}) {
       const normalized = normalizeDeliveryTarget(channel, targetWithoutSessionSync(target));
       if (typeof coreController.sendProactiveText !== 'function') {
         throw new TypeError('delivery controller cannot send proactive text');
       }
-      await coreController.sendProactiveText(botId, normalized, text, options);
+      await coreController.sendProactiveText(
+        botId,
+        await settledTarget(botId, normalized),
+        text,
+        options,
+      );
       return { sent: true };
     },
     async setSessionSync(botId, targetId, enabled) {

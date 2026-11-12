@@ -12,6 +12,7 @@ import {
 import { YouduController } from '../../../../src/channels/youdu/youdu-controller.mjs';
 import { YouduRuntime } from '../../../../src/channels/youdu/youdu-runtime.mjs';
 import { YouduStateStore } from '../../../../src/channels/youdu/state-store.mjs';
+import { resolveYouduRoute } from '../../../../src/channels/youdu/target-resolve.mjs';
 import { listAgentPresetCatalog } from '../../../../src/channels/shared/agent-preset.mjs';
 import {
   BotWorkspaceStore,
@@ -334,6 +335,15 @@ export async function createProductionController(ctx, config = {}, internals = {
     workspaces,
     coreController,
     stateFor,
+    // 有度服务端只认 chatId，但人更愿意填昵称/群名：在这里解析成权威 ID，
+    // 保存与发送都走同一套规则（重名报歧义，不猜）。
+    resolveTarget: async (botId, target) => {
+      const state = await stateFor(botId).catch(() => null);
+      return resolveYouduRoute(target.kind, target.route?.chatId, {
+        people: typeof state?.peopleSnapshot === 'function' ? state.peopleSnapshot() : [],
+        groups: typeof state?.groupsSnapshot === 'function' ? state.groupsSnapshot() : [],
+      });
+    },
   });
   const deliveryAdapter = Object.freeze({
     ...baseDeliveryAdapter,

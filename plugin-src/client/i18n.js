@@ -1071,8 +1071,10 @@ const EN = Object.freeze({
   '或留空为 *': 'Or leave empty for *',
   '正在接入…': 'Connecting…',
   '读取有度连接状态超时，请刷新页面后重试。': 'Loading the Youdu connection status timed out. Refresh the page and try again.',
-  '填写有度用户 ID（数字），需对方先私聊过机器人': 'Enter the numeric Youdu user ID; that user must have messaged the bot first',
-  '填写群 ID，例如 {0798E01E-CD68-42BB-813C-EB51593BB0F5}': 'Enter the group ID, e.g. {0798E01E-CD68-42BB-813C-EB51593BB0F5}',
+  '用户 ID 或昵称': 'User ID or nickname',
+  '填昵称或账号名（如 刘钟泽、lewis.liu），或数字用户 ID；名字要求机器人已认识对方': 'Nickname or account (e.g. lewis.liu), or the numeric user ID; the bot must already know that name',
+  '群 ID 或群名': 'Group ID or name',
+  '填群名（如 研发群），或群 ID 例如 {0798E01E-CD68-42BB-813C-EB51593BB0F5}': 'Group name (e.g. R&D), or the group ID, e.g. {0798E01E-CD68-42BB-813C-EB51593BB0F5}',
   // 有度群聊上下文缓存（group-history.mjs）
   '群聊上下文': 'Group chat context',
   '开启 · 最近 ${normalized.limit} 条': 'On · last ${normalized.limit} messages',

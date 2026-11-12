@@ -312,6 +312,59 @@ test('delivery adapter delegates target CRUD to the existing workspace store', a
   ]);
 });
 
+test('a channel resolveTarget hook settles names before the store or the wire sees them', async () => {
+  const calls = [];
+  const workspaces = {
+    has: () => true,
+    listDeliveryTargets: () => [],
+    createDeliveryTarget: async (botId, target) => calls.push(['create', botId, target]),
+    updateDeliveryTarget: async (botId, targetId, target) => calls.push(['update', botId, targetId, target]),
+    deleteDeliveryTarget: async () => {},
+  };
+  const sent = [];
+  const coreController = {
+    async sendProactiveText(botId, target, text) {
+      sent.push({ botId, target, text });
+      return { messageId: 'm1' };
+    },
+  };
+  const adapter = createDeliveryAdapter({
+    channel: 'youdu',
+    workspaces,
+    coreController,
+    stateFor: async () => ({ snapshot: () => ({ sessions: {} }) }),
+    resolveTarget: (botId, target) => ({
+      chatId: `resolved-${botId}-${target.route.chatId}`,
+    }),
+  });
+
+  await adapter.createTarget('bot-one', {
+    targetId: 'ops', kind: 'user', route: { chatId: '刘钟泽' },
+  });
+  await adapter.updateTarget('bot-one', 'ops', {
+    kind: 'group', route: { chatId: '研发群' },
+  });
+  await adapter.sendText('bot-one', {
+    targetId: 'ops', kind: 'group', route: { chatId: '研发群' },
+  }, '定时结果');
+
+  assert.deepEqual(calls, [
+    ['create', 'bot-one', {
+      targetId: 'ops', kind: 'user', route: { chatId: 'resolved-bot-one-刘钟泽' },
+    }],
+    ['update', 'bot-one', 'ops', {
+      kind: 'group', route: { chatId: 'resolved-bot-one-研发群' },
+    }],
+  ]);
+  assert.deepEqual(sent, [
+    {
+      botId: 'bot-one',
+      target: { targetId: 'ops', kind: 'group', route: { chatId: 'resolved-bot-one-研发群' } },
+      text: '定时结果',
+    },
+  ]);
+});
+
 test('suggestion parser strictly filters malformed keys, de-duplicates routes, and never leaks state values', () => {
   const sessions = {
     'direct:88': 'secret-session-one',

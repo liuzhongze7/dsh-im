@@ -27,6 +27,11 @@ const DELIVERY_ERROR_CODES = new Set([
   'delivery-failed',
   'session-sync-unavailable',
   'cancelled',
+  // 渠道把用户输入的昵称/群名解析成会话 ID 失败时抛出：保留原错误消息，
+  // 用户在投递设置里才能看懂是"没找到"还是"重名了"。
+  'youdu-target-unknown',
+  'youdu-target-ambiguous',
+  'youdu-target-empty',
 ]);
 
 const SESSION_SYNC_METHODS = Object.freeze([

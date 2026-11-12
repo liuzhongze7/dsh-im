@@ -152,6 +152,37 @@ test('Youdu production exposes a delivery adapter that only owns configured bots
     text: '定时结果',
   }]);
 
+  // 投递目标可以填昵称/群名：落库前解析成权威 chatId，发送时也走同一套解析。
+  await service.createTarget(bot.botId, {
+    targetId: 'by-name',
+    kind: 'user',
+    route: { chatId: '刘钟泽' },
+  });
+  await service.createTarget(bot.botId, {
+    targetId: 'group-by-name',
+    kind: 'group',
+    route: { chatId: '研发群' },
+  });
+  assert.deepEqual(
+    (await service.listTargets(bot.botId)).targets
+      .filter((target) => target.targetId === 'by-name' || target.targetId === 'group-by-name')
+      .map((target) => [target.targetId, target.kind, target.route.chatId]),
+    [['by-name', 'user', '6463894'], ['group-by-name', 'group', '2048']],
+  );
+  sends.length = 0;
+  await service.send(bot.botId, 'group-by-name', '按群名发送');
+  assert.deepEqual(sends.map((send) => [send.target.kind, send.target.route.chatId]), [
+    ['group', '2048'],
+  ]);
+  await assert.rejects(
+    service.createTarget(bot.botId, {
+      targetId: 'ghost',
+      kind: 'user',
+      route: { chatId: '查无此人' },
+    }),
+    (error) => error.code === 'youdu-target-unknown',
+  );
+
   // 建议目标带上观察到的联系人/群名，选目标时不用再对着 chatId 猜。
   assert.deepEqual(await service.listSuggestions(bot.botId), {
     botId: bot.botId,
@@ -457,3 +488,4 @@ test('removing a Youdu bot also drops its delivery targets', async (t) => {
   }
   await production.close();
 });
+
