@@ -78,10 +78,22 @@ function describeSendFailure(error) {
   return code ?? message ?? String(error);
 }
 
+/**
+ * 有度在认证失败时返回 errcode=1101，socket 会停止自动重连并抛出
+ * "Authentication failed: ... (code: 1101)"。这类失败重试没有意义：密钥不改就会一直失败，
+ * 所以单独标记成凭据被拒，让上层停在终态并提示用户更新密钥。
+ */
+const CREDENTIAL_REJECTION_PATTERN = /Authentication failed|errcode=1101|code: 1101/;
+
+export function isYouduCredentialRejection(error) {
+  return CREDENTIAL_REJECTION_PATTERN.test(String(error?.message ?? error ?? ''));
+}
+
 export function createYouduRuntimeStatus() {
   return {
     startedAt: null,
     ready: false,
+    credentialRejected: false,
     youduConnectionState: 'idle',
     harnessReachable: false,
     lastCheckedAt: null,
@@ -364,6 +376,7 @@ export class YouduRuntime {
       bridge.setGid?.(socket.getGid?.() ?? '');
       const now = Date.now();
       this.#status.ready = true;
+      this.#status.credentialRejected = false;
       this.#status.youduConnectionState = 'connected';
       this.#status.lastCheckedAt = now;
       this.#status.lastConnectedAt = now;
@@ -381,6 +394,12 @@ export class YouduRuntime {
     });
     socket.on('error', (error) => {
       this.#logger.warn?.('[dsh-im-youdu] socket ERROR:', error?.message);
+      // 凭据被拒是终态：继续重连只会用同一份密钥反复失败。
+      if (isYouduCredentialRejection(error)) {
+        this.#status.credentialRejected = true;
+        this.#status.youduConnectionState = 'failed';
+        error.code = 'youdu-credentials-rejected';
+      }
       if (!this.#status.ready) readyReject(error);
       else {
         this.#status.lastError = error?.message ?? String(error);

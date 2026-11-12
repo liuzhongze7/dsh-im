@@ -5,6 +5,7 @@ export default {
   '有度机器人已接入，消息连接暂未就绪。':
     'The Youdu bot is connected, but the message connection is not ready yet.',
   '有度机器人已连接 DeepSeek Harness。': 'The Youdu bot is connected to DeepSeek Harness.',
+  '有度机器人凭据被拒绝，请更新机器人密钥后重新连接。': 'The YouDu bot credentials were rejected. Update the bot secret and reconnect.',
   '有度机器人与 DeepSeek Harness 连接正常。':
     'The Youdu bot is connected to DeepSeek Harness and working normally.',
   '有度机器人尚未连接': 'The Youdu bot is not connected yet',

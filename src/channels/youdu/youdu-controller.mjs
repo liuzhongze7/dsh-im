@@ -2,12 +2,26 @@ import { deriveYouduBotIdentity, maskYouduBotId } from './config-store.mjs';
 import { t } from '../shared/i18n.mjs';
 import { publicMessageFailure } from '../shared/message-failure.mjs';
 
+/** 凭据被拒的终态文案：错误与健康摘要共用一句，避免两处措辞漂移。 */
+const CREDENTIAL_REJECTED = '有度机器人凭据被拒绝，请更新机器人密钥后重新连接。';
+
 function cleanString(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
 function safeError(code, message) {
   return Object.freeze({ code, message });
+}
+
+/**
+ * 把启动失败归一成给设置页看的错误：凭据被拒是终态（密钥不改就会一直失败），
+ * 其它失败仍是可自动恢复的连接问题。
+ */
+function connectionError(error, fallbackMessage) {
+  if (error?.code === 'youdu-credentials-rejected') {
+    return safeError('youdu-credentials-rejected', t(CREDENTIAL_REJECTED));
+  }
+  return safeError('connection-failed', fallbackMessage ?? t('有度连接未就绪，插件会自动重试。'));
 }
 
 export class YouduController {
@@ -67,11 +81,13 @@ export class YouduController {
           this.#errors.set(config.botId, safeError('missing-secret', t('有度机器人凭据缺失，请移除后重新接入。')));
           return;
         }
+        // 凭据被拒属于终态：密钥不改就会一直失败，停在错误上等用户处理，不再自动重试。
+        if (this.#errors.get(config.botId)?.code === 'youdu-credentials-rejected') return;
         try {
           await this.#startRuntime(config, secret);
           this.#errors.delete(config.botId);
         } catch (error) {
-          this.#errors.set(config.botId, safeError('connection-failed', t('有度连接未就绪，插件会自动重试。')));
+          this.#errors.set(config.botId, connectionError(error));
           this.#logger.warn?.(`[dsh-im:youdu] bot ${config.botId} failed to initialize:`, error);
         } finally {
           this.#touch();
@@ -126,7 +142,7 @@ export class YouduController {
         await this.#startRuntime(config, normalizedSecret);
         this.#errors.delete(identity.botId);
       } catch (error) {
-        this.#errors.set(identity.botId, safeError('connection-failed', t('有度机器人已接入，消息连接暂未就绪。')));
+        this.#errors.set(identity.botId, connectionError(error, t('有度机器人已接入，消息连接暂未就绪。')));
         this.#logger.warn?.(`[dsh-im:youdu] bot ${identity.botId} credential connection failed:`, error);
       }
       this.#touch();
@@ -140,11 +156,13 @@ export class YouduController {
     await this.#withBotTransition(botId, async () => {
       const secret = await this.#resolveSecret(config.secretRef);
       if (!secret) throw new Error('Youdu bot secret is missing');
+      // 用户显式重连等于重新授权一次尝试：先清掉终态错误，失败后再重新落回终态。
+      this.#errors.delete(botId);
       try {
         await this.#startRuntime(config, secret);
         this.#errors.delete(botId);
       } catch (error) {
-        this.#errors.set(botId, safeError('connection-failed', t('有度连接仍未就绪，请稍后重试。')));
+        this.#errors.set(botId, connectionError(error, t('有度连接仍未就绪，请稍后重试。')));
         throw error;
       } finally {
         this.#touch();
@@ -217,9 +235,12 @@ export class YouduController {
         : runtimeStatus?.youduConnectionState === 'connecting' ? 'connecting'
           : this.#errors.has(config.botId) || runtimeStatus?.youduConnectionState === 'failed'
             ? 'error' : 'offline';
+      const failure = this.#errors.get(config.botId) ?? null;
+      const blocked = failure?.code === 'youdu-credentials-rejected';
       return {
         botId: config.botId,
         sourceBotId: config.sourceBotId,
+        blocked,
         ownerUserId: config.ownerUserId,
         state,
         connected,
@@ -228,7 +249,8 @@ export class YouduController {
         health: {
           status: connected ? 'healthy' : state === 'error' ? 'error' : 'offline',
           summary: connected ? t('有度 WebSocket 长连接运行正常')
-            : state === 'error' ? t('有度连接未就绪，插件会自动重试') : t('有度连接当前离线'),
+            : blocked ? t(CREDENTIAL_REJECTED)
+              : state === 'error' ? t('有度连接未就绪，插件会自动重试') : t('有度连接当前离线'),
           lastCheckedAt: runtimeStatus?.lastCheckedAt ?? null,
           lastConnectedAt: runtimeStatus?.lastConnectedAt ?? null,
         },
@@ -244,6 +266,7 @@ export class YouduController {
       };
     });
     const connectedCount = bots.filter((bot) => bot.connected).length;
+    const blockedCount = bots.filter((bot) => bot.blocked).length;
     return {
       schemaVersion: 1,
       revision: this.#revision,
@@ -251,7 +274,7 @@ export class YouduController {
         : connectedCount === bots.length ? 'connected'
           : connectedCount > 0 ? 'degraded' : 'offline',
       bots,
-      totals: { configured: bots.length, connected: connectedCount },
+      totals: { configured: bots.length, connected: connectedCount, blocked: blockedCount },
     };
   }
 
