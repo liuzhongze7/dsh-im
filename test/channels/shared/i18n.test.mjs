@@ -197,7 +197,10 @@ test('every literal t() key in src/channels has an English dictionary entry', ()
   };
   const missing = [];
   for (const file of files) {
-    const source = readFileSync(file, 'utf8');
+    // 工作树的换行由 .gitattributes 约束为 LF，但 core.autocrlf=true 的机器仍可能
+    // 留下 CRLF：模板字面量里的真实换行会跟着变成 \r\n，与字典键（只有 \n）不等。
+    // 这里只比较文案内容，所以先归一化换行再扫描。
+    const source = readFileSync(file, 'utf8').replaceAll('\r\n', '\n');
     for (const match of source.matchAll(keyPattern)) {
       const key = decodeLiteral(match[2]);
       if (!/[一-鿿]/.test(key)) continue;
