@@ -1,8 +1,9 @@
 // Port of @youdu/openclaw-youdu `src/kb/endpoint.ts` (origin/codex/youdu-kb-tool).
 // Resolves the KB open-API endpoint (`https://<hostname>:7443`) and its TLS
-// options from the bot's configured host. The bundled CA is read from the
-// package `cert/` directory; IP hosts allow hostname/IP mismatch while domain
-// hosts keep full chain verification.
+// options from the bot's configured host. The bundled CA (`cert/youdu-ca.pem`,
+// only the YouDu private roots) is read from the package `cert/` directory; IP
+// hosts allow hostname/IP mismatch while still verifying the chain against it,
+// and domain hosts keep full chain verification.
 
 import { existsSync, readFileSync } from 'node:fs';
 import { isIP } from 'node:net';
@@ -11,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 
 import { DEFAULT_PORT } from '../youdu-protocol/index.js';
 
-const CA_FILENAME = 'cacert-2026-03-19.pem';
+const CA_FILENAME = 'youdu-ca.pem';
 const moduleDirectory = dirname(fileURLToPath(import.meta.url));
 
 /** Walk up to the nearest package root (where package.json lives). */

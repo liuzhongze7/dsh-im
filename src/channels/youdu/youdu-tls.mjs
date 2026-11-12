@@ -1,7 +1,10 @@
 // TLS 连接选项（对齐 openclaw-youdu `src/tls.ts`）：
-// - 始终校验证书链（rejectUnauthorized: true），并加载自带 CA `cert/cacert-*.pem`，
-//   与 node 默认 CA 合并，使 youdu 服务器（私有 CA 签发）能验证通过。
-// - 配置为 IP 直连时，跳过 hostname 匹配（服务器证书签发给域名而非 IP），但证书链仍校验。
+// - 始终校验证书链（rejectUnauthorized: true）；CA 只加"有度私有 CA"这几张
+//   （`cert/youdu-ca.pem`：Youdu CA V2 / Intermediate / Root 与内部 JSTJ 根），
+//   公共根仍由 Node 默认信任库提供——不再把整包公共 CA 塞进来，避免任意公共 CA
+//   签发的证书（含免费 DV）都能冒充有度服务器。
+// - 配置为 IP 直连时跳过 hostname 匹配（服务器证书签发给域名而非 IP），但证书链
+//   仍必须由上面这几张私有根签发，因此身份校验并未放弃。
 //
 // 之前 dsh-im 的 youdu WebSocket/媒体请求没有传 tlsOptions，导致 IP 直连报
 // "unable to verify the first certificate"。
@@ -13,7 +16,7 @@ import * as tls from 'node:tls';
 import { fileURLToPath } from 'node:url';
 import { Agent, fetch as undiciFetch } from 'undici';
 
-const CA_FILENAME = 'cacert-2026-03-19.pem';
+const CA_FILENAME = 'youdu-ca.pem';
 const moduleDirectory = dirname(fileURLToPath(import.meta.url));
 
 /** 从起始目录向上找到最近的包根（含 package.json）。 */
