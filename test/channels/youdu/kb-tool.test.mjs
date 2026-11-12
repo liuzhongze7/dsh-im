@@ -160,7 +160,7 @@ test('installYouduKbTool returns false when tool APIs are absent', () => {
   assert.equal(installYouduKbTool({ tools: {}, systemPrompt: {}, on() {} }), false);
 });
 
-test('installYouduKbTool registers the tool + system prompt and clears on session disposal', () => {
+test('installYouduKbTool registers the tool without a system prompt and clears on session disposal', () => {
   const registered = [];
   const sections = [];
   const disposed = [];
@@ -172,9 +172,8 @@ test('installYouduKbTool registers the tool + system prompt and clears on sessio
   assert.equal(installYouduKbTool(ctx), true);
   assert.equal(registered.length, 1);
   assert.equal(registered[0].name, YOUDU_KB_TOOL);
-  assert.equal(sections.length, 1);
-  assert.equal(sections[0].name, 'dsh-im:youdu-kb');
-  assert.match(sections[0].text, /youdu_kb/);
+  assert.equal(registered[0].description, 'Query the current YouDu knowledge base. Use one operation at a time; read documents in one batch.');
+  assert.equal(sections.length, 0, 'the tool must not inject a system-prompt section');
   assert.equal(disposed.length, 1);
   bindYouduKbRunContext('sess-x', buildYouduKbRunContext(account, { senderId: 'u1' }));
   bindYouduKbRunContext('sess-y', buildYouduKbRunContext(account, { senderId: 'u2' }));
