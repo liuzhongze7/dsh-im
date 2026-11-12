@@ -58,6 +58,10 @@ import {
 import { YouduSettingsTab } from '../plugin-src/client/channels/youdu/index.js';
 import { YOUDU_ENDPOINTS } from '../plugin-src/client/channels/youdu/api.js';
 import {
+  IMessageAccountCard,
+  IMessageSettingsTab,
+} from '../plugin-src/client/channels/imessage/index.js';
+import {
   en,
   IM_LOCALE_NAMESPACE,
   localizeText,
@@ -68,6 +72,10 @@ import {
   GLOBAL_SETTINGS_RPC_CHANNEL,
   GlobalSettingsPanel,
 } from '../plugin-src/client/global-settings.js';
+import {
+  HOST_LANGUAGE_ENDPOINTS,
+  HOST_LANGUAGE_RPC_CHANNEL,
+} from '../plugin-src/client/interface-language.js';
 
 const STYLES_URL = new URL('../plugin-src/client/styles.js', import.meta.url);
 const FEISHU_STYLES_URL = new URL(
@@ -201,6 +209,7 @@ test('IM settings renders eleven IM channels plus the AI Office connector', asyn
     telegramRpcCall: async () => ({ ok: true, value: {} }),
     discordRpcCall: async () => ({ ok: true, value: {} }),
     whatsappRpcCall: async () => ({ ok: true, value: {} }),
+    imessageRpcCall: async () => ({ ok: true, value: {} }),
     officeRpcCall: async () => ({ ok: true, value: {} }),
   }));
 
@@ -267,6 +276,7 @@ test('IM settings renders eleven IM channels plus the AI Office connector', asyn
   assert.match(markup, />Discord</);
   assert.match(markup, />WhatsApp</);
   assert.match(markup, />有度</);
+  assert.match(markup, />iMessage</);
   assert.match(markup, />AI Office<\/strong><small class="dim-channelNote">（实验功能）<\/small>/);
   assert.match(markup, /dim-logoWeixin/);
   assert.match(markup, /dim-logoFeishu/);
@@ -278,9 +288,10 @@ test('IM settings renders eleven IM channels plus the AI Office connector', asyn
   assert.match(markup, /dim-logoDiscord/);
   assert.match(markup, /dim-logoWhatsapp/);
   assert.match(markup, /dim-logoYoudu/);
+  assert.match(markup, /dim-logoIMessage/);
   assert.match(markup, /dim-logoOffice/);
   assert.match(styles, /\.dim-logoFeishu svg \{ width: 28px; height: 28px; \}/);
-  assert.equal((markup.match(/role="tab"/g) ?? []).length, 12);
+  assert.equal((markup.match(/role="tab"/g) ?? []).length, 13);
   assert.equal((markup.match(/aria-selected="true"/g) ?? []).length, 1);
   assert.doesNotMatch(markup, /role="switch"|type="checkbox"/);
   assert.doesNotMatch(markup, /dim-chevron|扫码绑定<\/small>|扫码接入<\/small>/);
@@ -560,7 +571,7 @@ test('Feishu bot cards place the application identifier under the bot name', asy
     onCancelRemove() {},
   }));
 
-  assert.match(markup, /<h3[^>]*>今天是牢梁<\/h3><p[^>]*>cli_aaf4••••1234<\/p>/);
+  assert.match(markup, /<div class="dim-aliasName"><h3[^>]*>今天是牢梁<\/h3>[^]*?<\/div><p[^>]*>cli_aaf4••••1234<\/p>/);
   assert.match(markup, /data-im-channel-logo="feishu"/);
   assert.match(markup, /class="bxf-card bxf-botCard dim-botCard"/);
   assert.match(markup, /class="bxf-healthPill dim-botHealth"/);
@@ -1070,8 +1081,8 @@ test('all channel bot cards use the DingTalk card treatment', async () => {
   const styles = await readFile(STYLES_URL, 'utf8');
 
   assert.match(styles, /\.dim-panel \.dim-botCard \{[^}]*border-radius: 14px;[^}]*background: var\(--dsw-alias-bg-layer-1, #fff\);[^}]*box-shadow: 0 1px 2px/);
-  assert.match(styles, /\.dim-panel \.dim-botCardBody \{[^}]*padding: 12px;/);
-  assert.match(styles, /\.dim-panel \.dim-botCardTop \{[^}]*align-items: flex-start;[^}]*gap: 12px;/);
+  assert.match(styles, /\.dim-panel \.dim-botCardBody \{[^}]*padding: 12px 8px;/);
+  assert.match(styles, /\.dim-panel \.dim-botCardTop \{[^}]*align-items: flex-start;[^}]*gap: 6px;/);
   assert.match(styles, /\.dim-panel \.dim-botAvatar \{[^}]*width: 38px;[^}]*height: 38px;[^}]*border-radius: 11px;/);
   assert.match(styles, /\.dim-panel \.dim-botName h3 \{[^}]*font-size: 15px;/);
   assert.match(styles, /\.dim-panel \.dim-botHealthGroup \{[^}]*display: grid;[^}]*justify-items: end;[^}]*gap: 5px;/);
@@ -1182,9 +1193,15 @@ test('client registers one top-level bilingual IM settings section with a direct
     rpcCalls.push(args);
     return { ok: true, value: {} };
   };
+  const localeListeners = new Set();
   const ctx = {
     effect(install, label) {
       effects.push({ install, label });
+    },
+    on(event, listener) {
+      assert.equal(event, 'locale/change');
+      localeListeners.add(listener);
+      return () => localeListeners.delete(listener);
     },
     locale: {
       bind(namespace) {
@@ -1194,6 +1211,9 @@ test('client registers one top-level bilingual IM settings section with a direct
       register(namespace, value) {
         dictionaries.push({ namespace, value });
         return () => {};
+      },
+      getLocale() {
+        return { active: 'en', locales: [], revision: 1 };
       },
     },
     connection: { rpc: { call: rpcCall } },
@@ -1240,9 +1260,11 @@ test('client registers one top-level bilingual IM settings section with a direct
     const signal = new AbortController().signal;
     await injected.updateRpcCall('update.status', {}, signal);
     await injected.globalSettingsRpcCall('settings.inbound-ttl.get', {}, signal);
+    await injected.imessageRpcCall('connection.status', {}, signal);
     assert.deepEqual(rpcCalls, [
       ['/api', 'dsh-im/dsh-im', { method: 'update.status', payload: {} }, signal],
       ['/api', `dsh-im${GLOBAL_SETTINGS_RPC_CHANNEL}`, { method: 'settings.inbound-ttl.get', payload: {} }, signal],
+      ['/api', 'dsh-im/imessage', { method: 'connection.status', payload: {} }, signal],
     ]);
     assert.deepEqual(
       await injected.workspaceDirectoryPicker.listDirectory('/workspace/current', signal),
@@ -1258,6 +1280,22 @@ test('client registers one top-level bilingual IM settings section with a direct
       registrations[0].component,
       injected,
     ));
+    // A browser-derived interface locale reaches the Host only through this
+    // mirror, so the settings section must report it while it is mounted.
+    const mirrorEffect = effects.find((entry) =>
+      entry.label === 'im-settings: mirror the DSH interface language');
+    assert.ok(mirrorEffect, 'the interface language mirror is installed');
+    const before = rpcCalls.length;
+    const disposeMirror = mirrorEffect.install();
+    assert.deepEqual(rpcCalls.slice(before), [
+      ['/api', `dsh-im${HOST_LANGUAGE_RPC_CHANNEL}`, {
+        method: HOST_LANGUAGE_ENDPOINTS.mirror, payload: { locale: 'en' },
+      }, undefined],
+    ]);
+    assert.equal(localeListeners.size, 1);
+    disposeMirror();
+    assert.equal(localeListeners.size, 0);
+
     assert.match(markup, /Connecting DeepSeek Harness/);
     assert.match(markup, new RegExp(
       `class="dim-brandVersion">v${IM_PLUGIN_VERSION.replaceAll('.', '\\.')}<\\/span>`,
@@ -1380,6 +1418,7 @@ test('all nine channel settings and connected cards render English copy', () => 
       DiscordSettingsTab,
       WhatsappSettingsTab,
       YouduSettingsTab,
+      IMessageSettingsTab,
     ];
     const pageMarkup = pages.map((Component) =>
       renderToStaticMarkup(React.createElement(Component, { rpcCall }))).join('\n');
@@ -1396,6 +1435,7 @@ test('all nine channel settings and connected cards render English copy', () => 
     assert.match(pageMarkup, /Loading Discord bot status/);
     assert.match(pageMarkup, /Loading WhatsApp bot status/);
     assert.match(pageMarkup, /Loading the Youdu connection status/);
+    assert.match(pageMarkup, /Loading iMessage bot status/);
     assert.doesNotMatch(pageMarkup, /[\p{Script=Han}]/u);
 
     const sharedCardProps = {
@@ -1415,6 +1455,7 @@ test('all nine channel settings and connected cards render English copy', () => 
       React.createElement(TelegramAccountCard, { ...sharedCardProps, account }),
       React.createElement(DiscordAccountCard, { ...sharedCardProps, account }),
       React.createElement(WhatsappAccountCard, { ...sharedCardProps, account }),
+      React.createElement(IMessageAccountCard, { ...sharedCardProps, account }),
     ];
     const cardMarkup = cards.map(renderToStaticMarkup).join('\n');
     assert.match(cardMarkup, /Connected/);

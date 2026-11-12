@@ -325,48 +325,99 @@ class TelegramDeliveryStream {
   #providerMessageIds;
   #closed = false;
   #lastUpdate = null;
+  #lastBlock = null;
+  #keepalive = false;
+  #chain = Promise.resolve();
 
-  constructor({ update, finish, fail, providerMessageIds = [], presentation, logger }) {
+  constructor({
+    update,
+    finish,
+    fail,
+    providerMessageIds = [],
+    presentation,
+    logger,
+    keepalive = false,
+  }) {
     this.#update = update;
     this.#finish = finish;
     this.#fail = fail;
     this.#providerMessageIds = providerMessageIds;
     this.presentation = presentation;
     this.#logger = logger;
+    // Only short-lived carriers (e.g. the private-chat Rich Draft) need a
+    // keepalive refresh; editing a real placeholder message with identical
+    // content would be rejected by the platform.
+    this.#keepalive = keepalive === true;
   }
 
   get providerMessageIds() {
     return [...this.#providerMessageIds];
   }
 
-  async update(value) {
-    if (this.#closed) return undefined;
-    const block = createTextDeliveryBlock(value);
-    const key = `${block.format}:${block.text}`;
-    if (key === this.#lastUpdate) return undefined;
-    this.#lastUpdate = key;
-    try {
-      return await this.#update(block);
-    } catch (error) {
-      this.#logger.warn?.('[dsh-im:telegram] rich stream update failed:', error);
-      return undefined;
-    }
+  /** Whether this carrier is short-lived and wants a keepalive heartbeat. */
+  get keepalive() {
+    return this.#keepalive;
   }
 
-  async finish(value) {
-    if (this.#closed) throw new Error('Message stream is already closed');
-    this.#closed = true;
-    const result = await this.#finish(createTextDeliveryBlock(value));
-    this.#providerMessageIds.push(...(result?.providerMessageIds ?? []));
-    return result;
+  /** Serialize every write so an in-flight keepalive refresh can never land
+   *  after the final frame: finish()/fail() queue behind refresh()/update(). */
+  #enqueue(task) {
+    const run = this.#chain.then(task);
+    this.#chain = run.catch(() => undefined);
+    return run;
   }
 
-  async fail(text) {
-    if (this.#closed) return undefined;
-    this.#closed = true;
-    const result = await this.#fail(createTextDeliveryBlock(text, 'plain'));
-    this.#providerMessageIds.push(...(result?.providerMessageIds ?? []));
-    return result;
+  update(value) {
+    return this.#enqueue(async () => {
+      if (this.#closed) return undefined;
+      const block = createTextDeliveryBlock(value);
+      this.#lastBlock = block;
+      const key = `${block.format}:${block.text}`;
+      if (key === this.#lastUpdate) return undefined;
+      this.#lastUpdate = key;
+      try {
+        return await this.#update(block);
+      } catch (error) {
+        this.#logger.warn?.('[dsh-im:telegram] rich stream update failed:', error);
+        return undefined;
+      }
+    });
+  }
+
+  /** Re-send the most recent frame even when unchanged, to keep a short-lived
+   *  carrier (the private-chat Rich Draft) visible during long silent
+   *  stretches such as a running tool call. Serialized like update() so it
+   *  never overtakes a later finish(). No-op for carriers without keepalive. */
+  refresh() {
+    return this.#enqueue(async () => {
+      if (this.#closed || !this.#keepalive || !this.#lastBlock) return undefined;
+      try {
+        return await this.#update(this.#lastBlock);
+      } catch (error) {
+        this.#logger.warn?.('[dsh-im:telegram] rich stream refresh failed:', error);
+        return undefined;
+      }
+    });
+  }
+
+  finish(value) {
+    return this.#enqueue(async () => {
+      if (this.#closed) throw new Error('Message stream is already closed');
+      this.#closed = true;
+      const result = await this.#finish(createTextDeliveryBlock(value));
+      this.#providerMessageIds.push(...(result?.providerMessageIds ?? []));
+      return result;
+    });
+  }
+
+  fail(text) {
+    return this.#enqueue(async () => {
+      if (this.#closed) return undefined;
+      this.#closed = true;
+      const result = await this.#fail(createTextDeliveryBlock(text, 'plain'));
+      this.#providerMessageIds.push(...(result?.providerMessageIds ?? []));
+      return result;
+    });
   }
 
   cancel() {
@@ -473,10 +524,10 @@ export class TelegramBotClient {
 
         const fallback = await this.#sendPlain(target, text);
         const terminalText = fallback.deliveryOutcome === 'sent'
-          ? '回复已发送。'
+          ? t('回复已发送。')
           : fallback.deliveryOutcome === 'unknown'
-            ? '回复发送结果未能确认。'
-            : '消息发送失败，请稍后重试。';
+            ? t('回复发送结果未能确认。')
+            : t('消息发送失败，请稍后重试。');
         try {
           await this.#api.editMessageText({
             chatId: target.chatId,
@@ -663,15 +714,16 @@ export class TelegramBotClient {
         finish: (block) => this.#sendRich(target, block),
         fail: (block) => this.#sendPlain(target, block.text),
         presentation: 'telegram-rich-draft',
+        keepalive: true,
         logger: this.#logger,
       });
-      await stream.update(createTextDeliveryBlock('正在处理…', 'plain'));
+      await stream.update(createTextDeliveryBlock(t('正在处理…'), 'plain'));
       return stream;
     }
 
     const placeholder = await this.#api.sendMessage({
       chatId: target.chatId,
-      text: '正在处理…',
+      text: t('正在处理…'),
       replyToMessageId: target.replyToMessageId,
       messageThreadId: target.messageThreadId,
       signal: this.#signal,
@@ -772,6 +824,14 @@ export class TelegramRuntime {
   #abortController = null;
   #pollTask = null;
   #starting = null;
+  // True only while #start() is between "started connecting" and "ready",
+  // which is the one window a skipped refresh must be reconciled. A refresh on
+  // a never-started or already-stopped runtime stays a no-op.
+  #connecting = false;
+  // True when a language switch arrived while the runtime was connecting, so a
+  // refreshCommandMenu() had nothing to push. Reconciled once startup
+  // completes, so the platform always ends up with the latest language.
+  #menuDirty = false;
 
   constructor({
     config,
@@ -850,6 +910,7 @@ export class TelegramRuntime {
 
   async #start() {
     await this.stop();
+    this.#connecting = true;
     this.#status.startedAt = new Date().toISOString();
     this.#status.connectionState = 'connecting';
     this.#status.lastError = null;
@@ -878,14 +939,7 @@ export class TelegramRuntime {
         throw error;
       }
       try {
-        const commands = telegramCommandMenu(this.#commandCatalog);
-        // Both operations use the existing default scope and language. Sending
-        // the full list replaces old entries; an empty catalog clears that list.
-        if (commands.length > 0) {
-          await api.setMyCommands({ commands, signal: controller.signal });
-        } else {
-          await api.deleteMyCommands({ signal: controller.signal });
-        }
+        await this.#sendCommandMenu(api, controller.signal);
         await api.setChatMenuButton({ menuButton: COMMANDS_MENU_BUTTON, signal: controller.signal });
       } catch (error) {
         this.#logger.warn?.(
@@ -921,6 +975,21 @@ export class TelegramRuntime {
       this.#status.connectionState = 'connected';
       this.#status.lastCheckedAt = now;
       this.#status.lastConnectedAt = now;
+      // A language switch that landed while we were connecting was skipped by
+      // refreshCommandMenu(); re-send the menu now that the API is usable, so
+      // the platform ends with the latest language instead of the one that was
+      // current when #sendCommandMenu first ran.
+      if (this.#menuDirty) {
+        this.#menuDirty = false;
+        try {
+          await this.#sendCommandMenu(api, controller.signal);
+        } catch (error) {
+          this.#logger.warn?.(
+            `[dsh-im:telegram] bot ${this.#config.botId} command menu catch-up failed:`,
+            error,
+          );
+        }
+      }
       this.#pollTask = this.#poll(cursor, controller.signal);
       this.#pollTask.catch((error) => {
         if (controller.signal.aborted) return;
@@ -936,6 +1005,51 @@ export class TelegramRuntime {
       this.#status.lastError = error?.message ?? String(error);
       await this.stop();
       throw error;
+    } finally {
+      // Whether the bot is now ready or the attempt failed, the connecting
+      // window is over. A failed attempt also drops any unreconciled dirty
+      // flag: a later retry re-sends the menu from scratch in the current
+      // language anyway.
+      this.#connecting = false;
+      this.#menuDirty = false;
+    }
+  }
+
+  // Both operations use the existing default scope and language. Sending the
+  // full list replaces old entries; an empty catalog clears that list.
+  async #sendCommandMenu(api, signal) {
+    const commands = telegramCommandMenu(this.#commandCatalog);
+    if (commands.length > 0) await api.setMyCommands({ commands, signal });
+    else await api.deleteMyCommands({ signal });
+  }
+
+  /**
+   * Re-send the command menu in the current host message language.
+   *
+   * The menu Telegram shows is registered once per connection, so a language
+   * change would otherwise stay invisible until the bot reconnected. This
+   * replaces the text only: the chat menu button is owned by connect.
+   * @returns whether a connected bot accepted the refreshed menu.
+   */
+  async refreshCommandMenu() {
+    const api = this.#api;
+    const signal = this.#abortController?.signal;
+    if (!this.#status.ready || !api || !signal || signal.aborted) {
+      // A refresh during an in-progress connection must not be lost: mark the
+      // menu dirty so #start() reconciles it the moment the bot is ready. A
+      // never-started or stopped runtime stays a no-op, as before.
+      if (this.#connecting) this.#menuDirty = true;
+      return false;
+    }
+    try {
+      await this.#sendCommandMenu(api, signal);
+      return true;
+    } catch (error) {
+      this.#logger.warn?.(
+        `[dsh-im:telegram] bot ${this.#config.botId} command menu refresh failed:`,
+        error,
+      );
+      return false;
     }
   }
 

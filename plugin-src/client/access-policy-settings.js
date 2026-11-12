@@ -75,6 +75,11 @@ export const ACCESS_CHANNEL_DEFINITIONS = Object.freeze({
     groupUserLabel: '群成员账号或用户 ID',
     groupPlaceholder: '填群成员账号名或数字用户 ID',
   }),
+  imessage: Object.freeze({
+    directUserLabel: 'iMessage Chat GUID',
+    directPlaceholder: 'iMessage;+;chat123',
+    groupSupported: false,
+  }),
 });
 
 function clonePolicy(policy) {

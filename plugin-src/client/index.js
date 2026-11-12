@@ -14,6 +14,7 @@ import {
   WeixinLogoGlyph,
   WhatsappLogoGlyph,
   YouduLogoGlyph,
+  IMessageLogoGlyph,
 } from './channel-logos.js';
 import { DINGTALK_RPC_CHANNEL } from './channels/dingtalk/api.js';
 import { DingtalkSettingsTab } from './channels/dingtalk/index.js';
@@ -50,7 +51,14 @@ import { installWhatsappStyles } from './channels/whatsapp/styles.js';
 import { YouduSettingsTab } from './channels/youdu/index.js';
 import { YOUDU_RPC_CHANNEL } from './channels/youdu/api.js';
 import { installYouduStyles } from './channels/youdu/styles.js';
+import { IMESSAGE_RPC_CHANNEL } from './channels/imessage/api.js';
+import { IMessageSettingsTab } from './channels/imessage/index.js';
+import { installIMessageStyles } from './channels/imessage/styles.js';
 import { en, h, IM_LOCALE_NAMESPACE, setImTranslator, zh } from './i18n.js';
+import {
+  HOST_LANGUAGE_RPC_CHANNEL,
+  installInterfaceLanguageMirror,
+} from './interface-language.js';
 import { BotSettingsContext } from './channel-card-meta.js';
 import {
   DELIVERY_RPC_CHANNEL,
@@ -97,6 +105,7 @@ const CHANNELS = Object.freeze([
   { id: 'whatsapp', label: 'WhatsApp' },
   { id: 'wecomApp', label: '企业微信应用', note: '（实验功能）' },
   { id: 'youdu', label: '有度' },
+  { id: 'imessage', label: 'iMessage', note: '（实验功能）' },
   { id: 'office', label: 'AI Office', note: '（实验功能）' },
 ]);
 
@@ -152,6 +161,11 @@ function YouduLogo() {
     h(YouduLogoGlyph));
 }
 
+function IMessageLogo() {
+  return h('span', { className: 'dim-logo dim-logoIMessage', 'aria-hidden': 'true' },
+    h(IMessageLogoGlyph));
+}
+
 function OfficeLogo() {
   return h('span', { className: 'dim-logo dim-logoOffice', 'aria-hidden': 'true' },
     h(OfficeLogoGlyph));
@@ -169,6 +183,7 @@ function ChannelLogo({ channel }) {
   if (channel === 'discord') return h(DiscordLogo);
   if (channel === 'whatsapp') return h(WhatsappLogo);
   if (channel === 'youdu') return h(YouduLogo);
+  if (channel === 'imessage') return h(IMessageLogo);
   return h(OfficeLogo);
 }
 
@@ -192,6 +207,7 @@ export function IMSettingsTab({
   dingtalkRpcCall,
   discordRpcCall,
   feishuRpcCall,
+  imessageRpcCall,
   qqRpcCall,
   slackRpcCall,
   telegramRpcCall,
@@ -244,6 +260,7 @@ export function IMSettingsTab({
     updateRpcCall,
     deliveryRpcCall,
     globalSettingsRpcCall,
+    imessageRpcCall,
   }, {
     location: browserLocation,
     onRecovery: reportLoopbackRecovery,
@@ -254,6 +271,7 @@ export function IMSettingsTab({
     deliveryRpcCall,
     feishuRpcCall,
     globalSettingsRpcCall,
+    imessageRpcCall,
     officeRpcCall,
     qqRpcCall,
     reportLoopbackRecovery,
@@ -383,8 +401,10 @@ export function IMSettingsTab({
                         ? h(DiscordSettingsTab, { rpcCall: rpcCalls.discordRpcCall })
                         : active.id === 'whatsapp'
                           ? h(WhatsappSettingsTab, { rpcCall: rpcCalls.whatsappRpcCall })
-                          : active.id === 'youdu'
-                            ? h(YouduSettingsTab, { rpcCall: rpcCalls.youduRpcCall })
+                        : active.id === 'youdu'
+                          ? h(YouduSettingsTab, { rpcCall: rpcCalls.youduRpcCall })
+                        : active.id === 'imessage'
+                          ? h(IMessageSettingsTab, { rpcCall: rpcCalls.imessageRpcCall })
                           : h(OfficeSettingsTab, { rpcCall: rpcCalls.officeRpcCall }))),
     ),
   ));
@@ -397,6 +417,17 @@ export function apply(ctx) {
   );
   const t = ctx.locale.bind(IM_LOCALE_NAMESPACE);
   setImTranslator(t);
+
+  // The settings page is the only place that knows the locale the interface is
+  // actually rendered in: DSH stores nothing when it came from the browser's
+  // language list. Report it so bot messages follow the same language.
+  ctx.effect(
+    () => installInterfaceLanguageMirror(ctx, {
+      rpcCall: (endpoint, payload, signal) =>
+        callManagementRpc(ctx.connection, HOST_LANGUAGE_RPC_CHANNEL, endpoint, payload, signal),
+    }),
+    'im-settings: mirror the DSH interface language',
+  );
 
   ctx.effect(() => installSessionChannelLogos(), 'im-settings: Session channel logos');
 
@@ -412,6 +443,7 @@ export function apply(ctx) {
       installDiscordStyles(),
       installWhatsappStyles(),
       installYouduStyles(),
+      installIMessageStyles(),
       installOfficeStyles(),
       installImStyles(),
     ];
@@ -440,6 +472,8 @@ export function apply(ctx) {
     callManagementRpc(ctx.connection, WHATSAPP_RPC_CHANNEL, endpoint, payload, signal);
   const youduRpcCall = (endpoint, payload, signal) =>
     callManagementRpc(ctx.connection, YOUDU_RPC_CHANNEL, endpoint, payload, signal);
+  const imessageRpcCall = (endpoint, payload, signal) =>
+    callManagementRpc(ctx.connection, IMESSAGE_RPC_CHANNEL, endpoint, payload, signal);
   const slackRpcCall = (endpoint, payload, signal) =>
     callManagementRpc(ctx.connection, SLACK_RPC_CHANNEL, endpoint, payload, signal);
   const officeRpcCall = (endpoint, payload, signal) =>
@@ -474,6 +508,7 @@ export function apply(ctx) {
       weixinRpcCall,
       whatsappRpcCall,
       youduRpcCall,
+      imessageRpcCall,
       officeRpcCall,
       updateRpcCall,
       deliveryRpcCall,

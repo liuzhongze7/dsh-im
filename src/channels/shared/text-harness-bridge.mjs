@@ -144,6 +144,7 @@ export class TextHarnessBridge {
   #logger;
   #replyTimeoutMs;
   #signal;
+  #keepaliveIntervalMs;
   #queues = new Map();
   #pendingInteractions = new Map();
   #interactionKeys = new Map();
@@ -165,6 +166,7 @@ export class TextHarnessBridge {
     logger = console,
     replyTimeoutMs = 600_000,
     signal,
+    keepaliveIntervalMs = 4_000,
   }) {
     if (!descriptor?.key || !descriptor?.label) throw new TypeError('A channel descriptor is required');
     if (!bot || typeof bot.sendText !== 'function') throw new TypeError('A bot client is required');
@@ -179,6 +181,7 @@ export class TextHarnessBridge {
     this.#logger = logger;
     this.#replyTimeoutMs = replyTimeoutMs;
     this.#signal = signal;
+    this.#keepaliveIntervalMs = keepaliveIntervalMs;
     this.#deferred = createDeferredDeliveryCoordinator({ harness, state, signal, logger,
       deliver: (entry, outcome) => this.#deliverDeferredOutcome(entry, outcome),
     });
@@ -586,6 +589,15 @@ export class TextHarnessBridge {
     const batchSubmission = message.batchSubmission;
     let stream = null;
     let semanticStream = false;
+    // A keepalive heartbeat keeps short-lived carriers (e.g. Telegram's
+    // private-chat Rich Draft) visible during long silent stretches such as a
+    // running tool call. Declared outside the try so every exit path (including
+    // pre-prompt failures like image parsing) clears the timer.
+    let keepaliveTimer = null;
+    const stopKeepalive = () => {
+      if (keepaliveTimer !== null) clearInterval(keepaliveTimer);
+      keepaliveTimer = null;
+    };
     try {
       this.#signal?.throwIfAborted();
       if (message.kind === 'group' && message.addressed !== true) {
@@ -685,6 +697,29 @@ export class TextHarnessBridge {
         }));
         contextEnhanced = content !== originalContent;
       }
+      // Start the keepalive only after the inbound payload is ready, so a
+      // pre-prompt failure (image parsing, context building) cannot leave the
+      // timer running; the outermost finally below clears it on every path.
+      if (stream && stream.keepalive === true && typeof stream.refresh === 'function') {
+        let refreshing = false;
+        keepaliveTimer = setInterval(async () => {
+          // Skip ticks while the previous heartbeat is pending so redundant
+          // refreshes cannot queue ahead of the final answer on a slow network.
+          if (refreshing) return;
+          refreshing = true;
+          try {
+            await Promise.allSettled([
+              this.#bot.sendTyping?.(target),
+              stream.refresh(),
+            ]);
+          } catch {
+            // Keepalive is best-effort, including synchronous adapter failures.
+          } finally {
+            refreshing = false;
+          }
+        }, this.#keepaliveIntervalMs);
+        keepaliveTimer.unref?.();
+      }
       const { answer, artifacts = [] } = await askInWorkspaceSession({
         deferredDelivery: () => ({ coordinator: this.#deferred, target: this.#descriptor.key === 'whatsapp' ? { jid: target.jid, selfChat: target.selfChat } : target }),
         harness: this.#harness,
@@ -719,6 +754,7 @@ export class TextHarnessBridge {
           files: message.files,
         },
       });
+      stopKeepalive();
       if (batchSubmission) {
         this.#batches.complete(conversationKey, batchSubmission.token);
       }
@@ -805,6 +841,7 @@ export class TextHarnessBridge {
       }
       return delivery.receipt;
     } catch (error) {
+      stopKeepalive();
       const turnStopped = error?.code === 'turn-stopped';
       if (batchSubmission && turnStopped) {
         this.#batches.complete(conversationKey, batchSubmission.token);
@@ -875,6 +912,7 @@ export class TextHarnessBridge {
       }
       return error.deliveryReceipt;
     } finally {
+      stopKeepalive();
       await Promise.allSettled([
         this.#cancelPendingInteraction(conversationKey),
         this.#approvals.closeRoute(conversationKey),

@@ -9,7 +9,7 @@ import { Context, Service } from '@deepseek-ai/cordis';
 import { createImHostPlugin } from '../../../plugin-src/host/index.mjs';
 import { installProductionChannel } from '../../../plugin-src/host/channels/shared/startup.mjs';
 import { publicChannelInitializing, publicChannelStartupError } from '../../../plugin-src/host/channels/shared/startup-error.mjs';
-import { setImHostLanguage } from '../../../src/channels/shared/i18n.mjs';
+import { getImHostLanguage, setImHostLanguage } from '../../../src/channels/shared/i18n.mjs';
 
 const channels = await Promise.all([
   ['feishu', 'PluginConfigStore', 'plugin-config-store'],
@@ -86,17 +86,19 @@ for (const { id, apply, Store, api } of channels) {
     class ConfigStore extends Store {
       async load() { loading.resolve(); await gate.promise; return super.load(); }
     }
-    const fiber = f.start(apply, f.config(id, { rpcAuthority: 'trusted-host', internals: { ConfigStore } }));
+    const fiber = f.start(apply, f.config(id, { internals: { ConfigStore } }));
     try {
       await loading.promise;
       const route = f.routes.get(`/${id}`);
       assert.deepEqual(route.options.methods, ['POST']);
-      assert.equal((await route.handler('connection.status', {}, undefined, { host: 'trusted.example' })).error.code, `${id}-initializing`);
+      const lanHeaders = { host: '192.168.1.100:3080', origin: 'http://192.168.1.100:3080' };
+      assert.equal((await route.handler('connection.status', {}, undefined, lanHeaders)).error.code, `${id}-initializing`);
       assert.equal((await f.call(id)).error.code, `${id}-initializing`);
       assert.equal((await f.call(id, 'bot.delete', { confirm: true })).error.code, `${id}-initializing`);
       gate.resolve();
       await fiber.await();
       assert.equal((await f.call(id)).ok, true);
+      assert.equal((await route.handler('connection.status', {}, undefined, lanHeaders)).ok, true);
       assert.equal(f.routes.get(`/${id}`), route);
       // The original handler still validates payloads; do not coerce null to {}.
       assert.equal((await f.call(id, 'connection.status', null)).error.code, 'bad-request');
@@ -138,7 +140,9 @@ for (const { id, apply, Store, api } of channels) {
         else assert.match(message, /workspaces\.json/);
         return true;
       });
-      await assert.rejects(f.routes.get(`/${id}`).handler('connection.status', {}, undefined, { host: 'remote.example' }), /HTTP 403/);
+      assert.deepEqual(await f.routes.get(`/${id}`).handler('connection.status', {}, undefined, {
+        host: '192.168.1.100:3080', origin: 'http://192.168.1.100:3080',
+      }), result);
       assert.equal((await f.call(id, 'bot.bind-credentials', { token: 'must-not-be-saved' })).error.code, result.error.code);
       assert.equal((await f.call(id, 'connection.status', {}, AbortSignal.abort())).error.code, 'cancelled');
       await fiber.dispose();
@@ -192,7 +196,8 @@ test('the composed host serves other real channels while Feishu is loading and a
     return [key, f.config(id, { internals: { ConfigStore } })];
   }));
   const internals = Object.fromEntries([
-    'installUpdateRpc', 'installInboundTtlRpc', 'installDeliveryRpc', 'installDeliveryHttp', 'installSessionSyncCoordinator',
+    'installUpdateRpc', 'installInboundTtlRpc', 'installDeliveryRpc', 'installDeliveryHttp',
+    'installSessionSyncCoordinator', 'installHostLanguage', 'installHostLanguageRpc',
   ].map(name => [name, () => {}]));
   const fiber = f.start(createImHostPlugin(internals).apply, config);
   try {
@@ -239,6 +244,68 @@ test('startup rolls back prepared resources even when delivery cleanup fails', a
   assert.equal(closed, 1);
   assert.equal(unregistered, 1);
   assert.equal(f.routes.size, 0);
+});
+
+test('a host language change refreshes every started channel menu and releases on unload', async t => {
+  const previousLanguage = getImHostLanguage();
+  t.after(() => setImHostLanguage(previousLanguage));
+  setImHostLanguage('zh');
+  const f = await fixture(t);
+  const refreshes = [];
+  let failNext = false;
+  const fiber = f.start((ctx, config) => installProductionChannel(ctx, config, {
+    channel: 'telegram', rpcChannel: '/telegram',
+    createProduction: async () => ({
+      controller: {
+        async refreshCommandMenus() {
+          refreshes.push(getImHostLanguage());
+          if (failNext) {
+            failNext = false;
+            throw new Error('private-refresh-failure');
+          }
+          return refreshes.length;
+        },
+      },
+      async close() {},
+    }),
+    createHandler: () => async () => ({ ok: true, value: {} }),
+  }), {});
+  await fiber.await();
+  assert.deepEqual(refreshes, [], 'connecting a channel is not itself a language change');
+
+  setImHostLanguage('en');
+  await new Promise(setImmediate);
+  assert.deepEqual(refreshes, ['en']);
+
+  // A rejected refresh is contained: the next language change still refreshes.
+  failNext = true;
+  setImHostLanguage('zh');
+  await new Promise(setImmediate);
+  setImHostLanguage('en');
+  await new Promise(setImmediate);
+  assert.deepEqual(refreshes, ['en', 'zh', 'en']);
+
+  await fiber.dispose();
+  setImHostLanguage('zh');
+  await new Promise(setImmediate);
+  assert.equal(refreshes.length, 3, 'an unloaded channel no longer observes the language');
+});
+
+test('a channel without a platform-side command menu ignores language changes', async t => {
+  const previousLanguage = getImHostLanguage();
+  t.after(() => setImHostLanguage(previousLanguage));
+  setImHostLanguage('zh');
+  const f = await fixture(t);
+  const fiber = f.start((ctx, config) => installProductionChannel(ctx, config, {
+    channel: 'office', rpcChannel: '/office',
+    createProduction: async () => ({ controller: {}, async close() {} }),
+    createHandler: () => async () => ({ ok: true, value: {} }),
+  }), {});
+  await fiber.await();
+  setImHostLanguage('en');
+  await new Promise(setImmediate);
+  assert.equal((await f.call('office')).ok, true);
+  await fiber.dispose();
 });
 
 test('disposing a channel during initialization closes the late controller and removes its route', async t => {

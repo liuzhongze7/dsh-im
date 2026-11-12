@@ -50,9 +50,9 @@ test('Youdu host and client agree on the management RPC channel', () => {
   assert.equal(`/api/dsh-im${YOUDU_RPC_CHANNEL}`, '/api/dsh-im/youdu');
 });
 
-test('Youdu management RPC stays loopback-only by default', async () => {
+test('Youdu management RPC honors an explicit loopback-only restriction', async () => {
   const { ctx, captured } = captureRegistration();
-  installYouduRpc(ctx, controllerFixture(), {}, undefined);
+  installYouduRpc(ctx, controllerFixture(), {}, 'loopback');
   await assert.rejects(
     captured.handler(YOUDU_ENDPOINTS.status, {}, undefined, { host: 'remote.example' }),
     /HTTP 403/,

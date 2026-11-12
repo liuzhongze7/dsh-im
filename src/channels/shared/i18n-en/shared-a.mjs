@@ -57,8 +57,8 @@ export default {
     'This conversation exceeds the model context limit. Send /compact or /new, then try again.',
   '当前模型不存在或暂不可用。请发送 /models 查看并使用 /model 切换模型。':
     'The current model does not exist or is unavailable. Send /models and use /model to switch models.',
-  '当前模型不存在或不支持所选配置。请发送 /models，并使用 /model 重新选择。':
-    'The current model does not exist or does not support the selected settings. Send /models and use /model to choose again.',
+  '当前模型不存在或不支持所选配置。请发送 /models，再用 /model <序号> 为当前聊天重新选择。若要修改后续新会话的默认模型，请到 DSH 设置 → IM机器人 → 对应机器人卡片修改。':
+    'The current model does not exist or does not support the selected settings. Send /models, then use /model <index> to choose a model for the current conversation. To change the default model for new conversations, open DSH Settings → IM Bots → the corresponding bot card.',
   '当前模型不支持这类内容或所选配置。请调整内容、模型或推理等级后重试。':
     'The current model does not support this content or the selected settings. Adjust the content, model, or reasoning effort and try again.',
   '当前模型不支持所选配置。请切换模型或推理等级后重试。':
@@ -89,8 +89,8 @@ export default {
     'The Workspace or Session state just changed. Please send this message again.',
   '当前工作区不存在或暂不可用。请重新选择工作区后重试。':
     'The current Workspace does not exist or is unavailable. Select another Workspace and try again.',
-  '当前 Agent Preset 不存在或暂不可用。请发送 /presetlist 后重新选择。':
-    'The current Agent Preset does not exist or is unavailable. Send /presetlist and select another one.',
+  '当前 Agent Preset 无法使用。请发送 /presetlist 查看可用项，使用 /preset <序号或 ID> 重新选择，再发送 /new 创建新会话后重试。如需继续原会话，请联系管理员恢复原 Preset。':
+    'The current Agent Preset is unavailable. Send /presetlist to see available options, select one with /preset <index or ID>, then send /new to create a new Session and try again. To continue the original Session, ask an administrator to restore the original Preset.',
   '回复已经生成，但机器人没有发送权限。请联系管理员检查渠道权限或重新绑定机器人。':
     'The reply was generated, but the bot cannot send it. Ask an administrator to check channel permissions or reconnect the bot.',
   '回复已经生成，但当前渠道正在限流，暂时无法发送。请稍后重试。':

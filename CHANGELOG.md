@@ -20,6 +20,98 @@ This file records the notable changes in each dsh-im release. Its format follows
 - 修复有度渠道的回复与结果文件可能悄悄发不出去：回复原来只走「入站消息回调回传」（`respond_msg` 按该条消息的 `reqId` 回传），而服务端只为回调保留有限的上下文，长回合或繁忙会话里该上下文会失效，之后回复就永久丢失且没有任何日志——界面里助手答了，有度里什么都没有。现在 `respond_msg` 明确失败（回执报错或 5 秒回执超时）时自动改用按会话主动投递（`send_msg`，群聊带 `chatType=group`、私聊发给发消息的人，并用机器人自身账号做自问自答保护），降级次数、最近一次降级原因和彻底发不出去的原因记入渠道状态并写入日志，结果文件回传同样适用。
   Fixed Youdu replies and result files silently failing to send. A reply only used the inbound-callback path (`respond_msg` keyed by that message's `reqId`), and the server keeps only a bounded callback context: once it expires — a long turn or a busy group is enough — the reply was lost forever with no log at all, so the answer looked delivered while nothing reached Youdu. A failed `respond_msg` (error acknowledgement or five-second acknowledgement timeout) now falls back to direct conversation delivery (`send_msg`, with `chatType=group` for groups and the sender for direct chats, guarded against answering the bot itself); fallback counts, the latest fallback reason, and the reason an answer could not be delivered at all are recorded in the channel status and the log, and result-file delivery follows the same path.
 
+## [4.19.2] - 2026-09-11
+
+### Fixed / 修复
+
+- 机器人消息语言改为跟随 DeepSeek Harness 的界面语言，不再需要在 Host 配置中手动设置 `language`（[#185](https://github.com/xmanrui/dsh-im/issues/185)）。语言按「插件 `language` 配置 → DSH 语言设置项 → 设置页实际生效的界面语言」顺序解析，并把最后一项持久化到 `~/.dsh/integrations/dsh-im/interface-language.json`，因此界面语言来自浏览器语言列表、以及 Host 重启后尚无浏览器连接时，机器人仍以该语言回复。切换语言即时生效：无需重启 Host，Telegram 命令菜单也会重新下发，无需重连机器人。中文仍是兜底语言，已显式配置 `language` 的用户行为不变。
+  Bot message language now follows the DeepSeek Harness interface language instead of requiring a manual `language` entry in the Host config ([#185](https://github.com/xmanrui/dsh-im/issues/185)). It resolves from the plugin's `language` option, then DSH's Language setting, then the interface language the settings page is actually rendered in, and it persists that last layer to `~/.dsh/integrations/dsh-im/interface-language.json` — so a browser-derived interface language, and a Host restart before any browser connects, both keep answering in the reader's language. Switching applies live: no Host restart, and the Telegram command menu is re-sent without reconnecting the bot. Chinese remains the fallback, and an explicitly configured `language` behaves exactly as before.
+
+  感谢 [@grloper](https://github.com/grloper) 的贡献（[#189](https://github.com/xmanrui/dsh-im/pull/189)）。Thanks to [@grloper](https://github.com/grloper) for [#189](https://github.com/xmanrui/dsh-im/pull/189).
+
+- 界面语言回传在连接尚未就绪或 Host 持久化失败时自动重试，渠道启动前先完成语言解析；Telegram 连接期间发生的语言切换会在就绪后补发命令菜单。补齐 Telegram 思考占位、降级投递状态和 Discord 新线程提示的英文翻译。
+  Interface-language reporting retries when the Connection is not ready or Host persistence fails, and language resolution completes before channels start. Telegram catches up on command-menu changes made while connecting. Added English translations for Telegram thinking placeholders and fallback-delivery status, plus Discord's new-thread notice.
+
+### Known limitations / 已知限制
+
+- Telegram 客户端可能缓存旧的 `/` 命令菜单；重新打开客户端可刷新。输入框旁的 Menu 按钮由 Telegram 客户端自身语言决定，不随 DSH 语言设置改变。
+  Telegram clients may cache the previous `/` command menu; reopen the client to refresh it. The Menu button beside the input follows Telegram's own client language, not the DSH language setting.
+
+### Documentation / 文档
+
+- 新增 `scripts/verify-interface-language.mjs`：使用原版 DSH CLI 与独立临时 home，通过真实 `/api` 通道端到端验证界面语言解析顺序、即时切换、重启后行为与运维固定值；提供机器人 Token 时还会断言 Telegram 侧实际存储的命令菜单，并在结束后恢复原菜单。
+  Added `scripts/verify-interface-language.mjs`, an end-to-end check running the unmodified DSH CLI with an isolated temporary home. It asserts each interface-language resolution layer over the real `/api` carrier, live switching, restart behavior, and the operator pin. Given a bot token it also asserts the command menu Telegram itself stores, and restores the original menu afterwards.
+- 验证脚本在 HTTP 启动后有界等待语言接口就绪，避免插件异步加载期间的临时 `404` 导致重启检查误报失败。
+  The verification script waits for language-route readiness with a bounded timeout after HTTP startup, avoiding false restart failures from temporary `404` responses during asynchronous plugin activation.
+
+## [4.19.1] - 2026-09-11
+
+### Fixed / 修复
+
+- 飞书 Web／CLI 会话同步按真实 Session 和回合区分过程卡，修复连续提问共用卡片或答案被覆盖的问题；长时间思考或工具执行不再因静默 90 秒被误判完成，改为通过真实结束事件或历史记录确认收尾。
+  Feishu Web/CLI Session sync now separates process cards by Session and turn, preserving answers across consecutive prompts. Long reasoning or tool calls are no longer treated as completed after 90 seconds of silence; completion requires a real terminal event or a matching history record.
+- 同步协调器等待完整答案实际写入卡片后才跳过该目标的最终文字；卡片创建或最后更新失败时保留文字兜底，并按渠道、机器人和目标隔离，避免同名目标相互影响。普通 IM 回合在事件入队前记录归属，避免额外生成同步卡片。
+  The sync coordinator suppresses final text for a target only after its complete answer is successfully delivered to the card. Card creation or final-update failures retain text fallback, with channel, bot, and target isolation preventing same-named targets from interfering. IM-origin ownership is captured before event queuing to avoid unwanted mirror cards.
+- 飞书同步卡片每次成功更新后保存最新快照与内容块，插件重载后沿用原卡片，并从历史读取最终答案，保留已封存的长答案分片；恢复投递失败保留记录重试，成功后才清理。缺少回合信息的旧记录保留原样，不以空卡片覆盖已有内容。
+  Feishu sync cards persist their latest successful snapshot and content blocks. After plugin reload, recovery reuses the original card and reads the final answer from history while retaining sealed continuation chunks. Failed recovery keeps records for retry; cleanup follows successful delivery. Legacy records without turn information are left untouched instead of overwriting existing content with empty cards.
+
+### Changed / 变更
+
+- 优化机器人卡片的名称区域：截断的长名称支持悬停或键盘聚焦查看完整提示，提示避开视口边缘并可用 Escape 关闭；收紧横向间距，窄屏下名称与状态保持同一行。别名编辑图标默认更淡，悬停或聚焦时突出显示。
+  Improved bot-card name presentation: truncated names expose a full tooltip on hover or keyboard focus, kept within the viewport and dismissible with Escape. Tighter horizontal spacing keeps names and status on one row on narrow screens. Alias-edit icons are subtler at rest and highlighted on hover or focus.
+
+## [4.19.0] - 2026-09-10
+
+### Added / 新增
+
+- 十一个 IM 渠道的机器人卡片均支持自定义别名，点击名称旁的铅笔即可编辑；保存后立即显示，无需重启或重连，也不会清除会话绑定。原平台名称始终保留，清空别名或点击恢复即可还原；别名仅影响本机设置页，不会修改平台上的机器人名称（[#188](https://github.com/xmanrui/dsh-im/issues/188)）。
+  Bot cards across all eleven IM channels support custom aliases through the pencil beside the name. Changes appear immediately without restarting, reconnecting, or clearing Session bindings. The original platform name is retained and can be restored by clearing or resetting the alias; aliases affect only the local settings UI, not the bot's platform identity ([#188](https://github.com/xmanrui/dsh-im/issues/188)).
+- 已开启「会话双向同步」的飞书私聊可用实时过程卡展示当前 Session 中的 Web／CLI 回合，包含用户提问引用、思考与工具过程、长答案续卡和最终收尾；按投递目标避免重复发送最终文字，其他同步目标保留原有投递。感谢 [@C3H3-AI](https://github.com/C3H3-AI) 的贡献（[#186](https://github.com/xmanrui/dsh-im/pull/186)）。
+  Feishu DMs with two-way Session sync enabled can mirror Web/CLI turns in the current Session as live process cards, including the quoted question, reasoning and tool progress, continuation cards for long answers, and final sealing. Final-text deduplication is scoped to the mirrored delivery target, preserving delivery to other synced targets. Thanks to [@C3H3-AI](https://github.com/C3H3-AI) for [#186](https://github.com/xmanrui/dsh-im/pull/186).
+
+### Fixed / 修复
+
+- 修复机器人保存的模型已失效且聊天尚未绑定 Session 时，连 `/model` 也无法切换的问题：显式选模创建 Session 时不再继承旧模型与思考强度，仍在核验所选模型后绑定会话；普通消息和已有 Session 的行为保持不变（[#192](https://github.com/xmanrui/dsh-im/issues/192)）。
+  Fixed `/model` being blocked by an unavailable saved bot model when the chat has no bound Session. Explicit model selection creates the Session without inheriting the old model or reasoning level, then verifies the selection before binding. Normal messages and existing-Session behavior remain unchanged ([#192](https://github.com/xmanrui/dsh-im/issues/192)).
+- 同时识别旧版 `model-unavailable` 和新版 `session/model-unavailable` 错误，并补全中英文恢复指引：先用 `/models` 查询，再用 `/model <序号>` 修复当前聊天。此操作不会改写机器人的默认模型；若要修复之后新建的 Session，仍需在机器人卡片中更新默认模型。
+  Recognized both legacy `model-unavailable` and current `session/model-unavailable` errors with bilingual recovery guidance: list available models using `/models`, then recover the current chat with `/model <index>`. This does not rewrite the bot's default model; update the bot card to fix future Sessions as well.
+
+## [4.18.1] - 2026-09-10
+
+### Changed / 变更
+
+- IM 管理接口的默认 `rpcAuthority` 从 `loopback` 改为 `trusted-host`，沿用 Harness 的浏览器认证与 Host／Origin 信任检查，修复已认证的受信任局域网访问仍被插件拒绝的问题（[#187](https://github.com/xmanrui/dsh-im/issues/187)）。显式配置的 `loopback` 继续生效；插件更新和入站 TTL 管理仍始终仅限本机。需要保持原默认限制的用户可设置 `rpcAuthority: loopback`。
+  Changed the default IM management `rpcAuthority` from `loopback` to `trusted-host`, relying on Harness browser authentication and Host/Origin trust checks so authenticated, trusted LAN access is no longer rejected by the plugin ([#187](https://github.com/xmanrui/dsh-im/issues/187)). Explicit `loopback` settings remain effective, and plugin updates and inbound-TTL management stay local-only. Set `rpcAuthority: loopback` to retain the previous default restriction.
+
+### Fixed / 修复
+
+- Telegram 私聊 Rich Draft 在长时间思考或工具执行期间定时刷新，避免临时预览过期；慢网络下跳过尚未完成的心跳，发送最终答案或错误提示前停止调度，避免重复刷新积压拖延收尾。感谢 [@geekyfoxlab](https://github.com/geekyfoxlab) 的贡献（[#175](https://github.com/xmanrui/dsh-im/pull/175)）。
+  Telegram private-chat Rich Drafts stay refreshed during long reasoning or tool calls. Pending heartbeats skip redundant ticks on slow networks, and scheduling stops before final or error delivery so repeated refreshes cannot delay completion. Thanks to [@geekyfoxlab](https://github.com/geekyfoxlab) for [#175](https://github.com/xmanrui/dsh-im/pull/175).
+
+### Documentation / 文档
+
+- 更新中英文管理访问说明，并新增使用原版 DSH、独立临时 profile 和空机器人配置的 HTTP 集成验证脚本，覆盖登录、Host／Origin 检查、默认访问和显式回环限制。该测试经回环 TCP 模拟局域网 Host／Origin，不替代跨设备浏览器验收。
+  Updated bilingual management-access guidance and added an HTTP integration check using unmodified DSH, an isolated temporary profile, and no bot credentials. It covers login, Host/Origin checks, default access, and explicit loopback restrictions. LAN Host/Origin values are exercised over loopback TCP; this does not replace a browser check from another device.
+
+## [4.18.0] - 2026-09-09
+
+### Added / 新增
+
+- 新增 macOS 原生 iMessage 渠道，通过本机 Messages.app 收发文本私聊，无需 BlueBubbles 或第三方网关；支持权限检查、连接管理、独立联系人会话和主动文字投递。每个 macOS 用户仅提供一个本机身份，需手动授予完全磁盘访问和 Messages 自动化权限；首版不支持群聊、图片或附件。接入说明见 [iMessage 指南](docs/imessage.md)。感谢 [@cherryFloris](https://github.com/cherryFloris) 的贡献（[#183](https://github.com/xmanrui/dsh-im/pull/183)）。
+  Added a native macOS iMessage channel for text DMs through the local Messages.app, without BlueBubbles or a third-party gateway. It includes permission checks, connection management, separate contact Sessions, and proactive text delivery. Each macOS user has one local identity and must manually grant Full Disk Access and Messages automation permissions; the MVP does not support groups, images, or attachments. See the [iMessage guide](docs/imessage.md). Thanks to [@cherryFloris](https://github.com/cherryFloris) for [#183](https://github.com/xmanrui/dsh-im/pull/183).
+
+### Fixed / 修复
+
+- iMessage 支持同一 Apple ID 自聊指令，只处理已投递回本机的接收副本；回复统一携带持久化的 `🤖 DSH` 标记并跳过机器人回声，避免重复处理和重启后的回复循环。首次启用从最新消息游标开始，避免回放旧消息。
+  iMessage supports self-chat commands under the same Apple ID by processing only incoming copies delivered to the Mac. Replies carry a persistent `🤖 DSH` marker, and bot echoes are ignored to prevent duplicate processing and reply loops after restarts. First-time activation starts at the latest message cursor instead of replaying old messages.
+- 正确识别斜杠分隔的 Agent Preset 错误码，保留安全诊断原因，并在现代 Harness 适配层透传直接返回的 DSH RemoteError；中英文提示明确说明通过 `/presetlist`、`/preset` 和 `/new` 重选并新建会话，或恢复原 Preset 后继续旧会话。
+  Recognized slash-separated Agent Preset error codes, retained safe diagnostic reasons, and preserved direct DSH RemoteErrors through the modern Harness adapter. Bilingual guidance explains how to select an available preset with `/presetlist` and `/preset`, then start a new Session with `/new`, or restore the original preset to continue an existing Session.
+
+### Known limitations / 已知限制
+
+- 原版 DSH `0.1.5-alpha.1` 恢复旧会话时仍可能将 Preset 错误包装为 `gateway/internal`，导致插件无法按结构化错误码分类；企业微信相关日志的附加诊断仍有缺口。本版不宣称完整解决 [#184](https://github.com/xmanrui/dsh-im/issues/184)。
+  Unmodified DSH `0.1.5-alpha.1` can still wrap preset failures during existing-Session recovery as `gateway/internal`, preventing classification from structured error codes. Related WeCom logs still lack some diagnostic details. This release does not fully resolve [#184](https://github.com/xmanrui/dsh-im/issues/184).
+
 ## [4.17.1] - 2026-09-09
 
 ### Fixed / 修复
@@ -866,7 +958,12 @@ This file records the notable changes in each dsh-im release. Its format follows
 - 改进 npm 发布包结构，保留 CLI 入口并避免安装脚本拦截。
   Improved npm package contents to preserve the CLI entry point and avoid install-script blocking.
 
-[Unreleased]: https://github.com/xmanrui/dsh-im/compare/v4.17.1...HEAD
+[Unreleased]: https://github.com/xmanrui/dsh-im/compare/v4.19.2...HEAD
+[4.19.2]: https://github.com/xmanrui/dsh-im/compare/v4.19.1...v4.19.2
+[4.19.1]: https://github.com/xmanrui/dsh-im/compare/v4.19.0...v4.19.1
+[4.19.0]: https://github.com/xmanrui/dsh-im/compare/v4.18.1...v4.19.0
+[4.18.1]: https://github.com/xmanrui/dsh-im/compare/v4.18.0...v4.18.1
+[4.18.0]: https://github.com/xmanrui/dsh-im/compare/v4.17.1...v4.18.0
 [4.17.1]: https://github.com/xmanrui/dsh-im/compare/v4.17.0...v4.17.1
 [4.17.0]: https://github.com/xmanrui/dsh-im/compare/v4.16.1...v4.17.0
 [4.16.1]: https://github.com/xmanrui/dsh-im/compare/v4.16.0...v4.16.1
