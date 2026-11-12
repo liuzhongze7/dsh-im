@@ -36,7 +36,8 @@ function safeEnd(window, index) {
 
 /**
  * 把文本切成多条都不超过 `limit` 的消息；未超限时原样返回单条。
- * 切点尽量落在段落/换行/空白处，不保证保留 markdown 代码块完整（宁可断开也不丢内容）。
+ * 切点尽量落在段落/换行/空白处，空白留在前一片末尾，因此 `chunks.join('') === 原文`；
+ * 不保证保留 markdown 代码块完整（宁可断开也不丢内容）。
  */
 export function splitTextForYoudu(text, limit = YOUDU_TEXT_CHUNK_LIMIT) {
   const source = typeof text === 'string' ? text : String(text ?? '');
@@ -50,12 +51,11 @@ export function splitTextForYoudu(text, limit = YOUDU_TEXT_CHUNK_LIMIT) {
       break;
     }
     const window = source.slice(start, start + limit);
-    const end = safeEnd(window, pickBreak(window));
-    const chunk = window.slice(0, end).replace(/\s+$/u, '');
-    if (chunk) chunks.push(chunk);
+    // pickBreak 已经把断点所在的那段空白留在窗口内；这里不再裁掉它，
+    // 否则逐条拼接会丢掉词间空格、换行等原文内容。
+    const end = Math.max(1, safeEnd(window, pickBreak(window)));
+    chunks.push(window.slice(0, end));
     start += end;
-    // 断点后的空行/换行不再重复发送，避免每条消息都以空行开头。
-    while (start < source.length && (source[start] === '\n' || source[start] === '\r')) start += 1;
   }
   return chunks.length ? chunks : [source];
 }
