@@ -55,6 +55,8 @@ import {
   WhatsappAccountCard,
   WhatsappSettingsTab,
 } from '../plugin-src/client/channels/whatsapp/index.js';
+import { YouduSettingsTab } from '../plugin-src/client/channels/youdu/index.js';
+import { YOUDU_ENDPOINTS } from '../plugin-src/client/channels/youdu/api.js';
 import {
   IMessageAccountCard,
   IMessageSettingsTab,
@@ -219,7 +221,10 @@ test('IM settings renders eleven IM channels plus the AI Office connector', asyn
     `<div class="dim-brandHeading"><strong class="dim-brandName">DSH-IM<\\/strong><span class="dim-brandVersion">v${packageVersion.replaceAll('.', '\\.')}<\\/span><\\/div>`,
   ));
   assert.doesNotMatch(markup, /dim-versionTooltip|当前版本/);
-  assert.doesNotMatch(markup, /dim-brandLogo|<img/);
+  assert.doesNotMatch(markup, /dim-brandLogo/);
+  // 有度渠道使用官方位图品牌图标（其余渠道均为内联 SVG），因此这里只约束数量与来源。
+  assert.equal((markup.match(/<img/g) ?? []).length, 1);
+  assert.match(markup, /<img[^>]+src="data:image\/png;base64,[^"]+"[^>]*data-im-channel-logo="youdu"/);
   assert.match(markup, /href="https:\/\/github\.com\/xmanrui\/dsh-im"/);
   assert.match(markup, /target="_blank"/);
   assert.match(markup, /rel="noopener noreferrer"/);
@@ -270,6 +275,7 @@ test('IM settings renders eleven IM channels plus the AI Office connector', asyn
   assert.match(markup, />Telegram</);
   assert.match(markup, />Discord</);
   assert.match(markup, />WhatsApp</);
+  assert.match(markup, />有度</);
   assert.match(markup, />iMessage</);
   assert.match(markup, />AI Office<\/strong><small class="dim-channelNote">（实验功能）<\/small>/);
   assert.match(markup, /dim-logoWeixin/);
@@ -281,10 +287,11 @@ test('IM settings renders eleven IM channels plus the AI Office connector', asyn
   assert.match(markup, /dim-logoTelegram/);
   assert.match(markup, /dim-logoDiscord/);
   assert.match(markup, /dim-logoWhatsapp/);
+  assert.match(markup, /dim-logoYoudu/);
   assert.match(markup, /dim-logoIMessage/);
   assert.match(markup, /dim-logoOffice/);
   assert.match(styles, /\.dim-logoFeishu svg \{ width: 28px; height: 28px; \}/);
-  assert.equal((markup.match(/role="tab"/g) ?? []).length, 12);
+  assert.equal((markup.match(/role="tab"/g) ?? []).length, 13);
   assert.equal((markup.match(/aria-selected="true"/g) ?? []).length, 1);
   assert.doesNotMatch(markup, /role="switch"|type="checkbox"/);
   assert.doesNotMatch(markup, /dim-chevron|扫码绑定<\/small>|扫码接入<\/small>/);
@@ -1410,6 +1417,7 @@ test('all nine channel settings and connected cards render English copy', () => 
       TelegramSettingsTab,
       DiscordSettingsTab,
       WhatsappSettingsTab,
+      YouduSettingsTab,
       IMessageSettingsTab,
     ];
     const pageMarkup = pages.map((Component) =>
@@ -1426,6 +1434,7 @@ test('all nine channel settings and connected cards render English copy', () => 
     assert.match(pageMarkup, /Loading Telegram bot status/);
     assert.match(pageMarkup, /Loading Discord bot status/);
     assert.match(pageMarkup, /Loading WhatsApp bot status/);
+    assert.match(pageMarkup, /Loading the Youdu connection status/);
     assert.match(pageMarkup, /Loading iMessage bot status/);
     assert.doesNotMatch(pageMarkup, /[\p{Script=Han}]/u);
 
@@ -1473,5 +1482,136 @@ test('all nine channel settings and connected cards render English copy', () => 
     assert.doesNotMatch(qqRetryMarkup, /[\p{Script=Han}]/u);
   } finally {
     setImTranslator(null);
+  }
+});
+
+function youduStatusSnapshot() {
+  return {
+    revision: 7,
+    bots: [{
+      botId: 'yd_1a7d8037a6758b93fe17c1cc',
+      sourceBotId: 'oc86aed821c86345e4',
+      ownerUserId: '*',
+      connected: true,
+      state: 'connected',
+      bot: { name: '有度机器人', wsHostMasked: 'internal•••' },
+      health: { summary: '有度 WebSocket 长连接运行正常' },
+    }],
+    totals: { configured: 1, connected: 1 },
+  };
+}
+
+test('a failed Youdu status read shows the error view with a retry instead of loading forever', async () => {
+  let failStatus = true;
+  const rpcCall = async (endpoint) => {
+    if (endpoint === YOUDU_ENDPOINTS.status) {
+      if (failStatus) throw new Error('读取有度连接状态失败');
+      return { ok: true, value: youduStatusSnapshot() };
+    }
+    throw new Error(`Unexpected endpoint: ${endpoint}`);
+  };
+
+  let renderer;
+  let previousWindow;
+  try {
+    previousWindow = globalThis.window;
+    globalThis.window = { setInterval, clearInterval };
+    await act(async () => {
+      renderer = create(React.createElement(YouduSettingsTab, { rpcCall }));
+      await flushTasks();
+    });
+
+    const pageText = () => nodeText(renderer.toJSON());
+    assert.match(pageText(), /无法读取有度机器人/);
+    assert.match(pageText(), /读取有度连接状态失败/);
+    assert.doesNotMatch(pageText(), /正在读取有度连接状态/);
+    assert.ok(findButton(renderer, '重新读取'));
+
+    failStatus = false;
+    await act(async () => {
+      findButton(renderer, '重新读取').props.onClick();
+      await flushTasks();
+    });
+    assert.equal(renderer.root.findAllByProps({ className: 'dim-botList' }).length, 1);
+    assert.doesNotMatch(pageText(), /无法读取有度机器人/);
+  } finally {
+    await act(async () => renderer?.unmount());
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+});
+
+test('unmounting the Youdu page aborts the in-flight status read', async () => {
+  const signals = [];
+  let settleStatus;
+  const rpcCall = async (endpoint, payload, signal) => {
+    signals.push(signal);
+    if (endpoint !== YOUDU_ENDPOINTS.status) throw new Error(`Unexpected endpoint: ${endpoint}`);
+    return new Promise((resolve) => { settleStatus = resolve; });
+  };
+
+  let renderer;
+  await act(async () => {
+    renderer = create(React.createElement(YouduSettingsTab, { rpcCall }));
+    await flushTasks();
+  });
+  assert.equal(signals.length, 1, '首屏只发起一次状态读取');
+  assert.equal(signals[0]?.aborted, false);
+
+  await act(async () => renderer.unmount());
+  assert.equal(signals[0]?.aborted, true, '卸载时必须中止在途请求');
+
+  // 迟到的响应不得再写状态，也不得抛错。
+  await act(async () => {
+    settleStatus?.({ ok: true, value: youduStatusSnapshot() });
+    await flushTasks();
+  });
+});
+
+test('a failed Youdu background refresh keeps the list and surfaces a retryable notice', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval', 'setTimeout'] });
+  const previousWindow = globalThis.window;
+  globalThis.window = { setInterval: globalThis.setInterval, clearInterval: globalThis.clearInterval };
+  let failStatus = false;
+  const rpcCall = async (endpoint) => {
+    if (endpoint !== YOUDU_ENDPOINTS.status) throw new Error(`Unexpected endpoint: ${endpoint}`);
+    if (failStatus) throw new Error('后台刷新失败');
+    return { ok: true, value: youduStatusSnapshot() };
+  };
+
+  let renderer;
+  try {
+    await act(async () => {
+      renderer = create(React.createElement(YouduSettingsTab, { rpcCall }));
+      await flushTasks();
+    });
+    assert.equal(renderer.root.findAllByProps({ className: 'dim-botList' }).length, 1);
+
+    failStatus = true;
+    await act(async () => {
+      t.mock.timers.tick(15_000);
+      await flushTasks();
+    });
+
+    const pageText = () => nodeText(renderer.toJSON());
+    assert.match(pageText(), /状态刷新失败/);
+    assert.match(pageText(), /后台刷新失败/);
+    assert.equal(
+      renderer.root.findAllByProps({ className: 'dim-botList' }).length,
+      1,
+      '静默刷新失败时必须保留已有机器人列表',
+    );
+
+    failStatus = false;
+    await act(async () => {
+      findButton(renderer, '立即重试').props.onClick();
+      await flushTasks();
+    });
+    assert.doesNotMatch(pageText(), /状态刷新失败/);
+  } finally {
+    await act(async () => renderer?.unmount());
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+    t.mock.timers.reset();
   }
 });

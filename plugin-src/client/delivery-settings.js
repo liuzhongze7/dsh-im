@@ -115,6 +115,22 @@ const CHANNEL_DEFINITIONS = Object.freeze({
       group: [{ key: 'jid', label: '群 JID', placeholder: '1234567890@g.us' }],
     },
   },
+  youdu: {
+    label: '有度',
+    kinds: [{ value: 'user', label: '私聊' }, { value: 'group', label: '群聊' }],
+    fields: {
+      user: [{
+        key: 'chatId',
+        label: '用户 ID 或昵称',
+        placeholder: '填昵称或账号名（如 刘钟泽、lewis.liu），或数字用户 ID；名字要求机器人已认识对方',
+      }],
+      group: [{
+        key: 'chatId',
+        label: '群 ID 或群名',
+        placeholder: '填群名（如 研发群），或群 ID 例如 {0798E01E-CD68-42BB-813C-EB51593BB0F5}',
+      }],
+    },
+  },
   imessage: {
     label: 'iMessage',
     kinds: [{ value: 'user', label: '私聊' }],

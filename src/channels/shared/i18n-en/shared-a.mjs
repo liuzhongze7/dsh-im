@@ -176,6 +176,32 @@ export default {
     'The {label} connection is not ready. The plugin will retry automatically',
   '{label}连接当前离线': 'The {label} connection is currently offline',
   '已开启新会话。请发送你的问题。': 'A new session has started. Please send your question.',
+  '用法：/context 或 /context clear': 'Usage: /context or /context clear',
+  '/context  查看本群上下文缓存状态': '/context  Show this group\'s context cache',
+  '/context clear  清空本群待带入的消息': '/context clear  Drop the messages held for this group',
+  '/new  开启一个全新会话（群聊里同时清空待带入的上下文）':
+    '/new  Start a new session (group chats also drop their held context)',
+  '群聊上下文缓存只在群聊里生效。': 'The group chat context cache only applies to group chats.',
+  '本群上下文缓存：开启 · 最近 {limit} 条': 'Group context cache: on · last {limit} messages',
+  '本群上下文缓存：未开启': 'Group context cache: off',
+  '待带入的消息：{count} 条': 'Messages held for context: {count}',
+  '本轮可带入的群附件：{files} 个': 'Group attachments offered on the next mention: {files}',
+  '正在下载的群附件：{count} 个（完成后本轮即可带入）':
+    'Group attachments still downloading: {count} (they join this turn once finished)',
+  '附件永久保留，可随时按路径取用。':
+    'Attachments are kept forever and can be read by path at any time.',
+  '附件按保留期清理（当前 {hours} 小时）。':
+    'Attachments are cleaned up after {hours} hours.',
+  '发送 /context clear 清空本群待带入的消息。':
+    'Send /context clear to drop the messages currently held for this group.',
+  '已清空本群待带入的上下文（{count} 条消息）。':
+    'Cleared the group context held for this chat ({count} messages).',
+  '已下载的群附件仍保留，按保留期自动清理。':
+    'Downloaded group attachments stay on disk and age out by retention.',
+  '已开启新会话，并清空本群待带入的上下文（{count} 条消息）。':
+    'A new session has started and the group context was cleared ({count} messages).',
+  '已开启新会话。请 @ 机器人发送你的问题。':
+    'A new session has started. Mention the bot to send your question.',
   '正在使用{name}…': 'Using {name}…',
   '已停止。': 'Stopped.',
   '请用文字回答当前问题。': 'Please answer the current question with text.',

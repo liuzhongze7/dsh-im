@@ -33,6 +33,7 @@ const required = [
   'plugin-src/client/i18n.js',
   'plugin-src/client/update-panel.js',
   'plugin-src/client/context-enhancement.js',
+  'plugin-src/client/group-history.js',
   'plugin-src/host/update-service.mjs',
   'plugin-src/host/update-runtime.mjs',
   'plugin-src/host/update-rpc.mjs',
@@ -57,6 +58,8 @@ const required = [
   'src/channels/whatsapp/whatsapp-runtime.mjs',
   'src/channels/whatsapp/whatsapp-web-session.mjs',
   'src/channels/shared/context-enhancement.mjs',
+  'src/channels/shared/group-history.mjs',
+  'src/channels/shared/group-context-files.mjs',
 ];
 await Promise.all(required.map((path) => access(resolve(root, path))));
 
@@ -142,25 +145,39 @@ if (client.includes('settings.plugins.tab') || clientSources.includes('settings.
   throw new Error('client source or bundle still contains the legacy Plugins-tab settings entry');
 }
 // Connections still have no channel-enable toggle. Checkable inputs are owned
-// only by the shared context editor and the saved-target Session sync row.
-// The context editor contains one switch template and one mapped field-input
+// only by the shared context editor, the Youdu group chat context editor, and the
+// saved-target Session sync row. The context editor contains one switch template
+// and one mapped field-input template; the group context editor adds one switch
 // template; the delivery target adds one ordinary checkbox template.
 const contextEditorSource = await readFile(resolve(root, 'plugin-src/client/context-enhancement.js'), 'utf8');
+const groupHistoryEditorSource = await readFile(resolve(root, 'plugin-src/client/group-history.js'), 'utf8');
 const deliverySettingsSource = await readFile(resolve(root, 'plugin-src/client/delivery-settings.js'), 'utf8');
 const otherClientSources = clientSources
   .replace(contextEditorSource, '')
+  .replace(groupHistoryEditorSource, '')
   .replace(deliverySettingsSource, '');
 if (/role:\s*["']switch|type:\s*["']checkbox/.test(otherClientSources)
+  || (groupHistoryEditorSource.match(/role:\s*["']switch["']/g) ?? []).length !== 1
+  || (groupHistoryEditorSource.match(/type:\s*["']checkbox["']/g) ?? []).length !== 1
   || (deliverySettingsSource.match(/type:\s*["']checkbox["']/g) ?? []).length !== 1
   || /role:\s*["']switch["']/u.test(deliverySettingsSource)
-  || (client.match(/role:\s*["']switch["']/g) ?? []).length !== 1
-  || (client.match(/type:\s*["']checkbox["']/g) ?? []).length !== 3) {
-  throw new Error('checkable inputs must be limited to context enhancement and Session sync');
+  || (client.match(/role:\s*["']switch["']/g) ?? []).length !== 2
+  || (client.match(/type:\s*["']checkbox["']/g) ?? []).length !== 4) {
+  throw new Error('checkable inputs must be limited to context enhancement, group chat context, and Session sync');
 }
 for (const marker of ['bot.context-enhancement.set', '<dsh_im_source>', '<dsh_im_source_guidance>']) {
   if (!host.includes(marker) || !client.includes(marker)) {
     throw new Error(`context-enhancement marker missing from Host or Client bundle: ${marker}`);
   }
+}
+// 群聊上下文：端点两端都要有；注入块只由 Host 侧的 bridge 组装（客户端会摇掉未使用的常量）。
+for (const marker of ['bot.group-history.set']) {
+  if (!host.includes(marker) || !client.includes(marker)) {
+    throw new Error(`group chat context RPC endpoint missing from Host or Client bundle: ${marker}`);
+  }
+}
+if (!host.includes('<dsh_im_group_history')) {
+  throw new Error('host bundle does not contain the group chat context block');
 }
 if (!client.includes('container-type: inline-size')
   || !client.includes('@container (max-width: 680px)')) {

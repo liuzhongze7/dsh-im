@@ -1,0 +1,1654 @@
+import { askInWorkspaceSession } from '../shared/workspace-session.mjs';
+import {
+  setLastMessageFailure,
+  clearLastMessageFailure,
+  messageFailureText,
+} from '../shared/message-failure.mjs';
+import {
+  prefetchInboundFiles,
+  hasInboundFiles,
+  inboundFileUserMessage,
+} from '../shared/inbound-file.mjs';
+import {
+  hasInboundImages,
+  imagePromptUserMessage,
+  imagePromptDiagnostic,
+} from '../shared/image-prompt.mjs';
+import {
+  hasReplyReference,
+  promptContentForInboundMessage,
+} from '../shared/semantic/reply-reference.mjs';
+import {
+  deliverOutboundArtifacts,
+} from '../shared/semantic/artifact-delivery.mjs';
+import { runWorkspaceCommand } from '../shared/workspace-command.mjs';
+import { runCompactCommand } from '../shared/compact-command.mjs';
+import {
+  isHistoryCommand,
+  runHistoryCommand,
+} from '../shared/history-command.mjs';
+import {
+  isControlCommand,
+  runControlCommand,
+} from '../shared/control-command.mjs';
+import {
+  isModelCommand,
+  runModelCommand,
+} from '../shared/model-command.mjs';
+import {
+  isPresetCommand,
+  runPresetCommand,
+} from '../shared/preset-command.mjs';
+import {
+  BatchInputManager,
+  batchInputBusyMessage,
+  batchInputGroupUnsupportedMessage,
+  isBatchInputCommand,
+} from '../shared/batch-input.mjs';
+import { HarnessApprovalQueue } from '../shared/harness-approval.mjs';
+import {
+  harnessAnswerForQuestion,
+  harnessQuestionText,
+  validHarnessQuestion,
+} from '../shared/harness-question.mjs';
+import {
+  captureContextEnhancement,
+  enhanceContextContent,
+} from '../shared/context-enhancement.mjs';
+import {
+  COMMAND_PERMISSION_DENIED_MESSAGE,
+  evaluateInboundAccess,
+} from '../shared/inbound-access.mjs';
+import { isSharedLocalCommand } from '../shared/command-permission.mjs';
+import {
+  appendGroupHistoryContext,
+  createGroupHistory,
+  DEFAULT_GROUP_HISTORY_CONFIG,
+  DISABLED_GROUP_HISTORY_CONFIG,
+  formatGroupContextFilesBlock,
+  formatGroupHistoryBlock,
+  formatGroupHistoryFilesBlock,
+  groupHistoryActive,
+  normalizeGroupHistoryConfig,
+} from '../shared/group-history.mjs';
+import {
+  DEFAULT_GROUP_CONTEXT_RECENT_LIMIT,
+  DEFAULT_GROUP_CONTEXT_RETENTION_HOURS,
+} from '../shared/group-context-files.mjs';
+import {
+  groupContextClearedText,
+  groupContextDirectText,
+  groupContextResetText,
+  groupContextStatusText,
+  groupContextUsageText,
+  isGroupContextCommand,
+  parseGroupContextCommand,
+} from '../shared/context-command.mjs';
+import { evaluateGroupAccess } from './group-access.mjs';
+import { t } from '../shared/i18n.mjs';
+import { prepareMessageBody } from './youdu-protocol/index.js';
+import {
+  bindYouduKbRunContext,
+  buildYouduKbRunContext,
+  releaseYouduKbRunContext,
+} from './kb/kb-run-context.mjs';
+
+function interactionResolvedText() {
+  return t('这个问题已在其他客户端处理，无需再次回答。');
+}
+
+/**
+ * 有度(Youdu) bridge：收到 msg_callback 帧 → 解析 text → 交给共享层
+ * askInWorkspaceSession（自动创建/绑定/复用 Harness 会话）→ 通过 respond_msg 回传。
+ *
+ * 能力（与 QQ 渠道对齐）：
+ *  - 核心命令（model/preset/workspace/compact/history/control/batch）
+ *  - 交互（审批 harness-approval、提问 harness-question）与失败提示
+ *  - 上下文增强（context-enhancement，私聊/群聊分开）
+ *  - 访问控制与命令权限（inbound-access/access-policy/command-permission）
+ *  - 主动投递/产物回传与群聊 @ 响应
+ *
+ * 传入的 bot 需要满足：
+ *  - sendReply(target, text, options): Promise<void>
+ *  - sendMessage(chatId, text, options): Promise<void>   （主动投递/连接测试）
+ *  - deliverArtifact(target, file, kind): Promise<any>    （可选，产物回传）
+ */
+export function createYouduBridgeStatus() {
+  return {
+    messagesReceived: 0,
+    messagesReplied: 0,
+    messagesRejected: 0,
+    lastMessageAt: null,
+    lastReplyAt: null,
+    lastError: null,
+    lastMessageError: null,
+    // 回复可靠性：respond_msg（入站回调回传）失败后改走 send_msg 主动投递的次数与结果。
+    // 服务端的回调上下文只有 LRU 淘汰、没有 TTL（ng_bot runtime_cache.go），
+    // 长回合或拥挤会话里会失效；失败必须可见，且要有可用的降级通道。
+    replyFallbacks: 0,
+    firstReplyFallbackAt: null,
+    lastReplyFallbackAt: null,
+    lastReplyFallbackReason: null,
+    lastReplyFallbackError: null,
+  };
+}
+
+/**
+ * respond_msg 降级投递（send_msg）。
+ *
+ * 入站回调回传只在「服务端仍持有该 reqId 的回调上下文」时可用；上下文过期/被淘汰后
+ * 只能按会话主动投递。群聊必须带 chatType='group'，否则服务端会把群 ID 当用户 ID
+ * 按单聊发送（ng_bot wss_outbound.go:207-219）；单聊接收方是发送这条消息的人。
+ */
+function fallbackRoute(target, ownBotId) {
+  const chatId = clean(target?.chatId);
+  if (!chatId) return null;
+  if (String(target?.chatType ?? '').toLowerCase() === 'group') {
+    return { chatType: 'group', chatId };
+  }
+  const senderId = clean(target?.senderId);
+  // 有度的 bot 自身也会出现在会话里：绝不能把回复发给机器人自己。
+  if (!senderId || senderId === '*' || senderId === ownBotId) return null;
+  return { chatType: 'single', chatId: senderId };
+}
+
+function describeSendError(error) {
+  if (!error) return 'unknown error';
+  const code = clean(error.code) ?? numericErrorCode(error.errCode);
+  const message = clean(error.errMsg) ?? clean(error.message);
+  if (code && message) return `${code}: ${message}`;
+  return code ?? message ?? String(error);
+}
+
+function clean(value) {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+/** 数字型错误码（有度 ack 帧用 errCode 而不是 code）。 */
+function numericErrorCode(value) {
+  const code = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(code) ? String(code) : null;
+}
+
+/** 剥掉有度群聊 @ 提及包装（形如 `@oc86aed...(显示名)`），只留真正正文。 */
+const YOUDU_MENTION_RE = /@[^\s(]+(?:\([^)]*\))?/g;
+function cleanMentions(text) {
+  return String(text ?? '')
+    .replace(YOUDU_MENTION_RE, '')
+    .replace(/[ \t]{2,}/gu, ' ')
+    .trim();
+}
+
+/**
+ * 会话事件帧（session_create / session_update / session_destroy 等）。
+ * 有度的群名只在这些事件里下发，消息帧不带，因此需要单独识别。
+ */
+function isSessionEventFrame(frame) {
+  return frame?.cmd === 'event_callback';
+}
+
+/** 会话标题：群聊即群名，优先取语义化后的 data.title，再回退到原始事件的 title。 */
+function sessionEventTitle(frame) {
+  const data = frame?.body?.data ?? {};
+  const event = frame?.body?.raw?.event ?? {};
+  return clean(data.title)
+    ?? clean(data.sessionTitle)
+    ?? clean(event.create?.title)
+    ?? clean(event.update?.title)
+    ?? clean(event.destroy?.title)
+    ?? '';
+}
+
+/** 会话路由 key：私聊用 senderId，群聊用 chatId。 */
+function conversationKey(message) {
+  return message.kind === 'group' ? `group:${message.chatId}` : `direct:${message.senderId}`;
+}
+
+/**
+ * 稳定的消息去重键。
+ * 有度 push 帧的 `body.msgId` 可能是 `"0"`（该 push 类型未填数字消息 ID），
+ * 真正全局唯一的是 `raw.push.Msg.msgUid`；缺失时退回非零 msgId，再退回投递 reqId，
+ * 避免把不同消息都当成重复丢弃。
+ */
+function youduMessageId(frame) {
+  const body = frame?.body ?? {};
+  const msgUid = clean(body?.raw?.push?.Msg?.msgUid);
+  if (msgUid) return msgUid;
+  const msgId = clean(body?.msgId);
+  if (msgId && msgId !== '0') return msgId;
+  return clean(frame?.headers?.reqId) ?? msgId ?? '';
+}
+
+/** 回传目标：与 bridge 内 sendReply 的实现保持一致。 */
+function messageTarget(message) {
+  return {
+    reqId: message.reqId,
+    chatId: message.chatId,
+    chatType: message.chatType,
+    senderId: message.senderId,
+  };
+}
+
+/**
+ * 消息时间（Unix 毫秒）：优先用服务端下发的时间，缺字段的推送类型回退到接收时刻。
+ * 群聊上下文的时间前缀只用于让模型分清先后，不参与任何判定。
+ */
+function youduMessageTime(frame) {
+  const body = frame?.body ?? {};
+  const candidates = [
+    body.createTime,
+    body.raw?.push?.Msg?.sendTime,
+    body.raw?.decoded?.sendTime,
+    body.sendTime,
+  ];
+  for (const candidate of candidates) {
+    const value = typeof candidate === 'number' ? candidate : Number(candidate);
+    if (Number.isFinite(value) && value > 0) return value;
+  }
+  return Date.now();
+}
+
+function hasMediaImages(media) {
+  return Array.isArray(media) && media.some((item) => item?.kind === 'image');
+}
+
+function hasMediaFiles(media) {
+  return Array.isArray(media) && media.some((item) => item?.kind !== 'image');
+}
+
+/** 从有度框架提取 @ 提及的用户账号列表（group @ 判定字段）。 */
+function extractAtUserIds(frame) {
+  const atUser = frame?.body?.raw?.decoded?.atUser;
+  if (!Array.isArray(atUser)) return [];
+  return atUser
+    .map((value) => (typeof value === 'number' ? String(value) : clean(value)))
+    .filter(Boolean);
+}
+
+export class YouduBridge {
+  #bot;
+  #harness;
+  #state;
+  #status;
+  #logger;
+  #replyTimeoutMs;
+  #ownerUserId;
+  #botId;
+  #kbAccount;
+  #gid = '';
+  #contextEnhancement;
+  #groupHistory;
+  #groupHistoryBuffer = createGroupHistory();
+  #groupContextFiles;
+  #groupHistoryStaging = new Map();
+  #groupHistoryStagingWaitMs = 10_000;
+  #groupContextRecentLimit = DEFAULT_GROUP_CONTEXT_RECENT_LIMIT;
+  #accessPolicy;
+  #groupAccess;
+  #onGroupSeen;
+  #onPersonSeen;
+  #onConversationSeen;
+  #onSessionBound;
+  #groupResponseMode;
+  #signal;
+  #queues = new Map();
+  #commandTasks = new Set();
+  #batchInputs = new BatchInputManager();
+  #approvals;
+  #pendingInteractions = new Map();
+  #interactionKeys = new Map();
+  #acceptedMessageIds = new Map();
+  #approvalTasks = new Set();
+
+  constructor({
+    bot,
+    harness,
+    state,
+    status = createYouduBridgeStatus(),
+    logger = console,
+    replyTimeoutMs = 600_000,
+    ownerUserId = '*',
+    botId = '',
+    kbAccount,
+    contextEnhancement,
+    groupHistory,
+    groupContextFiles,
+    groupHistoryStagingWaitMs = 10_000,
+    groupContextRecentLimit = DEFAULT_GROUP_CONTEXT_RECENT_LIMIT,
+    accessPolicy,
+    groupAccess,
+    onGroupSeen,
+    onPersonSeen,
+    onConversationSeen,
+    onSessionBound,
+    groupResponseMode = 'mention',
+    signal,
+  }) {
+    if (!bot || typeof bot.sendReply !== 'function') throw new TypeError('Youdu bot client is required');
+    if (!harness || !state) throw new TypeError('Harness client and state store are required');
+    this.#bot = bot;
+    this.#harness = harness;
+    this.#state = state;
+    this.#status = status;
+    this.#logger = logger;
+    this.#replyTimeoutMs = replyTimeoutMs;
+    this.#ownerUserId = ownerUserId ?? '*';
+    this.#botId = botId ?? '';
+    this.#kbAccount = kbAccount
+      && typeof kbAccount === 'object'
+      && (typeof kbAccount.botId === 'string' || typeof kbAccount.secret === 'string' || typeof kbAccount.url === 'string')
+      ? kbAccount
+      : null;
+    this.#contextEnhancement = contextEnhancement;
+    this.#groupHistory = groupHistory ?? null;
+    this.#groupContextFiles = groupContextFiles ?? null;
+    this.#groupHistoryStagingWaitMs = Number.isFinite(groupHistoryStagingWaitMs) && groupHistoryStagingWaitMs >= 0
+      ? groupHistoryStagingWaitMs
+      : 10_000;
+    this.#groupContextRecentLimit = Number.isSafeInteger(groupContextRecentLimit) && groupContextRecentLimit > 0
+      ? groupContextRecentLimit
+      : DEFAULT_GROUP_CONTEXT_RECENT_LIMIT;
+    this.#accessPolicy = accessPolicy;
+    this.#groupAccess = groupAccess ?? null;
+    this.#onGroupSeen = typeof onGroupSeen === 'function' ? onGroupSeen : null;
+    this.#onPersonSeen = typeof onPersonSeen === 'function' ? onPersonSeen : null;
+    this.#onConversationSeen = typeof onConversationSeen === 'function' ? onConversationSeen : null;
+    this.#onSessionBound = typeof onSessionBound === 'function' ? onSessionBound : null;
+    const resolvedGroupMode = groupResponseMode
+      ?? (typeof accessPolicy === 'object' && accessPolicy !== null ? accessPolicy.groupResponseMode : undefined);
+    this.#groupResponseMode = resolvedGroupMode === 'all' ? 'all' : 'mention';
+    this.#signal = signal;
+    this.#approvals = new HarnessApprovalQueue({ label: 'youdu', logger });
+  }
+
+  get status() {
+    return structuredClone(this.#status);
+  }
+
+  /** 处理一条入站消息帧；返回 Promise（入队串行，防止并发写会话）。 */
+  accept(frame) {
+    if (this.#signal?.aborted) return Promise.resolve();
+    if (isSessionEventFrame(frame)) {
+      this.#recordSessionTitle(sessionEventTitle(frame), frame.body);
+      return Promise.resolve();
+    }
+    const body = frame.body ?? {};
+    const { text, media } = prepareMessageBody(body);
+    const msgType = body?.msgType ?? undefined;
+    const message = {
+      messageId: youduMessageId(frame),
+      chatId: clean(frame.body?.chatId),
+      chatType: clean(frame.body?.chatType) ?? 'single',
+      chatName: clean(frame.body?.chatName) ?? clean(frame.body?.chatTitle) ?? '',
+      senderId: clean(frame.body?.from?.userId) ?? clean(frame.body?.from?.userid) ?? '',
+      senderAccount: clean(frame.body?.from?.account) ?? '',
+      senderName: clean(frame.body?.from?.name) ?? '',
+      kind: (frame.body?.chatType === 'group' || frame.body?.chatType === 'groupChat') ? 'group' : 'direct',
+      text: cleanMentions(text),
+      media,
+      msgType: msgType ?? undefined,
+      atUserIds: extractAtUserIds(frame),
+      timestamp: youduMessageTime(frame),
+      reqId: clean(frame.headers?.reqId) ?? '',
+    };
+    if (!message.messageId || !message.senderId || this.#state.hasSeen(message.messageId)
+      || this.#acceptedMessageIds.has(message.messageId)) {
+      return Promise.resolve();
+    }
+    // 先记住这条消息的回传路由：用户之后从 DSH 网页端继续这个会话时，
+    // 回复没有入站回调 reqId，只能按这条路由主动投递回有度。
+    this.#onConversationSeen?.({
+      chatId: message.chatId,
+      chatType: message.chatType,
+      senderId: message.senderId,
+    });
+    const key = conversationKey(message);
+    if (message.kind === 'group') this.#recordGroup(message.chatId, message.chatName);
+    else this.#recordPerson(message);
+    const addressed = message.kind !== 'group' || this.#isAddressedGroupMessage(message);
+
+    if (addressed) {
+      const access = this.#evaluateAccess(message);
+      if (!access.allowed) {
+        this.#acceptedMessageIds.set(message.messageId, null);
+        return this.#finishAccessDecision(message, access);
+      }
+    } else {
+      // 没有寻址机器人的群消息不触发回复，但仍是下一条 @ 消息的上下文。
+      this.#rememberPendingGroupMessage(message, key);
+    }
+    this.#acceptedMessageIds.set(message.messageId, captureContextEnhancement(
+      this.#contextEnhancement,
+      message.kind === 'group' ? 'group' : 'direct',
+    ));
+
+    const commandText = message.text;
+    const batchCommand = isBatchInputCommand(commandText);
+    const batchStatus = this.#batchInputs.status(key);
+    if (batchCommand && message.kind === 'group') {
+      return this.#finishBatchCommand(message, key, batchInputGroupUnsupportedMessage());
+    }
+    if (message.kind === 'direct' && (batchCommand || batchStatus.phase === 'collecting')) {
+      const exactBatchStart = /^\/batch$/iu.test(commandText.trim());
+      const result = exactBatchStart
+        && batchStatus.phase === 'idle'
+        && this.#queues.has(key)
+        ? { handled: true, kind: 'busy', message: batchInputBusyMessage() }
+        : this.#batchInputs.handle(key, commandText, {
+            plainText: Boolean(commandText)
+              && !hasMediaImages(message.media)
+              && !hasMediaFiles(message.media),
+          });
+      if (result.handled) {
+        if (result.kind === 'submit') {
+          return this.#enqueueBatchSubmission(message, key, result);
+        }
+        return this.#finishBatchCommand(message, key, result.message);
+      }
+    }
+
+    if (addressed) {
+      const commandRunner = isHistoryCommand(commandText) ? runHistoryCommand
+        : hasMediaFiles(message.media) ? null : isControlCommand(commandText) ? runControlCommand
+        : (isModelCommand(commandText) ? runModelCommand
+            : (isPresetCommand(commandText) ? runPresetCommand : null));
+      if (commandRunner) {
+        let task;
+        task = this.#processFastCommand(message, key, commandText, commandRunner)
+          .catch((error) => {
+            if (error?.code === 'turn-stopped' || this.#signal?.aborted) return;
+            this.#status.lastError = error?.message ?? String(error);
+            const failure = setLastMessageFailure(this.#status, error);
+            this.#logger.error?.(
+              `[dsh-im:youdu] failed to process a command [${failure.referenceId}]:`,
+              error,
+            );
+            return this.#bot.sendReply(messageTarget(message), messageFailureText(failure))
+              .catch(() => undefined);
+          })
+          .finally(() => {
+            this.#acceptedMessageIds.delete(message.messageId);
+            this.#commandTasks.delete(task);
+          });
+        this.#commandTasks.add(task);
+        return task;
+      }
+    }
+
+    const pending = this.#pendingInteractions.get(key);
+    const approval = this.#approvals.claimReply({
+      key,
+      actor: message.senderId,
+      messageId: message.messageId,
+      text: hasMediaImages(message.media) || hasMediaFiles(message.media) ? '' : message.text,
+      addressed,
+      hasPendingQuestion: Boolean(pending),
+      questionCompletion: pending?.submitting || pending?.claimedReplyMessageId
+        ? pending.queue
+        : null,
+      isQuestionPending: () => this.#pendingInteractions.has(key),
+      send: (reply) => this.#bot.sendReply(messageTarget(message), reply),
+    });
+    if (approval) {
+      let task;
+      task = approval.process(async () => {
+        if (this.#state.hasSeen(message.messageId)) return false;
+        await this.#state.markSeen(message.messageId);
+        this.#status.messagesReceived += 1;
+        this.#status.lastMessageAt = new Date().toISOString();
+        return true;
+      }).finally(() => {
+        this.#acceptedMessageIds.delete(message.messageId);
+        this.#approvalTasks.delete(task);
+      });
+      this.#approvalTasks.add(task);
+      return task;
+    }
+
+    if (pending && message.senderId !== pending.actor) {
+      return this.#enqueueMessage(message, key);
+    }
+    if (pending?.submitting || pending?.claimedReplyMessageId) {
+      return this.#enqueueMessage(message, key);
+    }
+    if (pending) {
+      if (this.#canClaimInteractionReply(message, pending)) {
+        pending.claimedReplyMessageId = message.messageId;
+      }
+      const previous = pending.queue ?? Promise.resolve();
+      const current = previous
+        .catch(() => undefined)
+        .then(() => this.#processInteractionReply(message, key, pending))
+        .catch((error) => this.#handleInteractionFailure(message, error))
+        .finally(() => {
+          this.#acceptedMessageIds.delete(message.messageId);
+          if (pending.claimedReplyMessageId === message.messageId) pending.claimedReplyMessageId = null;
+          if (pending.queue === current) pending.queue = null;
+        });
+      pending.queue = current;
+      return current;
+    }
+    return this.#enqueueMessage(message, key);
+  }
+
+  #enqueueMessage(message, key, { alreadyRecorded = false } = {}) {
+    const promptMessage = (message.kind !== 'group' || this.#isAddressedGroupMessage(message))
+      ? prefetchInboundFiles(
+          buildPromptMessage(message, this.#bot),
+          { signal: this.#signal },
+        )
+      : undefined;
+    const previous = this.#queues.get(key) ?? Promise.resolve();
+    const current = previous
+      .catch(() => undefined)
+      .then(() => this.#process(message, key, { alreadyRecorded, promptMessage }))
+      .finally(() => {
+        this.#acceptedMessageIds.delete(message.messageId);
+        if (this.#queues.get(key) === current) this.#queues.delete(key);
+      });
+    this.#queues.set(key, current);
+    return current;
+  }
+
+  async waitForIdle() {
+    await Promise.allSettled([
+      ...this.#queues.values(),
+      ...this.#commandTasks,
+      ...[...this.#pendingInteractions.values()].flatMap((pending) => (
+        pending.queue ? [pending.queue] : []
+      )),
+      ...this.#approvalTasks,
+    ]);
+  }
+
+  /** 群聊 @ 判定（G3）：mention 模式仅 atUser 命中机器人身份时寻址；all 模式全部响应。 */
+  setGid(value) {
+    this.#gid = clean(value) ?? '';
+  }
+
+  #isAddressedGroupMessage(message) {
+    if (message.kind !== 'group') return true;
+    if (this.#groupResponseMode === 'all') return true;
+    const identities = [this.#botId, this.#ownerUserId, this.#gid]
+      .map((value) => clean(value))
+      .filter(Boolean);
+    return message.atUserIds.some((id) => identities.includes(id)
+      || (identities.length > 0 && `user:${identities[0]}` === id));
+  }
+
+  /**
+   * 群聊上下文设置：优先读实时设置（设置页保存后即时生效），读取失败按关闭处理。
+   */
+  #groupHistorySettings() {
+    const source = this.#groupHistory;
+    if (!source) return DEFAULT_GROUP_HISTORY_CONFIG;
+    try {
+      const raw = typeof source.getSettings === 'function' ? source.getSettings() : source;
+      return normalizeGroupHistoryConfig(raw);
+    } catch {
+      // 读不到设置时宁可不带上下文，也不把未经确认的群消息送进模型。
+      return DISABLED_GROUP_HISTORY_CONFIG;
+    }
+  }
+
+  /**
+   * 记录一条没有寻址机器人的群消息（pending-only），供下一条 @ 消息理解上下文。
+   * 只缓存该群允许发给机器人的消息：走与寻址消息相同的访问判定，被拒的群一律不入缓存。
+   */
+  #rememberPendingGroupMessage(message, key) {
+    if (message.kind !== 'group') return 0;
+    const settings = this.#groupHistorySettings();
+    if (!groupHistoryActive(settings)) return 0;
+    let allowed = false;
+    try {
+      allowed = this.#evaluateAccess(message)?.allowed === true;
+    } catch {
+      allowed = false;
+    }
+    if (!allowed) return 0;
+    const recorded = this.#groupHistoryBuffer.record(key, {
+      sender: message.senderName || message.senderAccount || message.senderId,
+      body: message.text || placeholderForMedia(message.media),
+      timestamp: message.timestamp,
+      messageId: message.messageId,
+    }, { limit: settings.limit });
+    // 附件走媒体下载接口异步取回：先入库正文，下载完成后再补清单。
+    this.#stageGroupHistoryFiles(message, key);
+    return recorded;
+  }
+
+  /** 待下载的群聊附件描述，与寻址消息复用同一套媒体描述（名字、类型、按需 load）。 */
+  #groupHistoryFileSources(message) {
+    const media = Array.isArray(message.media) ? message.media : [];
+    if (media.length === 0 || typeof this.#bot?.downloadMedia !== 'function') return [];
+    return inboundFileSources(message, this.#bot);
+  }
+
+  #stageGroupHistoryFiles(message, key) {
+    const provider = this.#groupContextFiles;
+    if (!provider || typeof provider.stage !== 'function') return;
+    const files = this.#groupHistoryFileSources(message);
+    if (files.length === 0) return;
+    const messageId = message.messageId;
+    const task = Promise.resolve()
+      .then(() => provider.stage({
+        chatId: message.chatId,
+        messageId,
+        sender: message.senderName || message.senderAccount || message.senderId,
+        timestamp: message.timestamp,
+        files,
+        signal: this.#signal,
+      }))
+      .then((staged) => {
+        if (Array.isArray(staged?.files) && staged.files.length > 0) {
+          this.#groupHistoryBuffer.attachFiles(key, messageId, staged.files);
+        }
+        return staged ?? null;
+      })
+      .catch((error) => {
+        // 附件下载失败只降级为文本占位，不影响消息本身。
+        this.#logger.debug?.(
+          '[dsh-im:youdu] group context attachment staging failed:',
+          error?.message ?? String(error),
+        );
+        return null;
+      })
+      .finally(() => {
+        if (this.#groupHistoryStaging.get(messageId)?.task === task) {
+          this.#groupHistoryStaging.delete(messageId);
+        }
+      });
+    this.#groupHistoryStaging.set(messageId, { chatId: message.chatId, task });
+  }
+
+  /**
+   * 等一等这个群里正在下载的附件（有上限）。附件下载是后台任务，通常在下一条 @ 消息
+   * 之前就已完成；这里只兜住“刚发完就被 @”的情况，超时后按已有内容继续。
+   */
+  async #awaitGroupHistoryFiles(chatId) {
+    const watched = [];
+    for (const staged of this.#groupHistoryStaging.values()) {
+      if (staged.chatId === chatId) watched.push(staged.task);
+    }
+    if (watched.length === 0) return;
+    let timer;
+    const timeout = new Promise((resolve) => {
+      // 不做 unref：这个等待本身就是要给下载留时间，且最长只有配置的等待上限。
+      timer = setTimeout(resolve, this.#groupHistoryStagingWaitMs);
+    });
+    try {
+      await Promise.race([Promise.allSettled(watched), timeout]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * 附件清单块：优先用磁盘索引重建（重启、消费、超时都不影响，能列出该群最近的附件），
+   * provider 没有索引能力时退回“这一轮文本条目对应的附件”。
+   */
+  async #groupHistoryFilesBlock(message, entries) {
+    const entriesBlock = formatGroupHistoryFilesBlock(entries);
+    const provider = this.#groupContextFiles;
+    if (!provider || typeof provider.list !== 'function') {
+      return { block: entriesBlock, hasFiles: entriesBlock !== '' };
+    }
+    try {
+      const listing = await provider.list({
+        chatId: message.chatId,
+        limit: this.#groupContextRecentLimit,
+      });
+      const messages = Array.isArray(listing?.messages) ? listing.messages : [];
+      return {
+        block: formatGroupContextFilesBlock(messages, { directory: listing?.directory ?? '' }),
+        hasFiles: messages.some((entry) => Array.isArray(entry?.files) && entry.files.length > 0),
+      };
+    } catch (error) {
+      this.#logger.debug?.(
+        '[dsh-im:youdu] group context attachment listing failed:',
+        error?.message ?? String(error),
+      );
+      return { block: entriesBlock, hasFiles: entriesBlock !== '' };
+    }
+  }
+
+  /**
+   * `/context`：查看或清空本群的上下文缓存。只清内存里待带入的消息，
+   * 已落盘的群附件保持不动（按保留期自然过期）。
+   */
+  async #runGroupContextCommand(command, message, key) {
+    const parsed = parseGroupContextCommand(command);
+    if (!parsed || parsed.action === 'usage') return groupContextUsageText();
+    if (message.kind !== 'group') return groupContextDirectText();
+    if (parsed.action === 'clear') {
+      return groupContextClearedText({ cleared: this.#groupHistoryBuffer.clear(key) });
+    }
+    const settings = this.#groupHistorySettings();
+    const retention = this.#groupContextFiles?.retentionHours;
+    return groupContextStatusText({
+      active: groupHistoryActive(settings),
+      limit: settings.limit,
+      pending: this.#groupHistoryBuffer.size(key),
+      files: await this.#groupContextFileCount(message.chatId),
+      downloading: this.#groupContextStagingCount(message.chatId),
+      retentionHours: Number.isFinite(retention) ? retention : DEFAULT_GROUP_CONTEXT_RETENTION_HOURS,
+    });
+  }
+
+  /** 这个群里还在下载的附件数（刚发完就查 /context 时用来解释为什么还没列出来）。 */
+  #groupContextStagingCount(chatId) {
+    let count = 0;
+    for (const staged of this.#groupHistoryStaging.values()) {
+      if (staged.chatId === chatId) count += 1;
+    }
+    return count;
+  }
+
+  /** 本轮清单里会出现的附件数（磁盘索引，读不到时按 0 显示）。 */
+  async #groupContextFileCount(chatId) {
+    const provider = this.#groupContextFiles;
+    if (!provider || typeof provider.list !== 'function') return 0;
+    try {
+      const listing = await provider.list({ chatId, limit: this.#groupContextRecentLimit });
+      return (Array.isArray(listing?.messages) ? listing.messages : [])
+        .reduce((total, entry) => total + (Array.isArray(entry?.files) ? entry.files.length : 0), 0);
+    } catch {
+      return 0;
+    }
+  }
+
+  /** 当前群聊待注入的上下文快照；不在群聊、未开启、无历史且无附件时返回 null。 */  async #pendingGroupHistory(message, key) {
+    if (message.kind !== 'group') return null;
+    const settings = this.#groupHistorySettings();
+    if (!groupHistoryActive(settings)) return null;
+    const limit = settings.limit;
+    await this.#awaitGroupHistoryFiles(message.chatId);
+    const entries = this.#groupHistoryBuffer.snapshot(key, { limit });
+    const block = entries.length > 0 ? formatGroupHistoryBlock(entries) : '';
+    const files = await this.#groupHistoryFilesBlock(message, entries);
+    if (!block && !files.hasFiles) return null;
+    return Object.freeze({ key, entries, block, filesBlock: files.block });
+  }
+
+  /** 回合结束（无论成败）后消费已注入的条目；注入期间新到的消息保留给下一轮。 */
+  #consumeGroupHistory(pending) {
+    if (!pending) return;
+    this.#groupHistoryBuffer.consume(pending.key, pending.entries);
+  }
+
+  /** 按群规则（设置页配置）：显式配置的群优先于共享的群聊访问设置。 */
+  #evaluateGroupRule(chatId, senderIds) {
+    if (!this.#groupAccess || !chatId) return null;
+    let document;
+    try {
+      document = typeof this.#groupAccess.getSettings === 'function'
+        ? this.#groupAccess.getSettings()
+        : this.#groupAccess;
+    } catch {
+      // 读取失败按“未配置”处理，退回共享策略，绝不因此放宽。
+      return null;
+    }
+    return evaluateGroupAccess(document, {
+      chatId,
+      senderIds,
+      ...(typeof this.#groupAccess.equals === 'function' ? { equals: this.#groupAccess.equals } : {}),
+    });
+  }
+
+  /** 共享访问策略（私聊/群聊 open|allowlist + 命令权限）。 */
+  #evaluateSharedAccess(message, { isCommand }) {
+    const text = message.text ?? '';
+    const hasImages = hasMediaImages(message.media);
+    const hasFiles = hasMediaFiles(message.media);
+    const senderIds = [message.senderId, message.senderAccount].filter(Boolean);
+    if (this.#accessPolicy) {
+      return evaluateInboundAccess(this.#accessPolicy, {
+        conversationType: message.kind === 'group' ? 'group' : 'direct',
+        // 发送者身份：数字 userId + 账号名（from.account，如 zhangsan），两者任一匹配白名单/owner 即放行。
+        // 这样设置页里既可用纯数字 ID，也可用账号名（对齐 openclaw 的 senderAccount 语义）。
+        senderIds,
+        text,
+        hasImages,
+        hasFiles,
+        isCommand,
+      });
+    }
+    // 无 provider 的保守回退：命令仅允许 owner（或 owner 为 '*' 时放开），
+    // 群聊普通消息显式放开避免误拒；群聊命令受 owner 约束（防止任意群成员触发命令）。
+    if (isCommand) {
+      return this.#isSenderAllowed(senderIds)
+        ? Object.freeze({ allowed: true, reason: 'legacy-owner' })
+        : Object.freeze({ allowed: false, reason: 'command-not-allowed' });
+    }
+    if (message.kind === 'group') return Object.freeze({ allowed: true, reason: 'legacy-group' });
+    return this.#isSenderAllowed(senderIds)
+      ? Object.freeze({ allowed: true, reason: 'legacy-owner' })
+      : Object.freeze({ allowed: false, reason: 'sender-not-allowed' });
+  }
+
+  /** 访问控制：按群规则 → 共享 accessPolicy → owner 回退。 */
+  #evaluateAccess(message) {
+    const text = message.text ?? '';
+    const hasImages = hasMediaImages(message.media);
+    const hasFiles = hasMediaFiles(message.media);
+    // `/context` 是本渠道本地命令，纯文字时按命令走权限判定，不带图片/文件。
+    const isCommand = isSharedLocalCommand(text, { hasImages, hasFiles })
+      || (!hasImages && !hasFiles && isGroupContextCommand(text));
+    if (message.kind === 'group') {
+      const group = this.#evaluateGroupRule(message.chatId, [message.senderId, message.senderAccount].filter(Boolean));
+      if (group?.matched) {
+        if (!group.allowed) return Object.freeze({ allowed: false, reason: group.reason });
+        // 按群规则只决定“谁能聊”；命令权限仍由共享策略（owner/命令权限）决定。
+        if (!isCommand) return Object.freeze({ allowed: true, reason: group.reason });
+        const command = this.#evaluateSharedAccess(message, { isCommand: true });
+        if (command.allowed) return command;
+        return Object.freeze({
+          allowed: false,
+          reason: command.reason === 'policy-unavailable' ? command.reason : 'command-not-allowed',
+        });
+      }
+    }
+    return this.#evaluateSharedAccess(message, { isCommand });
+  }
+
+  #finishAccessDecision(message, access) {
+    let task;
+    task = Promise.resolve().then(async () => {
+      if (this.#state.hasSeen(message.messageId)) return;
+      await this.#state.markSeen(message.messageId);
+      if (access.reason === 'command-not-allowed') {
+        this.#status.messagesReceived += 1;
+        this.#status.lastMessageAt = new Date().toISOString();
+        // 闭合默认引导：当命令因 owner 未配置而拒（ownerUserId='*'/空）时，给出可操作提示，
+        // 避免操作者误以为机器人只支持聊天。
+        const ownerUnconfigured = this.#ownerUserId === '*' || !this.#ownerUserId;
+        const deniedMessage = ownerUnconfigured
+          ? t('当前机器人未配置所有者，无法使用该命令。请在设置页配置 ownerUserId 后重试。')
+          : t(COMMAND_PERMISSION_DENIED_MESSAGE);
+        await this.#bot.sendReply(messageTarget(message), deniedMessage);
+        this.#status.messagesReplied += 1;
+        this.#status.lastReplyAt = new Date().toISOString();
+      } else {
+        this.#status.messagesRejected += 1;
+      }
+      this.#status.lastError = null;
+    }).catch((error) => {
+      if (this.#signal?.aborted) return;
+      this.#status.lastError = error?.message ?? String(error);
+      this.#logger.error?.('[dsh-im:youdu] failed to apply inbound access policy:', error);
+    }).finally(() => {
+      this.#acceptedMessageIds.delete(message.messageId);
+    });
+    this.#commandTasks.add(task);
+    return task;
+  }
+
+  /**
+   * 会话与有度会话绑定完成后登记出站路由：用户之后从 DSH 网页端继续这个会话时，
+   * 模型可以用 dsh_im_send_to_youdu 把文字/文件显式发回这条有度会话。
+   * 绑定关系只在「会话已存在/已创建」时成立，因此这里同步读取 state。
+   */
+  #bindSessionOutbound(key, message) {
+    if (!this.#onSessionBound) return;
+    try {
+      const sessionId = typeof this.#state?.sessionFor === 'function'
+        ? this.#state.sessionFor(key)
+        : null;
+      if (!sessionId) return;
+      this.#onSessionBound({
+        sessionId,
+        key,
+        chatId: message.chatId,
+        chatType: message.chatType,
+        senderId: message.senderId,
+        kind: message.kind,
+      });
+    } catch {
+      // 出站绑定失败不影响入站消息处理。
+    }
+  }
+
+  /** 记录观察到的群（供设置页按群配置），失败不影响消息处理。 */
+  #recordGroup(chatId, name = '') {
+    if (!chatId) return;
+    try {
+      if (this.#onGroupSeen) {
+        this.#onGroupSeen(chatId, { name: name || null });
+        return;
+      }
+      if (typeof this.#state.recordGroup === 'function') {
+        void Promise.resolve(this.#state.recordGroup(chatId, { name: name || undefined }))
+          .catch(() => undefined);
+      }
+    } catch {
+      // 群记录是辅助信息，任何失败都不应影响入站消息。
+    }
+  }
+
+  /**
+   * 记录会话标题。有度的 msg_callback 只带 chatId（群聊是会话 id），群名要靠
+   * session_create / session_update 这类会话事件里的 title；同一个会话 id 命中
+   * 已记录的群时，群列表随即能显示群名。
+   */
+  #recordSessionTitle(title, body) {
+    const sessionId = clean(body?.sessionId) ?? clean(body?.data?.sessionId) ?? '';
+    if (!sessionId || !title) return;
+    try {
+      if (typeof this.#state.recordSessionTitle === 'function') {
+        void Promise.resolve(this.#state.recordSessionTitle(sessionId, title)).catch(() => undefined);
+        return;
+      }
+      if (this.#onGroupSeen) this.#onGroupSeen(sessionId, { name: title });
+    } catch {
+      // 会话标题是辅助信息，任何失败都不应影响入站消息。
+    }
+  }
+
+  /**
+   * 记录私聊联系人（chatId / 账号名 / 昵称）。有度单聊的 chatId 就是对方用户 ID，
+   * 因此这条记录既能给设置页展示，也能直接当主动投递目标。
+   */
+  #recordPerson(message) {
+    if (!message.chatId) return;
+    const person = {
+      chatId: message.chatId,
+      account: message.senderAccount || '',
+      name: message.senderName || '',
+    };
+    try {
+      if (this.#onPersonSeen) {
+        this.#onPersonSeen(person);
+        return;
+      }
+      if (typeof this.#state.recordPerson === 'function') {
+        void Promise.resolve(this.#state.recordPerson(person.chatId, {
+          account: person.account,
+          name: person.name,
+        })).catch(() => undefined);
+      }
+    } catch {
+      // 联系人记录是辅助信息，任何失败都不应影响入站消息。
+    }
+  }
+
+  /** 私聊访问控制：ownerUserId 为 '*'（默认）时放开；否则只允许配置的 owner（数字 ID 或账号名任一命中）。 */
+  #isSenderAllowed(senderIds) {
+    if (this.#ownerUserId === '*' || !this.#ownerUserId) return true;
+    const candidates = Array.isArray(senderIds) ? senderIds : [senderIds];
+    return candidates.some((id) => String(id) === String(this.#ownerUserId));
+  }
+
+  /** 当前私聊会话是否存在待处理的交互/审批。 */
+  #pendingInteraction(key) {
+    return this.#pendingInteractions.has(key) || this.#approvals.hasPending(key);
+  }
+
+  async #processFastCommand(message, key, text, runner) {
+    this.#signal?.throwIfAborted();
+    if (this.#state.hasSeen(message.messageId)) return;
+    await this.#state.markSeen(message.messageId);
+    this.#status.messagesReceived += 1;
+    this.#status.lastMessageAt = new Date().toISOString();
+
+    const result = await runner(text, this.#harness, this.#state, key, {
+      signal: this.#signal,
+      isDirect: message.kind === 'direct',
+      hasImages: hasMediaImages(message.media),
+      hasFiles: hasMediaFiles(message.media),
+      pendingInteraction: this.#pendingInteraction(key),
+      control: { owner: this, key },
+    });
+    if (result?.stopped) {
+      await this.#cancelPendingInteraction(key);
+      await this.#approvals.closeRoute(key);
+    }
+    for (const reply of result?.messages ?? [result?.message]) {
+      if (reply) await this.#bot.sendReply(messageTarget(message), reply);
+    }
+    this.#status.lastError = null;
+  }
+
+  #finishBatchCommand(message, key, messageText) {
+    let task;
+    task = Promise.resolve().then(async () => {
+      if (this.#state.hasSeen(message.messageId)) return;
+      await this.#state.markSeen(message.messageId);
+      this.#status.messagesReceived += 1;
+      this.#status.lastMessageAt = new Date().toISOString();
+      if (messageText) await this.#bot.sendReply(messageTarget(message), messageText);
+      this.#status.lastError = null;
+    }).catch(async (error) => {
+      if (this.#signal?.aborted) return;
+      this.#status.lastError = error?.message ?? String(error);
+      const failure = setLastMessageFailure(this.#status, error);
+      this.#logger.error?.(
+        `[dsh-im:youdu] failed to process a batch input command [${failure.referenceId}]:`,
+        error,
+      );
+      await this.#bot.sendReply(messageTarget(message), messageFailureText(failure))
+        .catch(() => undefined);
+    }).finally(() => {
+      this.#acceptedMessageIds.delete(message.messageId);
+      this.#commandTasks.delete(task);
+    });
+    this.#commandTasks.add(task);
+    return task;
+  }
+
+  #enqueueBatchSubmission(message, key, result) {
+    const submissionMessage = {
+      ...message,
+      text: result.prompt,
+      media: [],
+    };
+    const previous = this.#queues.get(key) ?? Promise.resolve();
+    const current = previous
+      .catch(() => undefined)
+      .then(() => this.#process(submissionMessage, key, { batchSubmission: result }))
+      .finally(() => {
+        this.#acceptedMessageIds.delete(message.messageId);
+        if (this.#queues.get(key) === current) this.#queues.delete(key);
+      });
+    this.#queues.set(key, current);
+    return current;
+  }
+
+  async #process(message, key, {
+    alreadyRecorded = false,
+    promptMessage: preparedMessage,
+    batchSubmission = null,
+  } = {}) {
+    if (this.#signal?.aborted) return;
+    const messageId = message.messageId;
+    if (!messageId || !message.senderId) return;
+    if (message.kind === 'group' && !this.#isAddressedGroupMessage(message)) return;
+    if (!alreadyRecorded) {
+      if (this.#state.hasSeen(messageId)) return;
+      this.#status.messagesReceived += 1;
+      this.#status.lastMessageAt = new Date().toISOString();
+    }
+    let messageRecorded = alreadyRecorded;
+    const markMessageSeen = async () => {
+      if (messageRecorded) return;
+      await this.#state.markSeen(messageId);
+      messageRecorded = true;
+    };
+    // 会话已存在时（同一会话的后续消息）先把出站路由登记好，新会话在 onSessionReady 里再登记一次。
+    this.#bindSessionOutbound(key, message);
+
+    const target = messageTarget(message);
+    const promptMessage = preparedMessage ?? buildPromptMessage(message, this.#bot);
+    const mediaImages = hasMediaImages(message.media);
+    const mediaFiles = hasMediaFiles(message.media);
+    const text = promptMessage.content;
+    const hasImages = hasInboundImages(promptMessage);
+    const hasFiles = hasInboundFiles(promptMessage);
+    const hasReply = hasReplyReference(promptMessage);
+    let batchSettled = batchSubmission === null;
+
+    try {
+      if (!mediaImages && !mediaFiles) {
+        const command = (text ?? '').trim().toLowerCase();
+        // /context：查看/清空本群上下文缓存，群聊与私聊都本地消费，不落到模型。
+        if (isGroupContextCommand(command)) {
+          const reply = await this.#runGroupContextCommand(command, message, key);
+          await this.#bot.sendReply(target, reply);
+          await markMessageSeen();
+          return;
+        }
+        if (command === '/new') {
+          await this.#state.clearSession(key);
+          if (message.kind === 'group') {
+            // 群里 /new 同时把待带入的群消息清掉，避免旧闲聊跟着进新会话。
+            const cleared = this.#groupHistoryBuffer.clear(key);
+            await this.#bot.sendReply(target, groupContextResetText({ cleared }));
+          } else {
+            await this.#bot.sendReply(target, t('已开启新会话。请发送你的问题。'));
+          }
+          await markMessageSeen();
+          return;
+        }
+        if (command === '/help') {
+          await this.#bot.sendReply(target, helpText());
+          await markMessageSeen();
+          return;
+        }
+        if (command === '/status') {
+          await this.#harness.ensureRunning?.({ signal: this.#signal });
+          await this.#bot.sendReply(target, t('有度机器人与 DeepSeek Harness 连接正常。'));
+          await markMessageSeen();
+          return;
+        }
+      }
+
+      const workspaceCommand = mediaImages || mediaFiles
+        ? null
+        : await runWorkspaceCommand(text, this.#harness, key);
+      if (workspaceCommand) {
+        for (const reply of workspaceCommand.messages ?? [workspaceCommand.message]) {
+          if (reply) await this.#bot.sendReply(target, reply);
+        }
+        await markMessageSeen();
+        return;
+      }
+
+      const compactCommand = mediaImages || mediaFiles
+        ? null
+        : await runCompactCommand(
+            text,
+            this.#harness,
+            this.#state,
+            key,
+            { signal: this.#signal },
+          );
+      if (compactCommand) {
+        if (compactCommand.message) await this.#bot.sendReply(target, compactCommand.message);
+        await markMessageSeen();
+        return;
+      }
+
+      if (!text && message.media.length === 0) {
+        await this.#bot.sendReply(target, t('目前支持文字、图片和文件消息。'));
+        await markMessageSeen();
+        return;
+      }
+
+      let content = hasImages || hasReply
+        ? await promptContentForInboundMessage(promptMessage, { signal: this.#signal })
+        : (text || placeholderForMedia(message.media));
+      const snapshot = this.#acceptedMessageIds.get(messageId);
+      let contextEnhanced = false;
+      if (snapshot) {
+        const originalContent = content ?? text;
+        content = enhanceContextContent(originalContent, snapshot, () => ({
+          channel: 'youdu',
+          senderId: message.senderId,
+          senderName: message.kind === 'group' ? message.senderName : undefined,
+        }));
+        contextEnhanced = content !== originalContent;
+      }
+
+      await markMessageSeen();
+      let answer;
+      let artifacts = [];
+      let boundKbSessionId = null;
+      // 群聊上下文：取快照并拼在正文之前，回合结束后消费掉这份快照。
+      const groupHistory = await this.#pendingGroupHistory(message, key);
+      if (groupHistory) {
+        content = appendGroupHistoryContext(content, groupHistory.block, groupHistory.filesBlock);
+      }
+      try {
+        ({ answer, artifacts } = await askInWorkspaceSession({
+          harness: this.#harness,
+          state: this.#state,
+          key,
+          text,
+          content,
+          contextEnhanced,
+          createOptions: { signal: this.#signal },
+          existsOptions: { signal: this.#signal },
+          onSessionReady: (binding) => {
+            // 新会话已经绑定：登记这个会话的出站路由，DSH 侧的显式发送才有目标。
+            this.#bindSessionOutbound(key, message);
+            if (!this.#kbAccount) return;
+            boundKbSessionId = binding.sessionId;
+            bindYouduKbRunContext(binding.sessionId, buildYouduKbRunContext(this.#kbAccount, message));
+          },
+          askOptions: {
+            timeoutMs: this.#replyTimeoutMs,
+            signal: this.#signal,
+            control: { owner: this, key },
+            progressMode: 'all',
+            onUpdate: () => undefined,
+            onInteraction: (interaction) => this.#handleInteraction(interaction, {
+              key,
+              actor: message.senderId,
+              target,
+              requiresMention: message.kind === 'group',
+            }),
+            onInteractionResolved: (resolution) => this.#handleInteractionResolved(resolution),
+            files: hasFiles ? promptMessage.files : undefined,
+          },
+        }));
+      } finally {
+        if (boundKbSessionId) releaseYouduKbRunContext(boundKbSessionId);
+        this.#consumeGroupHistory(groupHistory);
+      }
+      if (batchSubmission) {
+        this.#batchInputs.complete(key, batchSubmission.token);
+        batchSettled = true;
+      }
+      this.#signal?.throwIfAborted();
+      await this.#bot.sendReply(target, answer ?? '');
+      await this.#deliverArtifacts(target, messageId, artifacts);
+      this.#status.messagesReplied += 1;
+      this.#status.lastReplyAt = new Date().toISOString();
+      this.#status.lastError = null;
+      clearLastMessageFailure(this.#status);
+    } catch (error) {
+      if (this.#signal?.aborted) return;
+      if (error?.code === 'turn-stopped') {
+        if (!batchSettled && batchSubmission) {
+          this.#batchInputs.complete(key, batchSubmission.token);
+          batchSettled = true;
+        }
+        await this.#bot.sendReply(target, t('已停止。')).catch(() => undefined);
+        await markMessageSeen();
+        return;
+      }
+      let batchFailureMessage = null;
+      if (!batchSettled && batchSubmission) {
+        batchFailureMessage = this.#batchInputs.fail(key, batchSubmission.token).message ?? null;
+        batchSettled = true;
+      }
+      this.#status.lastError = error?.message ?? String(error);
+      const userMessage = inboundFileUserMessage(error)
+        ?? imagePromptUserMessage(error);
+      const failure = setLastMessageFailure(this.#status, error, {
+        userMessage,
+        reason: imagePromptDiagnostic(error)?.reason,
+      });
+      // 诊断字段用 base64 输出：DSH 日志会把 `code=` 后面的值打码，直接写看不到。
+      const diagnostic = [
+        `name=${error?.name ?? '?'}`,
+        `method=${error?.method ?? '?'}`,
+        `codeB64=${Buffer.from(String(error?.code ?? ''), 'utf8').toString('base64')}`,
+        `detailsB64=${Buffer.from(JSON.stringify(error?.details ?? {}), 'utf8').toString('base64')}`,
+        `staging=${error?.stagingFailure ?? '-'}`,
+        `msg=${String(error?.message ?? '').slice(0, 240)}`,
+      ].join(' ');
+      this.#logger.error?.(
+        `[dsh-im:youdu] failed to process an inbound message [${failure.referenceId}] ${diagnostic}:`,
+        error,
+      );
+      const errorMessage = messageFailureText(failure);
+      await this.#bot.sendReply(
+        target,
+        batchFailureMessage ? `${errorMessage}\n\n${batchFailureMessage}` : errorMessage,
+      ).catch(() => undefined);
+      await markMessageSeen();
+    } finally {
+      if (messageId) this.#acceptedMessageIds.delete(messageId);
+      await Promise.allSettled([
+        this.#cancelPendingInteraction(key),
+        this.#approvals.closeRoute(key),
+      ]);
+    }
+  }
+
+  async #processInteractionReply(message, key, expected) {
+    this.#signal?.throwIfAborted();
+    const current = this.#pendingInteractions.get(key);
+    const claimed = expected.claimedReplyMessageId === message.messageId;
+    if (!current || current !== expected || current.submitting) {
+      if (claimed && (!current || current !== expected)) {
+        return this.#discardResolvedInteractionReply(message);
+      }
+      return this.#enqueueMessage(message, key, { alreadyRecorded: false });
+    }
+    if (this.#state.hasSeen(message.messageId)) return;
+    await this.#state.markSeen(message.messageId);
+    this.#status.messagesReceived += 1;
+    this.#status.lastMessageAt = new Date().toISOString();
+
+    if (message.kind === 'group' && !this.#isAddressedGroupMessage(message)) return;
+    const text = clean(message.text);
+    if (!text || hasMediaImages(message.media) || hasMediaFiles(message.media)) {
+      await this.#bot.sendReply(messageTarget(message), t('请用文字回答当前问题。'));
+      return;
+    }
+
+    const pending = this.#pendingInteractions.get(key);
+    if (!pending || pending !== expected || pending.submitting) {
+      if (claimed && (!pending || pending !== expected)) {
+        await this.#bot.sendReply(messageTarget(message), interactionResolvedText());
+        return;
+      }
+      return this.#enqueueMessage(message, key, { alreadyRecorded: true });
+    }
+    pending.target = messageTarget(message);
+    if (pending.needsPresentation) {
+      try {
+        await this.#presentInteraction(pending);
+      } catch {
+        this.#status.lastError = t('有度交互问题发送失败。');
+        this.#logger.error?.('[dsh-im:youdu] failed to retry an interaction question');
+        pending.interaction.reconnect?.();
+        return;
+      }
+    }
+
+    const question = pending.questions[pending.index];
+    if (!question) return;
+    pending.answers.push(harnessAnswerForQuestion(question, text));
+    pending.index += 1;
+    if (pending.index < pending.questions.length) {
+      if (pending.claimedReplyMessageId === message.messageId) {
+        pending.claimedReplyMessageId = null;
+      }
+      pending.needsPresentation = true;
+      try {
+        await this.#presentInteraction(pending);
+      } catch {
+        this.#status.lastError = t('有度交互问题发送失败。');
+        this.#logger.error?.('[dsh-im:youdu] failed to send the next interaction question');
+        pending.interaction.reconnect?.();
+      }
+      return;
+    }
+
+    pending.submitting = true;
+    try {
+      await pending.interaction.respond({
+        ok: true,
+        value: {
+          sessionId: pending.sessionId,
+          answer: { answers: pending.answers },
+        },
+      });
+      this.#clearPendingInteraction(key, pending.interactionId);
+      this.#status.lastError = null;
+    } catch (error) {
+      if (this.#signal?.aborted) return;
+      if (error?.code === 'interaction-not-pending') {
+        this.#clearPendingInteraction(key, pending.interactionId);
+        await this.#bot.sendReply(pending.target, interactionResolvedText()).catch(() => undefined);
+        return;
+      }
+      if (this.#pendingInteractions.get(key) !== pending) return;
+      pending.submitting = false;
+      pending.answers.pop();
+      pending.index -= 1;
+      this.#status.lastError = t('回答提交失败。');
+      this.#logger.error?.('[dsh-im:youdu] failed to answer a Harness interaction');
+      await this.#bot.sendReply(pending.target, t('回答提交失败，请重新发送当前问题的答案。'))
+        .catch(() => undefined);
+    }
+  }
+
+  async #handleInteraction(interaction, { key, actor, target, requiresMention }) {
+    if (interaction?.kind === 'approval') {
+      return this.#approvals.handleRequested(interaction, {
+        key,
+        actor,
+        requiresMention,
+        send: (text) => this.#bot.sendReply(target, text),
+      });
+    }
+    if (interaction?.kind !== 'question') return;
+    const questions = interaction?.payload?.questions;
+    const interactionId = typeof interaction?.interactionId === 'string'
+      ? interaction.interactionId
+      : interaction?.rpcId;
+    if (typeof interaction?.rpcId !== 'string'
+      || typeof interactionId !== 'string'
+      || typeof interaction.sessionId !== 'string'
+      || !Array.isArray(questions)
+      || questions.length === 0
+      || questions.some((question) => !validHarnessQuestion(question))) {
+      this.#logger.warn?.('[dsh-im:youdu] ignored an invalid Harness question interaction');
+      return;
+    }
+
+    if (interaction.recovered === true) {
+      await interaction.respond({
+        ok: false,
+        error: {
+          code: 'cancelled',
+          message: 'Youdu safely cancelled an interaction left by an earlier client.',
+          details: {},
+        },
+      });
+      await this.#bot.sendReply(
+        target,
+        t('检测到这个 Session 中遗留的待回答问题，已安全取消并继续处理你刚才的消息。'),
+      ).catch(() => undefined);
+      return;
+    }
+
+    const existing = this.#pendingInteractions.get(key);
+    if (existing?.interactionId === interactionId) {
+      existing.interaction = interaction;
+      if (existing.needsPresentation) await this.#presentInteraction(existing);
+      return;
+    }
+    if (this.#interactionKeys.has(interactionId)) return;
+    if (existing) {
+      await interaction.respond({
+        ok: false,
+        error: {
+          code: 'cancelled',
+          message: 'Youdu is already handling another user interaction.',
+          details: {},
+        },
+      });
+      return;
+    }
+
+    const pending = {
+      kind: 'question',
+      interactionId,
+      sessionId: interaction.sessionId,
+      interaction,
+      actor,
+      requiresMention,
+      questions,
+      answers: [],
+      index: 0,
+      target,
+      queue: null,
+      claimedReplyMessageId: null,
+      presentationPromise: null,
+      submitting: false,
+      needsPresentation: true,
+    };
+    this.#pendingInteractions.set(key, pending);
+    this.#interactionKeys.set(interactionId, key);
+    await this.#presentInteraction(pending);
+  }
+
+  async #handleInteractionResolved(resolution) {
+    if (resolution?.kind === 'approval') {
+      await this.#approvals.handleResolved(resolution);
+      return;
+    }
+    const interactionId = resolution?.interactionId;
+    if (resolution?.kind !== 'question' || typeof interactionId !== 'string') return;
+    const key = this.#interactionKeys.get(interactionId);
+    if (!key) return;
+    this.#clearPendingInteraction(key, interactionId);
+  }
+
+  #presentInteraction(pending) {
+    if (!pending.needsPresentation) return Promise.resolve();
+    if (pending.presentationPromise) return pending.presentationPromise;
+    const question = pending.questions[pending.index];
+    if (!question) return Promise.resolve();
+    const presentation = this.#bot.sendReply(
+      pending.target,
+      harnessQuestionText(
+        question,
+        pending.index,
+        pending.questions.length,
+        { requiresMention: pending.requiresMention },
+      ),
+    ).then(() => {
+      pending.needsPresentation = false;
+    }).finally(() => {
+      if (pending.presentationPromise === presentation) pending.presentationPromise = null;
+    });
+    pending.presentationPromise = presentation;
+    return presentation;
+  }
+
+  #canClaimInteractionReply(message, pending) {
+    return pending.questions[pending.index]
+      && clean(message.senderId) === pending.actor
+      && (message.kind !== 'group' || this.#isAddressedGroupMessage(message))
+      && !hasMediaImages(message.media)
+      && !hasMediaFiles(message.media)
+      && Boolean(clean(message.text));
+  }
+
+  async #discardResolvedInteractionReply(message) {
+    if (this.#state.hasSeen(message.messageId)) return;
+    await this.#state.markSeen(message.messageId);
+    this.#status.messagesReceived += 1;
+    this.#status.lastMessageAt = new Date().toISOString();
+    await this.#bot.sendReply(messageTarget(message), interactionResolvedText()).catch(() => undefined);
+  }
+
+  #takePendingInteraction(key, interactionId) {
+    const pending = this.#pendingInteractions.get(key);
+    if (!pending
+      || (interactionId !== undefined && pending.interactionId !== interactionId)) return null;
+    this.#pendingInteractions.delete(key);
+    this.#interactionKeys.delete(pending.interactionId);
+    return pending;
+  }
+
+  #clearPendingInteraction(key, interactionId) {
+    return this.#takePendingInteraction(key, interactionId) !== null;
+  }
+
+  async #cancelPendingInteraction(key) {
+    const pending = this.#takePendingInteraction(key);
+    if (!pending || pending.kind !== 'question') return;
+    try {
+      await pending.interaction.respond({
+        ok: false,
+        error: {
+          code: 'cancelled',
+          message: 'The Youdu interaction ended before the user answered.',
+          details: {},
+        },
+      }, { signal: AbortSignal.timeout(5_000) });
+    } catch (error) {
+      if (error?.code !== 'interaction-not-pending') {
+        this.#logger.warn?.('[dsh-im:youdu] failed to cancel a pending Harness interaction');
+      }
+    }
+  }
+
+  async #handleInteractionFailure(message, error) {
+    if (this.#signal?.aborted) return;
+    this.#status.lastError = error?.message ?? String(error);
+    const failure = setLastMessageFailure(this.#status, error);
+    this.#logger.error?.(
+      `[dsh-im:youdu] failed to process an interaction reply [${failure.referenceId}]:`,
+      error,
+    );
+    if (!this.#state.hasSeen(message.messageId)) {
+      await this.#state.markSeen(message.messageId).catch(() => undefined);
+    }
+    await this.#bot.sendReply(messageTarget(message), messageFailureText(failure))
+      .catch(() => undefined);
+  }
+
+  /** 把 Harness 产出的结果文件通过有度媒体接口回传。 */
+  async #deliverArtifacts(target, replyTo, artifacts = []) {
+    if (!artifacts.length) return null;
+    if (typeof this.#bot?.deliverArtifact !== 'function') return null;
+    const delivery = await deliverOutboundArtifacts({
+      artifacts,
+      deliveryId: replyTo,
+      aggregatePresentation: 'youdu-files',
+      alwaysMerge: true,
+      channelKey: 'youdu',
+      signal: this.#signal,
+      sendImage: (file) => this.#bot.deliverArtifact(target, file, 'image'),
+      sendFile: (file) => this.#bot.deliverArtifact(target, file, 'file'),
+      onFailure: (artifact, error) => setLastMessageFailure(this.#status, error, {
+        userMessage: t('结果文件「{name}」已生成，但暂时未能通过有度发送，请稍后重试。', {
+          name: artifact?.fileName ?? '结果文件',
+        }),
+      }),
+      sendFailureNotice: (_artifact, _error, failure) => this.#bot.sendReply(
+        target,
+        messageFailureText(failure),
+      ),
+      logger: this.#logger,
+    });
+    return delivery;
+  }
+}
+
+function placeholderForMedia(media) {
+  if (!media.length) return '';
+  const first = media[0];
+  const label = first.kind === 'image' ? '图片' : '文件';
+  const name = first.name ? ` ${first.name}` : '';
+  return `[${label}${name}]`;
+}
+
+/**
+ * 媒体入站与其它渠道一致：图片进 `images`，由共享的 prompt 管线转成图片块交给宿主；
+ * 宿主对非视觉模型拒收时，HarnessClient 会把同样的字节落到会话工作区并改用文件提示重试。
+ * 非图片附件走 `files`，由入站文件管线写进工作区，模型用工具读取。
+ */
+function mediaSources(message, bot) {
+  const images = [];
+  const files = [];
+  for (const media of message.media ?? []) {
+    const source = {
+      name: media.name ?? (media.kind === 'image' ? 'image' : 'file'),
+      ...(media.contentType ? { mediaType: media.contentType } : {}),
+      ...(media.size !== undefined ? { size: media.size } : {}),
+      load: ({ signal, maxBytes } = {}) => bot.downloadMedia(media, { signal, maxBytes }),
+    };
+    if (media.kind === 'image') images.push(source);
+    else files.push(source);
+  }
+  return { images, files };
+}
+
+function buildPromptMessage(message, bot) {
+  const { images, files } = mediaSources(message, bot);
+  const text = typeof message.text === 'string' ? message.text : '';
+  return {
+    content: text,
+    ...(images.length ? { images } : {}),
+    ...(files.length ? { files } : {}),
+  };
+}
+
+/** 群聊历史附件按文件落盘：图片也要进清单，避免后加入的成员看不到图。 */
+function inboundFileSources(message, bot) {
+  const { images, files } = mediaSources(message, bot);
+  return [...images, ...files];
+}
+
+function helpText() {
+  return [
+    t('有度机器人已连接 DeepSeek Harness。'),
+    '',
+    t('直接发送文字、图片或文件即可继续当前会话。'),
+    t('/new  开启一个全新会话（群聊里同时清空待带入的上下文）'),
+    t('/compact  压缩当前会话的较早上下文'),
+    t('/context  查看本群上下文缓存状态'),
+    t('/context clear  清空本群待带入的消息'),
+    t('/history [数量]  查看最近历史消息（默认 3 条，最多 5 条）'),
+    t('/workspace 工作区序号或绝对路径  切换工作区'),
+    t('/workspacelist  列出工作区绝对路径'),
+    t('/sessionlist 或 /sessions [工作区序号或绝对路径]  列出会话 ID 和标题'),
+    t('/sessionlist --limit N  仅列出当前工作区前 N 个会话'),
+    t('/session Session ID 或当前工作区序号  将当前聊天绑定到指定会话'),
+    t('/models  按序号列出所有可用模型'),
+    t('/reasoninglist 或 /reasonings  按序号列出当前模型可用推理等级'),
+    t('/reasoning [序号、等级ID或 --default]  查看或切换当前推理等级'),
+    t('/model [序号或完整模型ID] [推理等级ID]  查看或切换当前会话模型'),
+    t('示例：先发 /models，再发 /model 2 [推理等级ID]'),
+    t('/presetlist 或 /presets  按序号列出可用 Agent Preset'),
+    t('/preset [序号或完整ID]  查看或设置当前机器人 Agent Preset'),
+    t('纯数字 ID：/preset id:<ID>'),
+    t('/preset --default  跟随 Host 默认'),
+    t('/stop  停止当前任务'),
+    t('/steer 补充指令  纠偏当前任务'),
+    t('/batch  开始批量输入（仅私聊，最多 10 条文字）'),
+    t('/send  提交当前批次'),
+    t('/cancel  取消当前批次'),
+    t('/status  检查连接状态'),
+    t('/version  查看插件版本'),
+    t('/help  显示本帮助'),
+  ].join('\n');
+}

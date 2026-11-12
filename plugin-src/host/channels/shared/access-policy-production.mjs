@@ -94,6 +94,20 @@ export function initialAccessPolicyFor(channel, config = {}) {
   if (['dingtalk', 'wecom', 'wecom-app', 'slack', 'discord', 'imessage'].includes(key)) {
     return createAccessPolicy({ direct: openScope(), group: openScope() });
   }
+  if (key === 'youdu') {
+    // 有度按 ownerUserId 收敛：未配置 owner（'*'）时命令默认拒绝；
+    // 配置了具体 owner 时命令仅该 owner 可执行（与历史行为一致）。
+    const owners = cleanIds(config.ownerUserId).filter((id) => id !== '*');
+    const scope = createAccessPolicyScope({
+      mode: 'open',
+      open: {
+        defaultCanExecuteCommands: false,
+        commandPermissionOverrides: policyUsers(owners),
+      },
+      allowlist: { users: policyUsers(owners) },
+    });
+    return createAccessPolicy({ direct: scope, group: scope });
+  }
   throw new TypeError(`Unsupported access-policy channel: ${channel}`);
 }
 
@@ -108,6 +122,7 @@ export function privilegedSenderIdsFor(channel, config = {}) {
     return cleanIds(approved.map((entry) => entry?.staffId));
   }
   if (key === 'qq') return cleanIds(config.ownerUserOpenid).filter((id) => id !== '*');
+  if (key === 'youdu') return cleanIds(config.ownerUserId).filter((id) => id !== '*');
   if (key === 'whatsapp') return cleanIds(config.accountJid);
   return [];
 }

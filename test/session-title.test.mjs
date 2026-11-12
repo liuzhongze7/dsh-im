@@ -62,6 +62,41 @@ test('initial Session titles ignore a leading reply reference block', () => {
   }), '当前原始问题');
 });
 
+test('initial Session titles ignore a leading group history block and current-message marker', () => {
+  const content = [
+    {
+      type: 'text',
+      text: '<dsh_im_group_history note="n">\n'
+        + '[2026-09-10 14:12] 张三: 下午三点评审\n'
+        + '</dsh_im_group_history>\n\n[Current message - respond to this]',
+    },
+    { type: 'text', text: '<dsh_im_source>{"channel":"youdu"}</dsh_im_source>' },
+    { type: 'text', text: '请分析这张图片。' },
+    { type: 'image', mediaType: 'image/png', data: 'AAAA' },
+  ];
+
+  const title = initialSessionTitle({ content });
+  assert.equal(title, '请分析这张图片。');
+  assert.doesNotMatch(title, /dsh_im_group_history|Current message|下午三点评审/u);
+});
+
+test('initial Session titles ignore a leading group attachment manifest too', () => {
+  const content = [
+    {
+      type: 'text',
+      text: '<dsh_im_group_history note="n">\n[2026-09-10 14:12] 张三: [图片] photo.png\n</dsh_im_group_history>\n'
+        + '<dsh_im_group_files>\n{"files":[{"name":"photo.png","path":".dsh-im/group-context/g/1/01-photo.png"}]}\n</dsh_im_group_files>\n\n'
+        + '[Current message - respond to this]',
+    },
+    { type: 'text', text: '<dsh_im_source>{"channel":"youdu"}</dsh_im_source>' },
+    { type: 'text', text: '描述一下这张图。' },
+  ];
+
+  const title = initialSessionTitle({ content });
+  assert.equal(title, '描述一下这张图。');
+  assert.doesNotMatch(title, /group-context|dsh_im_group_files|photo\.png/u);
+});
+
 test('initial Session titles truncate safely within the UTF-8 byte budget', () => {
   const title = initialSessionTitle({ text: '订单'.repeat(30) });
   assert.equal(title.endsWith('…'), true);

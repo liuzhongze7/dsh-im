@@ -52,6 +52,7 @@ export async function askInWorkspaceSession({
   createOptions,
   existsOptions,
   askOptions,
+  onSessionReady,
   deferredDelivery,
 }) {
   const initialTitle = contextEnhanced
@@ -87,6 +88,7 @@ export async function askInWorkspaceSession({
         return { sessionId, session };
       });
       if (!binding) continue;
+      if (onSessionReady) await onSessionReady(binding);
       const artifacts = [];
       const originalOnArtifact = typeof askOptions === 'object'
         && typeof askOptions?.onArtifact === 'function'

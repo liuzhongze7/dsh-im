@@ -9,6 +9,7 @@ import { apply as applyWecom } from './channels/wecom/index.mjs';
 import { apply as applyWecomApp } from './channels/wecom-app/index.mjs';
 import { apply as applyWeixin } from './channels/weixin/index.mjs';
 import { apply as applyWhatsapp } from './channels/whatsapp/index.mjs';
+import { apply as applyYoudu } from './channels/youdu/index.mjs';
 import { apply as applyIMessage } from './channels/imessage/index.mjs';
 import { installOutboundArtifactTool } from '../../src/channels/shared/semantic/artifact.mjs';
 import { installHostLanguage } from './host-language.mjs';
@@ -57,6 +58,7 @@ export function createImHostPlugin(internals = {}) {
   const startDiscord = internals.applyDiscord ?? applyDiscord;
   const startOffice = internals.applyOffice ?? applyOffice;
   const startWhatsapp = internals.applyWhatsapp ?? applyWhatsapp;
+  const startYoudu = internals.applyYoudu ?? applyYoudu;
   const startIMessage = internals.applyIMessage ?? applyIMessage;
   const channels = [
     ['feishu', startFeishu],
@@ -68,6 +70,7 @@ export function createImHostPlugin(internals = {}) {
     ['slack', startSlack],
     ['telegram', startTelegram],
     ['discord', startDiscord],
+    ['youdu', startYoudu],
     ['whatsapp', startWhatsapp],
     ['imessage', startIMessage],
     ['office', startOffice],

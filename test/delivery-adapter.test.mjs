@@ -39,6 +39,8 @@ const TARGETS = {
   whatsapp: {
     targetId: 'daily', kind: 'group', route: { jid: '123456789-120363000000000000@g.us' },
   },
+  // 有度单聊的 chatId 就是对方用户 ID（服务端 resolveChatID 对 single 取 Sender.ID）。
+  youdu: { targetId: 'daily', kind: 'user', route: { chatId: '6463894' } },
 };
 
 const STATE_STORES = {
@@ -139,6 +141,16 @@ const SESSION_SUGGESTIONS = {
       { kind: 'group', route: { jid: '123456789-120363000000000001@g.us' } },
     ],
   },
+  youdu: {
+    sessions: {
+      'direct:6463894': 'session-user',
+      'group:{0798E01E-CD68-42BB-813C-EB51593BB0F5}': 'session-group',
+    },
+    suggestions: [
+      { kind: 'user', route: { chatId: '6463894' } },
+      { kind: 'group', route: { chatId: '{0798E01E-CD68-42BB-813C-EB51593BB0F5}' } },
+    ],
+  },
 };
 
 const PRIVATE_TARGETS = {
@@ -156,9 +168,10 @@ const PRIVATE_TARGETS = {
   whatsapp: {
     targetId: 'private', kind: 'user', route: { jid: '16505550123@s.whatsapp.net' },
   },
+  youdu: { targetId: 'private', kind: 'user', route: { chatId: '6463894' } },
 };
 
-test('all ten delivery adapters validate and forward one stable target', async () => {
+test('all eleven delivery adapters validate and forward one stable target', async () => {
   for (const [channel, target] of Object.entries(TARGETS)) {
     const calls = [];
     const workspaces = {
@@ -196,7 +209,7 @@ test('all ten delivery adapters validate and forward one stable target', async (
   }
 });
 
-test('all ten adapters enable, resolve, and revalidate one private Session target', async () => {
+test('all eleven adapters enable, resolve, and revalidate one private Session target', async () => {
   for (const [channel, target] of Object.entries(PRIVATE_TARGETS)) {
     const botId = `bot-${channel}`;
     const sessions = { ...SESSION_SUGGESTIONS[channel].sessions };
@@ -299,6 +312,59 @@ test('delivery adapter delegates target CRUD to the existing workspace store', a
   ]);
 });
 
+test('a channel resolveTarget hook settles names before the store or the wire sees them', async () => {
+  const calls = [];
+  const workspaces = {
+    has: () => true,
+    listDeliveryTargets: () => [],
+    createDeliveryTarget: async (botId, target) => calls.push(['create', botId, target]),
+    updateDeliveryTarget: async (botId, targetId, target) => calls.push(['update', botId, targetId, target]),
+    deleteDeliveryTarget: async () => {},
+  };
+  const sent = [];
+  const coreController = {
+    async sendProactiveText(botId, target, text) {
+      sent.push({ botId, target, text });
+      return { messageId: 'm1' };
+    },
+  };
+  const adapter = createDeliveryAdapter({
+    channel: 'youdu',
+    workspaces,
+    coreController,
+    stateFor: async () => ({ snapshot: () => ({ sessions: {} }) }),
+    resolveTarget: (botId, target) => ({
+      chatId: `resolved-${botId}-${target.route.chatId}`,
+    }),
+  });
+
+  await adapter.createTarget('bot-one', {
+    targetId: 'ops', kind: 'user', route: { chatId: '刘钟泽' },
+  });
+  await adapter.updateTarget('bot-one', 'ops', {
+    kind: 'group', route: { chatId: '研发群' },
+  });
+  await adapter.sendText('bot-one', {
+    targetId: 'ops', kind: 'group', route: { chatId: '研发群' },
+  }, '定时结果');
+
+  assert.deepEqual(calls, [
+    ['create', 'bot-one', {
+      targetId: 'ops', kind: 'user', route: { chatId: 'resolved-bot-one-刘钟泽' },
+    }],
+    ['update', 'bot-one', 'ops', {
+      kind: 'group', route: { chatId: 'resolved-bot-one-研发群' },
+    }],
+  ]);
+  assert.deepEqual(sent, [
+    {
+      botId: 'bot-one',
+      target: { targetId: 'ops', kind: 'group', route: { chatId: 'resolved-bot-one-研发群' } },
+      text: '定时结果',
+    },
+  ]);
+});
+
 test('suggestion parser strictly filters malformed keys, de-duplicates routes, and never leaks state values', () => {
   const sessions = {
     'direct:88': 'secret-session-one',
@@ -323,7 +389,7 @@ test('suggestion parser strictly filters malformed keys, de-duplicates routes, a
   assert.deepEqual(deliverySuggestionsFromSessions('unknown', sessions), []);
 });
 
-test('all ten adapters list suggestions from reloaded bot state while no runtime is connected', async (t) => {
+test('all eleven adapters list suggestions from reloaded bot state while no runtime is connected', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'dsh-delivery-suggestions-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   for (const [channel, StateStore] of Object.entries(STATE_STORES)) {

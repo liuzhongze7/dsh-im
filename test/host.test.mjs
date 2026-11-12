@@ -304,6 +304,7 @@ const CHANNELS = [
   ['slack', 'applySlack'],
   ['telegram', 'applyTelegram'],
   ['discord', 'applyDiscord'],
+  ['youdu', 'applyYoudu'],
   ['whatsapp', 'applyWhatsapp'],
   ['imessage', 'applyIMessage'],
   ['office', 'applyOffice'],

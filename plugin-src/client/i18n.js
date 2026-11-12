@@ -996,6 +996,97 @@ const EN = Object.freeze({
   '企业微信应用操作失败，请稍后重试': 'The WeCom app operation failed; try again later',
   '企业微信应用服务返回了无法识别的响应': 'The WeCom app service returned an unrecognized response',
   '企业微信应用服务没有返回有效的机器人列表': 'The WeCom app service did not return a valid bot list',
+  // 有度（Youdu）渠道
+  '有度': 'Youdu',
+  '有度账号或用户 ID': 'Youdu account or user ID',
+  '填有度账号名（如 zhangsan）或数字用户 ID': 'Enter the Youdu account name (e.g. zhangsan) or numeric user ID',
+  '群成员账号或用户 ID': 'Group member account or user ID',
+  '填群成员账号名或数字用户 ID': 'Enter the member account name or numeric user ID',
+  '有度服务返回了无法识别的响应': 'The Youdu service returned an unrecognized response',
+  '有度操作失败': 'The Youdu operation failed',
+  '有度机器人': 'Youdu bot',
+  '服务器已安全保存': 'Server saved securely',
+  '有度 WebSocket 长连接运行正常': 'The Youdu WebSocket connection is healthy',
+  '有度连接尚未就绪': 'The Youdu connection is not ready yet',
+  '消息处理失败': 'Message processing failed',
+  '有度服务没有返回有效的机器人列表': 'The Youdu service did not return a valid bot list',
+  '有度操作失败，请稍后重试': 'The Youdu operation failed; try again later',
+  '白名单': 'Allowlist',
+  '开放': 'Open',
+  '仅白名单用户可发消息': 'Allowlisted users can send messages',
+  '${users.length} 个白名单用户': '${users.length} allowlisted users',
+  '命令默认关闭': 'Commands off by default',
+  '命令默认开启': 'Commands on by default',
+  '未配置（默认：开放模式，命令默认关闭）': 'Not configured (default: open mode, commands off by default)',
+  '访问策略': 'Access policy',
+  '收起': 'Collapse',
+  '沿用群聊访问设置': 'Follow the group access settings',
+  '允许所有人': 'Allow everyone',
+  '仅名单内用户': 'Allowlisted users only',
+  '忽略该群': 'Ignore this group',
+  '未按群配置（所有群沿用群聊访问设置）': 'No per-group rules (every group follows the group access settings)',
+  '${counts.allowlist} 个群仅名单内用户': '${counts.allowlist} groups are allowlist-only',
+  '${counts.open} 个群允许所有人': '${counts.open} groups allow everyone',
+  '${counts.disabled} 个群被忽略': '${counts.disabled} groups are ignored',
+  '按群访问设置暂不可用。': 'Per-group access settings are currently unavailable.',
+  '按群访问设置已保存。': 'Per-group access settings saved.',
+  '按群访问设置保存失败，请稍后重试。': 'Could not save the per-group access settings. Try again later.',
+  '按群访问': 'Per-group access',
+  '为具体群指定谁能与机器人对话。未单独配置的群沿用上面的「群聊」访问设置；': 'Choose who may talk to the bot in each group. Groups without their own rule follow the group access settings above;',
+  '「仅名单内用户」可填有度用户 ID（数字）或账号名（如 zhangsan），用逗号分隔。': 'Allowlisted users can be Youdu user IDs (numeric) or account names (e.g. zhangsan), separated by commas.',
+  '机器人还没有收到过群消息，暂时无法列出群；可以在下面手动填群 ID。': 'The bot has not received any group message yet, so no groups can be listed; add a group ID manually below.',
+  '${row.messages} 条消息': '${row.messages} messages',
+  ' · 最近 ': ' · last seen ',
+  '手动添加': 'Added manually',
+  '用户 ID 或账号名，逗号分隔': 'User IDs or account names, comma separated',
+  '群 ID，例如 {0798E01E-...}': 'Group ID, e.g. {0798E01E-...}',
+  '添加群': 'Add group',
+  '保存按群设置': 'Save per-group settings',
+  '机器人 botId（不可修改）': 'Bot botId (read-only)',
+  '机器人 botId': 'Bot botId',
+  '机器人 secret': 'Bot secret',
+  '服务器地址': 'Server address',
+  '留空表示不修改（当前 ${masked}）': 'Leave empty to keep the current value (${masked})',
+  '留空表示不修改': 'Leave empty to keep the current value',
+  '允许的私聊用户 ID (可选)': 'Allowed direct-message user ID (optional)',
+  '留空表示不限制（*）': 'Leave empty for no restriction (*)',
+  '保存连接信息': 'Save connection',
+  '正在读取有度机器人列表': 'Loading the Youdu bot list',
+  '正在读取有度连接状态…': 'Loading the Youdu connection status…',
+  '接入第一个有度机器人': 'Connect your first Youdu bot',
+  '填写有度机器人服务器地址、botId 与密钥，即可把有度消息接入 DeepSeek Harness。': 'Enter the Youdu bot server address, botId, and secret to connect Youdu messages to DeepSeek Harness.',
+  '手动接入机器人': 'Connect a bot manually',
+  '无法读取有度机器人': 'Could not load Youdu bots',
+  '这会停止消息连接，并删除本机保存的凭据、机器人配置及会话映射。有度平台中的机器人不会被自动删除。': 'This stops the message connection and removes the locally stored credentials, bot configuration, and session mappings. The bot in Youdu is not deleted.',
+  '编辑连接信息': 'Edit connection',
+  '收起编辑': 'Collapse editor',
+  '编辑连接': 'Edit connection',
+  '已保存。': 'Saved.',
+  '连接信息已保存。': 'Connection saved.',
+  '有度机器人设置': 'Youdu bot settings',
+  '有度机器人消息通道': 'Youdu bot message channel',
+  '手动接入有度机器人': 'Connect a Youdu bot manually',
+  '有度机器人 ID': 'Youdu bot ID',
+  '机器人密钥': 'Bot secret',
+  '或留空为 *': 'Or leave empty for *',
+  '正在接入…': 'Connecting…',
+  '读取有度连接状态超时，请刷新页面后重试。': 'Loading the Youdu connection status timed out. Refresh the page and try again.',
+  '用户 ID 或昵称': 'User ID or nickname',
+  '填昵称或账号名（如 刘钟泽、lewis.liu），或数字用户 ID；名字要求机器人已认识对方': 'Nickname or account (e.g. lewis.liu), or the numeric user ID; the bot must already know that name',
+  '群 ID 或群名': 'Group ID or name',
+  '填群名（如 研发群），或群 ID 例如 {0798E01E-CD68-42BB-813C-EB51593BB0F5}': 'Group name (e.g. R&D), or the group ID, e.g. {0798E01E-CD68-42BB-813C-EB51593BB0F5}',
+  // 有度群聊上下文缓存（group-history.mjs）
+  '群聊上下文': 'Group chat context',
+  '开启 · 最近 ${normalized.limit} 条': 'On · last ${normalized.limit} messages',
+  '缓存条数': 'Cached messages',
+  '查看缓存条数说明': 'View the cached message count details',
+  '缓存群里没有 @ 机器人的最近消息，机器人被 @ 时把这些消息作为上下文一起交给模型。只作用于群聊。': 'Cache the recent group messages that did not @ the bot; when the bot is @mentioned, they are passed to the model as context together with the current message. Applies to group chats only.',
+  '0 表示不缓存；默认 50 条，可填 0 到 200 之间的整数。': '0 disables caching; the default is 50, and any integer from 0 to 200 is accepted.',
+  '缓存在内存中、重启即清空。': 'Cached in memory and cleared on restart.',
+  '被群访问规则拒绝的群不缓存。': 'Groups rejected by the group access rules are never cached.',
+  '缓存位置': 'Where it is cached',
+  '群访问规则': 'Group access rules',
+  '群聊上下文保存失败，请重试。': 'Could not save the group chat context. Try again.',
 });
 
 export const en = EN;
@@ -1020,6 +1111,8 @@ function channelName(value) {
 function translateDynamic(text) {
   const guidanceLimit = /^增强提示词不得超过 (\d+) 个字符。$/.exec(text);
   if (guidanceLimit) return `Guidance must not exceed ${guidanceLimit[1]} characters.`;
+  const groupHistoryLimit = /^开启 · 最近 (\d+) 条$/.exec(text);
+  if (groupHistoryLimit) return `On · last ${groupHistoryLimit[1]} messages`;
   let match = /^(\d+) \/ (\d+) 在线$/.exec(text);
   if (match) return `${match[1]}/${match[2]} online`;
   match = /^已接入 (\d+) 个机器人，其中 (\d+) 个在线$/.exec(text);
@@ -1084,6 +1177,8 @@ function translateDynamic(text) {
   if (match) return `Automatic status refresh failed: ${match[1]}`;
   match = /^操作失败：(.+)$/.exec(text);
   if (match) return `Operation failed: ${match[1]}`;
+  match = /^保存失败：(.+)$/.exec(text);
+  if (match) return `Could not save: ${match[1]}`;
   match = /^连接检查失败：(.+)（参考号：(.+)）$/.exec(text);
   if (match) return `Connection check failed: ${localizeText(match[1])} (reference: ${match[2]})`;
   match = /^连接检查失败：(.+)$/.exec(text);

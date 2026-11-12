@@ -283,6 +283,30 @@ export async function promptContentForMessage(message, {
   return content;
 }
 
+/**
+ * Host codes used when an attachment-bearing prompt is refused.
+ * Older Hosts (and the dsh-im test doubles) used the bare `attachment-error`;
+ * the current session controller raises the namespaced
+ * `session/attachment-invalid`. Accept both spellings so the non-vision image
+ * fallback keeps working across Host versions.
+ */
+function isAttachmentRejection(error) {
+  const code = String(error?.code ?? '');
+  return code === 'attachment-error' || code.endsWith('attachment-invalid');
+}
+
+/**
+ * Host wording used when a prompt carrying images reaches a non-vision model.
+ * The Host plugin API can forward only the message text (its `code`/`details`
+ * are dropped, so the client sees the generic `internal` code), which is why
+ * the text itself is part of the detection.
+ */
+const MODEL_IMAGE_REJECTION_TEXT = /does not support image input/i;
+
+function isModelImageRejectionText(error) {
+  return MODEL_IMAGE_REJECTION_TEXT.test(String(error?.message ?? ''));
+}
+
 /** Return only allowlisted, user-safe image failure details. */
 export function imagePromptDiagnostic(error) {
   if (error instanceof ImagePromptError) {
@@ -292,7 +316,13 @@ export function imagePromptDiagnostic(error) {
       userMessage: error.userMessage,
     };
   }
-  if (error?.code !== 'attachment-error' || typeof error?.details?.reason !== 'string') {
+  if (!isAttachmentRejection(error) || typeof error?.details?.reason !== 'string') {
+    // Code and details can be lost on the plugin API hop; the Host message is
+    // then the only signal, and it names the same condition.
+    if (isModelImageRejectionText(error)) {
+      const reason = 'MODEL_DOES_NOT_SUPPORT_IMAGES';
+      return { code: 'attachment-error', reason, userMessage: t(HOST_ATTACHMENT_USER_MESSAGES[reason]) };
+    }
     return null;
   }
   const reason = error.details.reason;
@@ -347,6 +377,12 @@ export function contentWithoutImages(content) {
 
 /** Whether an error is the Host rejecting image input for a non-vision model. */
 export function isModelImageRejection(error) {
-  return error?.code === 'attachment-error'
-    && error?.details?.reason === 'MODEL_DOES_NOT_SUPPORT_IMAGES';
+  if (isAttachmentRejection(error)) {
+    const reason = error?.details?.reason;
+    // Some Host/API layers forward only code+message, so a missing reason still
+    // counts: staging the bytes as workspace files is the best-effort path for
+    // any attachment rejection that reached us with image content.
+    return reason === undefined || reason === 'MODEL_DOES_NOT_SUPPORT_IMAGES';
+  }
+  return isModelImageRejectionText(error);
 }

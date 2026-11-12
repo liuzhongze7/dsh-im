@@ -1,4 +1,5 @@
 import * as React from 'react';
+import youduLogo from './channels/youdu/youdu-logo.js';
 
 const h = React.createElement;
 
@@ -152,4 +153,16 @@ export function OfficeLogoGlyph({ size } = {}) {
   },
   h('path', { fill: 'currentColor', d: 'M4 3.5h10.5a2 2 0 0 1 2 2v13H4v-15Zm2.2 3v1.8h2V6.5h-2Zm4.1 0v1.8h2V6.5h-2Zm-4.1 4v1.8h2v-1.8h-2Zm4.1 0v1.8h2v-1.8h-2ZM8.4 15v3.5h3V15h-3Z' }),
   h('path', { fill: 'currentColor', d: 'M18.3 8.2h1.5v3h3v1.5h-3v3h-1.5v-3h-3v-1.5h3v-3Z' }));
+}
+
+export function YouduLogoGlyph({ size = 32 } = {}) {
+  return h('img', {
+    src: youduLogo,
+    // 品牌图标是位图（其余渠道为内联 SVG），父节点已 aria-hidden，空 alt 避免英文界面出现中文。
+    alt: '',
+    width: size,
+    height: size,
+    'data-im-channel-logo': 'youdu',
+    style: { objectFit: 'contain', verticalAlign: 'middle' },
+  });
 }

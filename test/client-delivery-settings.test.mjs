@@ -102,7 +102,7 @@ const connectedAccount = Object.freeze({
   }),
 });
 
-test('delivery settings define only the ten supported IM channel routes', () => {
+test('delivery settings define only the eleven supported IM channel routes', () => {
   assert.deepEqual(BOT_SETTINGS_TABS, [
     { id: 'delivery', label: '投递设置' },
     { id: 'access', label: '访问设置' },
@@ -114,11 +114,12 @@ test('delivery settings define only the ten supported IM channel routes', () => 
   ]);
   assert.equal(botSettingsTabsForChannel('weixin'), BOT_SETTINGS_TABS);
   assert.equal(botSettingsTabsForChannel('dingtalk'), BOT_SETTINGS_TABS);
+  assert.equal(botSettingsTabsForChannel('youdu'), BOT_SETTINGS_TABS);
   assert.equal(botSettingsTabsForChannel('feishu'), FEISHU_BOT_SETTINGS_TABS);
   assert.equal(DELIVERY_RPC_CHANNEL, '/dsh-im-delivery');
   assert.deepEqual(Object.keys(DELIVERY_CHANNEL_DEFINITIONS), [
     'weixin', 'feishu', 'dingtalk', 'wecom', 'wecomApp', 'qq',
-    'slack', 'telegram', 'discord', 'whatsapp', 'imessage',
+    'slack', 'telegram', 'discord', 'whatsapp', 'youdu', 'imessage',
   ]);
   assert.deepEqual(
     DELIVERY_CHANNEL_DEFINITIONS.feishu.fields.user.map((field) => field.key),
@@ -131,6 +132,15 @@ test('delivery settings define only the ten supported IM channel routes', () => 
   assert.deepEqual(
     DELIVERY_CHANNEL_DEFINITIONS.telegram.fields.topic.map((field) => field.key),
     ['chatId', 'messageThreadId'],
+  );
+  // 有度单聊与群聊都用 chatId 投递（服务端单聊把 chatId 解析为对方用户 ID）。
+  assert.deepEqual(
+    DELIVERY_CHANNEL_DEFINITIONS.youdu.fields.user.map((field) => field.key),
+    ['chatId'],
+  );
+  assert.deepEqual(
+    DELIVERY_CHANNEL_DEFINITIONS.youdu.fields.group.map((field) => field.key),
+    ['chatId'],
   );
   assert.equal('office' in DELIVERY_CHANNEL_DEFINITIONS, false);
   assert.deepEqual(Object.keys(ACCESS_CHANNEL_DEFINITIONS), Object.keys(DELIVERY_CHANNEL_DEFINITIONS));

@@ -49,7 +49,8 @@ function fileSources(message) {
   return Array.isArray(message?.files) ? message.files.filter(Boolean) : [];
 }
 
-function displayName(value, fallback) {
+/** Sanitize a user-supplied file name into a basename safe for the filesystem. */
+export function displayFileName(value, fallback) {
   if (typeof value !== 'string') return fallback;
   const cleaned = value
     .replaceAll('\\', '/')
@@ -60,8 +61,9 @@ function displayName(value, fallback) {
   return cleaned || fallback;
 }
 
-function storageName(value, index) {
-  const cleaned = displayName(value, 'file')
+/** Storage name for one staged file: an index prefix plus the sanitized basename. */
+export function storageFileName(value, index) {
+  const cleaned = displayFileName(value, 'file')
     .replace(/[^\p{L}\p{N}._ -]/gu, '_')
     .replace(/^\.+/, '')
     .slice(0, 160) || 'file';
@@ -181,8 +183,8 @@ export async function stageInboundFiles(message, {
           `Inbound file ${index + 1} returned no readable data.`,
         );
       }
-      const name = displayName(loaded.name ?? source?.name, `file-${index + 1}`);
-      const path = join(directory, storageName(name, index));
+      const name = displayFileName(loaded.name ?? source?.name, `file-${index + 1}`);
+      const path = join(directory, storageFileName(name, index));
       if (loaded.data) {
         await writeFile(path, loaded.data, { mode: 0o600, signal });
       } else {
