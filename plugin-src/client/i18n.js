@@ -1043,6 +1043,8 @@ const EN = Object.freeze({
   '添加群': 'Add group',
   '保存按群设置': 'Save per-group settings',
   '机器人 botId（不可修改）': 'Bot botId (read-only)',
+  '机器人 botId': 'Bot botId',
+  '机器人 secret': 'Bot secret',
   '服务器地址': 'Server address',
   '留空表示不修改（当前 ${masked}）': 'Leave empty to keep the current value (${masked})',
   '留空表示不修改': 'Leave empty to keep the current value',
