@@ -129,6 +129,8 @@ function pluginPaths(config) {
   return {
     config: resolve(config.configPath ?? join(root, 'config.json')),
     bots: resolve(config.botsDir ?? join(root, 'bots')),
+    // 失败现场落盘目录：桌面端不保存宿主 stdout，参考号只能靠这里的 JSONL 反查。
+    failures: resolve(config.failuresDir ?? join(root, 'failures')),
   };
 }
 
@@ -250,6 +252,7 @@ export async function createProductionController(ctx, config = {}, internals = {
         replyTimeoutMs: config.replyTimeoutMs ?? 600_000,
         connectTimeoutMs: config.connectTimeoutMs ?? 20_000,
         botId: botConfig.sourceBotId ?? botConfig.botId ?? botId,
+        failureLogDir: paths.failures,
         contextEnhancement: createYouduContextEnhancement(workspaces, botId),
         groupHistory: createYouduGroupHistory(groupStore, botId),
         groupContextFiles: createYouduGroupContextFiles(workspaces, botId, {

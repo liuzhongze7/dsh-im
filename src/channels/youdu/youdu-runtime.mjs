@@ -118,6 +118,7 @@ export class YouduRuntime {
   #harness;
   #state;
   #logger;
+  #failureLogDir;
   #replyTimeoutMs;
   #connectTimeoutMs;
   #botId;
@@ -150,6 +151,7 @@ export class YouduRuntime {
     harness,
     state,
     logger = console,
+    failureLogDir = '',
     replyTimeoutMs = 600_000,
     connectTimeoutMs = 20_000,
     botId = '',
@@ -172,6 +174,7 @@ export class YouduRuntime {
     this.#harness = harness;
     this.#state = state;
     this.#logger = logger;
+    this.#failureLogDir = typeof failureLogDir === 'string' ? failureLogDir : '';
     this.#replyTimeoutMs = replyTimeoutMs;
     this.#connectTimeoutMs = connectTimeoutMs;
     this.#botId = botId ?? '';
@@ -358,6 +361,7 @@ export class YouduRuntime {
       state: this.#state,
       status: this.#status,
       logger: this.#logger,
+      failureLogDir: this.#failureLogDir,
       replyTimeoutMs: this.#replyTimeoutMs,
       ownerUserId: this.#config.ownerUserId,
       botId: this.#botId || this.#config.sourceBotId || this.#config.botId,

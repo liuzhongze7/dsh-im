@@ -4,6 +4,7 @@ import {
   clearLastMessageFailure,
   messageFailureText,
 } from '../shared/message-failure.mjs';
+import { recordFailure } from '../shared/failure-log.mjs';
 import {
   prefetchInboundFiles,
   hasInboundFiles,
@@ -271,6 +272,7 @@ export class YouduBridge {
   #state;
   #status;
   #logger;
+  #failureLogDir;
   #replyTimeoutMs;
   #ownerUserId;
   #botId;
@@ -306,6 +308,7 @@ export class YouduBridge {
     state,
     status = createYouduBridgeStatus(),
     logger = console,
+    failureLogDir = '',
     replyTimeoutMs = 600_000,
     ownerUserId = '*',
     botId = '',
@@ -331,6 +334,7 @@ export class YouduBridge {
     this.#state = state;
     this.#status = status;
     this.#logger = logger;
+    this.#failureLogDir = typeof failureLogDir === 'string' ? failureLogDir : '';
     this.#replyTimeoutMs = replyTimeoutMs;
     this.#ownerUserId = ownerUserId ?? '*';
     this.#botId = botId ?? '';
@@ -363,6 +367,29 @@ export class YouduBridge {
 
   get status() {
     return structuredClone(this.#status);
+  }
+
+  /**
+   * 把失败现场按参考号落盘（`<dataDir>/failures/YYYY-MM-DD.jsonl`），返回写入路径。
+   *
+   * 桌面端不保存宿主 stdout，logger 里那一行 `[ref] codeB64= ...` 事后查不到；
+   * 落盘之后用户报回来的参考号才能直接 grep 出真实异常。只做诊断，不参与控制流。
+   */
+  async #recordFailure(failure, error, message, extra = {}) {
+    return recordFailure(this.#failureLogDir, {
+      channel: 'youdu',
+      failure,
+      error,
+      context: {
+        botId: this.#botId || null,
+        conversationKey: message ? conversationKey(message) : null,
+        chatId: message?.chatId ?? null,
+        chatType: message?.chatType ?? null,
+        messageId: message?.messageId ?? null,
+        senderId: message?.senderId ?? null,
+        ...extra,
+      },
+    }, { logger: this.#logger });
   }
 
   /** 处理一条入站消息帧；返回 Promise（入队串行，防止并发写会话）。 */
@@ -463,12 +490,16 @@ export class YouduBridge {
       if (commandRunner) {
         let task;
         task = this.#processFastCommand(message, key, commandText, commandRunner)
-          .catch((error) => {
+          .catch(async (error) => {
             if (error?.code === 'turn-stopped' || this.#signal?.aborted) return;
             this.#status.lastError = error?.message ?? String(error);
             const failure = setLastMessageFailure(this.#status, error);
+            const recorded = await this.#recordFailure(failure, error, message, {
+              commandText: commandText.slice(0, 200),
+            });
             this.#logger.error?.(
-              `[dsh-im:youdu] failed to process a command [${failure.referenceId}]:`,
+              `[dsh-im:youdu] failed to process a command [${failure.referenceId}]`
+              + `${recorded ? ` recorded=${recorded}` : ''}:`,
               error,
             );
             return this.#bot.sendReply(messageTarget(message), messageFailureText(failure))
@@ -1280,8 +1311,13 @@ export class YouduBridge {
         `staging=${error?.stagingFailure ?? '-'}`,
         `msg=${String(error?.message ?? '').slice(0, 240)}`,
       ].join(' ');
+      // 宿主 stdout 在桌面端不落盘，同一份诊断必须自己存一份，否则参考号无从反查。
+      const recorded = await this.#recordFailure(failure, error, message, {
+        batchFailure: batchFailureMessage,
+      });
       this.#logger.error?.(
-        `[dsh-im:youdu] failed to process an inbound message [${failure.referenceId}] ${diagnostic}:`,
+        `[dsh-im:youdu] failed to process an inbound message [${failure.referenceId}]`
+        + `${recorded ? ` recorded=${recorded}` : ''} ${diagnostic}:`,
         error,
       );
       const errorMessage = messageFailureText(failure);

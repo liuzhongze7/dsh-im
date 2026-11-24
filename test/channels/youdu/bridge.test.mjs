@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -345,4 +345,51 @@ test('a failed text reply still delivers the generated result file', async (t) =
   assert.equal(delivered.length, 1, 'the result file must still be sent when the text reply fails');
   assert.equal(delivered[0].kind, 'file');
   assert.match(String(bridge.status.lastError), /ack timeout/);
+});
+
+// 桌面端不保存宿主 stdout：失败现场必须自己落盘，否则用户报回来的参考号无从反查。
+test('a failed inbound message leaves a record keyed by its reference id', async (t) => {
+  const { state } = stateFixture();
+  const sent = [];
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-im-youdu-failures-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const harness = baseHarness({
+    createSession: async () => {
+      const error = new Error('provider rejected the session');
+      error.code = 'brand-new-rpc-code';
+      error.method = 'session.create';
+      error.details = { workspaceId: 'ws-1' };
+      throw error;
+    },
+  });
+  const bridge = new YouduBridge({
+    bot: makeBot(sent),
+    harness,
+    state,
+    ownerUserId: '*',
+    botId: 'bot-1',
+    failureLogDir: dir,
+  });
+
+  await bridge.accept(frame('fail-1', '你好'));
+
+  const reply = String(sent.at(-1)?.text ?? '');
+  assert.match(reply, /INTERNAL_UNKNOWN/u, 'an unmapped host code still reports the fallback code');
+  const referenceId = /MF-[A-Z0-9]{8}/u.exec(reply)?.[0];
+  assert.ok(referenceId, 'the failure reply must carry a reference id');
+
+  const file = join(dir, `${new Date().toISOString().slice(0, 10)}.jsonl`);
+  const records = (await readFile(file, 'utf8'))
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line));
+  const record = records.find((entry) => entry.referenceId === referenceId);
+  assert.ok(record, `the reference id must be findable in ${file}`);
+  assert.equal(record.channel, 'youdu');
+  assert.equal(record.code, 'INTERNAL_UNKNOWN');
+  assert.equal(record.error.code, 'brand-new-rpc-code');
+  assert.equal(record.error.method, 'session.create');
+  assert.deepEqual(record.error.details, { workspaceId: 'ws-1' });
+  assert.equal(record.context.messageId, 'fail-1');
+  assert.equal(record.context.senderId, 'owner-1');
 });
