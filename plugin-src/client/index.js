@@ -125,6 +125,19 @@ const CHANNELS = Object.freeze([
   { id: 'office', label: 'AI Office', note: '（实验功能）' },
 ]);
 
+// 二开定制：对外发布的有度数字助理只暴露有度渠道，避免终端用户被其它渠道干扰。
+// 设置页收窄到单渠道时不渲染左侧渠道栏，也不在顶部保留 GitHub 入口与会话记录按钮。
+// 渠道本身的配置能力（宿主侧）保持不动，恢复多渠道只需要改回这里的 allowlist。
+export const CUSTOM_UI = Object.freeze({
+  channelAllowlist: Object.freeze(['youdu']),
+  channelRail: false,
+  showGithubLink: false,
+  showSessionHistory: false,
+  brandName: '有度数字助理',
+  brandTagline: '基于 DeepSeek Harness',
+  pageLabel: '有度数字助理设置',
+});
+
 function WeixinLogo() {
   return h('span', { className: 'dim-logo dim-logoWeixin', 'aria-hidden': 'true' },
     h(WeixinLogoGlyph));
@@ -257,11 +270,28 @@ export function IMSettingsTab({
   preferredSectionId,
   browserLocation = globalThis.location,
   navigateToRecoveryUrl = replacePageLocation,
+  // 二开定制开关：默认保持上游完整多渠道界面，发布构建由 CUSTOM_UI 收窄到有度。
+  channelAllowlist = null,
+  channelRail = true,
+  showGithubLink = true,
+  showSessionHistory = true,
+  brandName = 'DSH-IM',
+  brandTagline = '让 DeepSeek Harness 触手可及',
+  pageLabel = 'IM机器人设置',
 }) {
+  const allowedIds = React.useMemo(
+    () => (channelAllowlist === null
+      ? null
+      : new Set(Array.isArray(channelAllowlist) ? channelAllowlist : [])),
+    [channelAllowlist],
+  );
   const [selected, setSelected] = React.useState(() => (
     preferredSectionId === GLOBAL_SETTINGS_TAB_ID
-      || CHANNELS.some((channel) => channel.id === preferredSectionId)
-      ? preferredSectionId : 'weixin'
+      || (allowedIds === null
+        ? CHANNELS.some((channel) => channel.id === preferredSectionId)
+        : allowedIds.has(preferredSectionId))
+      ? preferredSectionId
+      : (allowedIds === null ? 'weixin' : [...allowedIds][0])
   ));
   const [loopbackRecovery, setLoopbackRecovery] = React.useState(null);
   const [runningVersion, setRunningVersion] = React.useState(IM_PLUGIN_VERSION);
@@ -271,14 +301,16 @@ export function IMSettingsTab({
   // channel list is what every later lookup (active tab, rail) reads from.
   const emailEnabled = useEmailChannelEnabled(emailRpcCall);
   const visibleChannels = React.useMemo(
-    () => CHANNELS.filter((channel) => channel.id !== 'email' || emailEnabled),
-    [emailEnabled],
+    () => CHANNELS.filter((channel) => (allowedIds === null || allowedIds.has(channel.id))
+      && (channel.id !== 'email' || emailEnabled)),
+    [allowedIds, emailEnabled],
   );
   const githubTooltipId = React.useId();
   const sessionHistoryTooltipId = React.useId();
   const generalSettingsTooltipId = React.useId();
   const globalSettingsSelected = selected === GLOBAL_SETTINGS_TAB_ID;
-  const active = visibleChannels.find((channel) => channel.id === selected) ?? visibleChannels[0];
+  const active = visibleChannels.find((channel) => channel.id === selected)
+    ?? visibleChannels[0] ?? CHANNELS[0];
   const activeTabId = globalSettingsSelected
     ? 'dim-general-settings-trigger'
     : `dim-tab-${active.id}`;
@@ -342,20 +374,20 @@ export function IMSettingsTab({
     openBotSettings: setDeliverySettings,
   }), []);
   return h(WorkspaceDirectoryPickerContext.Provider, { value: workspaceDirectoryPicker },
-    h('section', { className: 'dim-page', 'aria-label': 'IM机器人设置' },
+    h('section', { className: 'dim-page', 'aria-label': pageLabel },
     h('header', { className: 'dim-title' },
       h('div', { className: 'dim-brand' },
         h('div', { className: 'dim-brandHeading' },
-          h('strong', { className: 'dim-brandName' }, 'DSH-IM'),
+          h('strong', { className: 'dim-brandName' }, brandName),
           h('span', { className: 'dim-brandVersion' }, `v${runningVersion}`)),
-        h('p', null, '让 DeepSeek Harness 触手可及')),
+        h('p', null, brandTagline)),
       h('div', { className: 'dim-titleActions' },
         h(UpdatePanel, {
           rpcCall: rpcCalls.updateRpcCall,
           clientVersion: IM_PLUGIN_VERSION,
           onStatus: reportUpdateStatus,
         }),
-      h('span', { className: 'dim-githubAction' },
+      showGithubLink ? h('span', { className: 'dim-githubAction' },
         h('a', {
           className: 'dim-githubLink',
           href: 'https://github.com/xmanrui/dsh-im',
@@ -378,8 +410,8 @@ export function IMSettingsTab({
           id: githubTooltipId,
           className: 'dim-githubTooltip',
           role: 'tooltip',
-        }, '帮助与反馈 · 前往 GitHub')),
-      onOpenSessionHistory ? h('span', { className: 'dim-sessionHistoryAction' },
+        }, '帮助与反馈 · 前往 GitHub')) : null,
+      showSessionHistory && onOpenSessionHistory ? h('span', { className: 'dim-sessionHistoryAction' },
         h('button', {
           type: 'button',
           className: 'dim-sessionHistoryButton',
@@ -418,8 +450,8 @@ export function IMSettingsTab({
           role: 'tooltip',
         }, '通用设置'))),
     ),
-    h('div', { className: 'dim-layout' },
-      h('nav', { className: 'dim-rail', role: 'tablist', 'aria-label': 'IM 设置导航' },
+    h('div', { className: channelRail ? 'dim-layout' : 'dim-layout dim-layoutSolo' },
+      channelRail ? h('nav', { className: 'dim-rail', role: 'tablist', 'aria-label': 'IM 设置导航' },
         visibleChannels.map((channel) => h('button', {
           key: channel.id,
           type: 'button',
@@ -437,13 +469,13 @@ export function IMSettingsTab({
         h('span', { className: 'dim-channelCopy' },
           h('strong', null, channel.label),
           channel.note ? h('small', { className: 'dim-channelNote' }, channel.note) : null,
-        )))),
-      h('div', { className: 'dim-divider', 'aria-hidden': 'true' }),
+        )))) : null,
+      channelRail ? h('div', { className: 'dim-divider', 'aria-hidden': 'true' }) : null,
       h('main', {
         className: 'dim-panel',
         role: 'tabpanel',
         id: activePanelId,
-        'aria-labelledby': activeTabId,
+        'aria-labelledby': channelRail ? activeTabId : undefined,
       },
       loopbackRecovery
         ? h(LoopbackRecoveryNotice, {
@@ -656,6 +688,12 @@ export function apply(ctx) {
     return h(IMPanelErrorBoundary, null,
       h(IMSettingsTab, {
         ...panelDependencies, preferredSectionId,
+        ...CUSTOM_UI,
+        // The brand strings live in the source dictionaries like every other
+        // user-visible literal, so the panel renders them through the locale.
+        brandName: t(CUSTOM_UI.brandName),
+        brandTagline: t(CUSTOM_UI.brandTagline),
+        pageLabel: t(CUSTOM_UI.pageLabel),
         onOpenSessionHistory: historyAvailable ? channelSessionsPage.open : undefined,
       }));
   }
@@ -699,7 +737,7 @@ export function apply(ctx) {
           name: 'settings.section',
           id: 'xmanrui-dsh-im',
           order: 21,
-          label: () => t('IM机器人'),
+          label: () => t('有度数字助理'),
           locale: IM_LOCALE_NAMESPACE,
           inject: () => panelDependencies,
         }, buildPanelElement);

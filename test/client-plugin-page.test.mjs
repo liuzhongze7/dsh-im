@@ -110,11 +110,11 @@ test('localized detail action opens the shared IM panel without a back button', 
   let renderer;
   t.after(() => act(() => renderer?.unmount()));
   act(() => { renderer = create(host.element('plugins.detail.actions', { subject: bundle })); });
-  assert.deepEqual(renderer.root.findByType('button').children, ['打开 IM机器人']);
+  assert.deepEqual(renderer.root.findByType('button').children, ['打开有度数字助理']);
   act(() => renderer.update(host.element('plugins.detail.actions', { subject: bundle }, 'en')));
   const open = renderer.root.findByType('button');
   assert.equal(open.props.type, 'button');
-  assert.deepEqual(open.children, ['Open IM bots']);
+  assert.deepEqual(open.children, ['Open Youdu Assistant']);
   act(() => open.props.onClick());
   assert.deepEqual(host.selected, [IM_MAIN_PANEL_ID]);
   act(() => renderer.update(host.element('main', {}, 'en')));
@@ -177,7 +177,7 @@ test('sidebar opens the existing main panel with a regular-weight linked-bubble 
   await host.provideNavigation();
   const { options } = host.slots.entries.get('sidebar.panellist');
   assert.equal(options.id, host.slots.entries.get('main').options.key);
-  assert.equal(options.label(), 'IM机器人');
+  assert.equal(options.label(), '有度数字助理');
   assert.ok(host.slots.entries.has('plugins.detail.actions'));
   let renderer;
   t.after(() => act(() => renderer?.unmount()));
@@ -278,10 +278,9 @@ test('client startup waits for configuration before showing the sidebar', async 
         renderer = create(React.createElement(page.component, page.options.inject()));
         await flush();
       });
-      const entry = renderer.root.findByProps({ className: 'dim-sessionHistoryButton' });
-      assert.equal(entry.props['aria-label'], '会话记录');
-      act(() => entry.props.onClick());
-      assert.deepEqual(selected, [CHANNEL_SESSIONS_PANEL_ID]);
+      // 二开定制：对外发布的面板只保留更新与通用设置两个入口，会话记录按钮不再渲染。
+      assert.equal(renderer.root.findAllByProps({ className: 'dim-sessionHistoryButton' }).length, 0);
+      assert.deepEqual(selected, []);
       act(() => renderer.unmount());
     }
     const { globalSettingsRpcCall } = slots.entries.get('settings.section').options.inject();

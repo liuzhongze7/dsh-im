@@ -306,6 +306,28 @@ test('IM settings renders twelve IM channels plus the AI Office connector', asyn
   assert.doesNotMatch(markup, />INSTANT MESSAGING<|>Channel<|>微信设置</);
 });
 
+test('the published panel hides the channel rail and shows only the Youdu channel', async () => {
+  const { CUSTOM_UI } = await import('../plugin-src/client/index.js');
+  const markup = renderToStaticMarkup(React.createElement(IMSettingsTab, {
+    youduRpcCall: async () => ({ ok: true, value: {} }),
+    ...CUSTOM_UI,
+  }));
+
+  assert.match(markup, /<strong class="dim-brandName">有度数字助理<\/strong>/);
+  assert.match(markup, /基于 DeepSeek Harness/);
+  assert.match(markup, /aria-label="有度数字助理设置"/);
+  assert.match(markup, /id="dim-panel-youdu"/);
+  assert.match(markup, /class="dim-layout dim-layoutSolo"/);
+  assert.doesNotMatch(markup, /role="tablist"/);
+  assert.doesNotMatch(markup, /class="dim-rail"/);
+  assert.doesNotMatch(markup, /class="dim-divider"/);
+  assert.doesNotMatch(markup, /class="dim-githubAction"/);
+  assert.doesNotMatch(markup, /class="dim-sessionHistoryAction"/);
+  assert.equal((markup.match(/role="tab"/g) ?? []).length, 0);
+  assert.match(markup, /aria-label="检查更新"/);
+  assert.match(markup, /id="dim-general-settings-trigger"/);
+});
+
 test('the general settings gear sits to the right of GitHub and outside the channel rail', () => {
   const markup = renderToStaticMarkup(React.createElement(IMSettingsTab, {
     globalSettingsRpcCall: async () => ({ ok: true, value: { ttlHours: 0 } }),
@@ -1348,7 +1370,7 @@ test('client registers one top-level bilingual IM settings section with a direct
     assert.equal(registrations[0].options.id, 'xmanrui-dsh-im');
     assert.equal(registrations[0].options.order, 21);
     assert.equal(registrations[0].options.locale, IM_LOCALE_NAMESPACE);
-    assert.equal(registrations[0].options.label(), 'IM bots');
+    assert.equal(registrations[0].options.label(), 'Youdu Assistant');
     assert.equal(typeof registrations[0].component, 'function');
 
     const injected = registrations[0].options.inject();
@@ -1391,15 +1413,18 @@ test('client registers one top-level bilingual IM settings section with a direct
     disposeMirror();
     assert.equal(localeListeners.size, 0);
 
-    assert.match(markup, /Connecting DeepSeek Harness/);
+    assert.match(markup, /Built on DeepSeek Harness/);
     assert.match(markup, new RegExp(
       `class="dim-brandVersion">v${IM_PLUGIN_VERSION.replaceAll('.', '\\.')}<\\/span>`,
     ));
-    assert.match(markup, /Help &amp; feedback · Open GitHub/);
+    assert.match(markup, /Youdu Assistant/);
+    assert.match(markup, /aria-label="Youdu Assistant settings"/);
+    assert.match(markup, /id="dim-panel-youdu"/);
     assert.match(markup, /General settings/);
-    assert.match(markup, />WeChat<|>Feishu<|>DingTalk<|>WeCom</);
-    assert.match(markup, />QQ<[^]*>Slack<[^]*>Telegram<[^]*>Discord<[^]*>WhatsApp</);
-    assert.match(markup, />AI Office<\/strong><small class="dim-channelNote">\(Experimental\)<\/small>/);
+    assert.doesNotMatch(markup, /Help &amp; feedback · Open GitHub/);
+    assert.doesNotMatch(markup, />WeChat<|>Feishu<|>DingTalk<|>WeCom</);
+    assert.doesNotMatch(markup, />QQ<|>Slack<|>Telegram<|>Discord<|>WhatsApp</);
+    assert.doesNotMatch(markup, />AI Office<|>Matrix<|>\(Experimental\)</);
     assert.doesNotMatch(markup, /[\p{Script=Han}]/u);
   } finally {
     setImTranslator(null);

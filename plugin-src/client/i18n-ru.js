@@ -203,6 +203,10 @@ const CLIENT = Object.freeze({
   // Plugin page, bot tabs and the access policy form.
   'IM机器人': 'IM-боты',
   '打开 IM机器人': 'Открыть IM-ботов',
+  '有度数字助理': 'Помощник Youdu',
+  '打开有度数字助理': 'Открыть помощника Youdu',
+  '基于 DeepSeek Harness': 'На базе DeepSeek Harness',
+  '有度数字助理设置': 'Настройки помощника Youdu',
   'IM机器人设置': 'Настройки IM-ботов',
   'IM 面板加载失败': 'Не удалось загрузить панель IM',
   '更多机器人设置': 'Другие настройки ботов',

@@ -10,7 +10,7 @@ function OpenImAction({ subject, packageName, onOpen, t }) {
   if (subject.kind === 'row' && subject.row?.moduleName !== packageName) return null;
   return h('button', {
     type: 'button', className: 'dim-pluginOpen', onClick: onOpen,
-  }, t('打开 IM机器人'));
+  }, t('打开有度数字助理'));
 }
 
 function ImPluginPage({ renderPanel }) {
@@ -65,7 +65,7 @@ export function installImPluginPage(ctx, { packageName, renderPanel, sidebarVisi
         stopSidebar = pageCtx.slots.inject('sidebar.panellist', () =>
           pageCtx.slots.register({
             name: 'sidebar.panellist', id: IM_MAIN_PANEL_ID,
-            order: 10, label: () => pageCtx.locale.bind(IM_LOCALE_NAMESPACE)('IM机器人'),
+            order: 10, label: () => pageCtx.locale.bind(IM_LOCALE_NAMESPACE)('有度数字助理'),
             locale: IM_LOCALE_NAMESPACE,
           }, ImSidebarIcon));
       };

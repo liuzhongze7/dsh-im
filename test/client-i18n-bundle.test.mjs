@@ -77,9 +77,9 @@ test('the published client registers the complete Russian pack and renders each 
   assert.equal(locale.bind()('绑定 DS Bot'), 'Привязать DS Bot');
   assert.equal(locale.bind()('机器人群聊行为'), 'Поведение бота в группах');
   for (const [id, label, loading] of [
-    ['ru', 'IM-боты', 'Загружаем настройки боковой панели…'],
-    ['en', 'IM bots', en['正在读取侧边栏设置…']],
-    ['zh', 'IM机器人', '正在读取侧边栏设置…'],
+    ['ru', 'Помощник Youdu', 'Загружаем настройки боковой панели…'],
+    ['en', 'Youdu Assistant', en['正在读取侧边栏设置…']],
+    ['zh', '有度数字助理', '正在读取侧边栏设置…'],
   ]) {
     active = id;
     assert.equal(slots.get('settings.section').options.label(), label);

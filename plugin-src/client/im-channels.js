@@ -347,7 +347,7 @@ class ChannelListPage extends React.Component {
     return this.props.onBackToIm ? h('button', {
       type: 'button', className: 'im-channel-back-to-im', style: styles.button,
       onClick: this.props.onBackToIm,
-    }, '返回 IM机器人') : null;
+    }, '返回有度数字助理') : null;
   }
 
   render() {
