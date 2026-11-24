@@ -406,7 +406,7 @@ function ConnectionEditor({ account, disabled, onSave, onCancel }) {
     field('可执行命令的用户 ID（可选）', {
       value: owner,
       onChange: (e) => setOwner(e.target.value),
-      placeholder: '留空表示命令默认关闭；填 * 表示不限制',
+      placeholder: '留空表示命令默认关闭；填写有度用户 ID 后该用户可执行命令（填 * 等于未配置）',
       maxLength: 128,
     }),
     error ? h('p', { className: 'dim-credentialError', role: 'alert' },
@@ -892,7 +892,7 @@ export function YouduSettingsTab({ rpcCall }) {
             field('可执行命令的用户 ID（可选）', {
               value: ownerUserId,
               onChange: (e) => setOwnerUserId(e.target.value),
-              placeholder: '留空表示命令默认关闭；填 * 表示不限制',
+              placeholder: '留空表示命令默认关闭；填写有度用户 ID 后该用户可执行命令（填 * 等于未配置）',
               maxLength: 128,
             }),
             credentialError ? h('p', { className: 'dim-credentialError', role: 'alert' },

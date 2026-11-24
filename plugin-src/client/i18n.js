@@ -1439,7 +1439,7 @@ const EN = Object.freeze({
   '允许的私聊用户 ID (可选)': 'Allowed direct-message user ID (optional)',
   '留空表示不限制（*）': 'Leave empty for no restriction (*)',
   '可执行命令的用户 ID（可选）': 'User IDs allowed to run commands (optional)',
-  '留空表示命令默认关闭；填 * 表示不限制': 'Leave blank to keep commands off; use * for no restriction',
+  '留空表示命令默认关闭；填写有度用户 ID 后该用户可执行命令（填 * 等于未配置）': 'Leave blank to keep commands off; enter a Youdu user ID so that user can run commands (* means unconfigured)',
   '保存连接信息': 'Save connection',
   '正在读取有度机器人列表': 'Loading the Youdu bot list',
   '正在读取有度连接状态…': 'Loading the Youdu connection status…',
