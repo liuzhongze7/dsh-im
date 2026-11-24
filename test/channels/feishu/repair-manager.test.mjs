@@ -45,6 +45,7 @@ test('CallbackRepairManager targets one real app with only the callback and requ
         FEISHU_MESSAGE_READ_SCOPE,
         FEISHU_RESOURCE_SCOPE,
         'im:message.group_at_msg.include_bot:readonly',
+        'im:message.group_msg',
         ...SLASH_COMMAND_TENANT_SCOPES,
       ],
     },
@@ -149,7 +150,10 @@ test('an unsafe SDK URL becomes a safe terminal registration error', async () =>
   });
   manager.start();
   await waitFor(() => manager.status().state === 'error');
-  assert.deepEqual(manager.status().error, {
+  assert.equal(manager.status().error.details.stage, 'qr.begin');
+  assert.match(manager.status().error.details.referenceId, /^IM-CONN-[A-F0-9]{8}$/);
+  const { details, ...legacyError } = manager.status().error;
+  assert.deepEqual(legacyError, {
     code: 'registration_failed',
     message: 'Unable to register the Feishu app.',
   });

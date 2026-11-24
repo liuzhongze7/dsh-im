@@ -1,8 +1,10 @@
+import { createConnectionDiagnostics, atConnectionStage } from '../shared/connection-error.mjs';
 import { WSAuthFailureError, WSClient, WSReconnectExhaustedError } from '@wecom/aibot-node-sdk';
 
 import { createWecomBridgeStatus, WecomHarnessBridge } from './wecom-bridge.mjs';
 import { sendRememberedConnectionTest } from '../shared/connection-test.mjs';
 import { t } from '../shared/i18n.mjs';
+import { chunkMarkdownText } from '../shared/markdown-chunks.mjs';
 
 function timeoutError() {
   const error = new Error('Enterprise WeChat WebSocket authentication timed out');
@@ -31,10 +33,14 @@ export class WecomRuntime {
   #contextEnhancement;
   #accessPolicy;
   #logger;
+  #diagnostics;
   #replyTimeoutMs;
+  #streamRotateAfterMs;
+  #streamSilentProbeMs;
   #connectTimeoutMs;
   #maxReconnectAttempts;
   #createClient;
+  #createBridge;
   #status = createWecomRuntimeStatus();
   #client = null;
   #bridge = null;
@@ -51,9 +57,12 @@ export class WecomRuntime {
     accessPolicy,
     logger = console,
     replyTimeoutMs = 600_000,
+    streamRotateAfterMs = 510_000,
+    streamSilentProbeMs = 120_000,
     connectTimeoutMs = 20_000,
     maxReconnectAttempts = 10,
     createClient = (options) => new WSClient(options),
+    createBridge = (options) => new WecomHarnessBridge(options),
   }) {
     if (!config || !secret || !harness || !state) {
       throw new TypeError('WecomRuntime requires config, secret, Harness, and state');
@@ -64,8 +73,11 @@ export class WecomRuntime {
     this.#state = state;
     this.#contextEnhancement = contextEnhancement;
     this.#accessPolicy = accessPolicy;
-    this.#logger = logger;
+    this.#logger = logger; this.#diagnostics = createConnectionDiagnostics({ channel: 'wecom', logger });
+    this.#createBridge = createBridge;
     this.#replyTimeoutMs = replyTimeoutMs;
+    this.#streamRotateAfterMs = streamRotateAfterMs;
+    this.#streamSilentProbeMs = streamSilentProbeMs;
     this.#connectTimeoutMs = connectTimeoutMs;
     this.#maxReconnectAttempts = maxReconnectAttempts;
     this.#createClient = createClient;
@@ -94,11 +106,18 @@ export class WecomRuntime {
     signal.throwIfAborted();
     this.#status.startedAt = new Date().toISOString();
     this.#status.wecomConnectionState = 'connecting';
-    this.#status.lastError = null;
-    await this.#harness.ensureRunning();
+    this.#status.lastError = null; this.#status.error = null; this.#diagnostics.clear();
+    await atConnectionStage('harness.check', () => this.#harness.ensureRunning());
     this.#status.harnessReachable = true;
 
-    const silentSdkLogger = { debug() {}, info() {}, warn() {}, error() {} };
+    // The SDK's own logger reports reply ack errors (errcode/errmsg) that are
+    // invisible otherwise; keep debug/info quiet but surface warn/error.
+    const silentSdkLogger = {
+      debug() {},
+      info() {},
+      warn: (...args) => this.#logger.warn?.('[dsh-im:wecom-sdk]', ...args),
+      error: (...args) => this.#logger.error?.('[dsh-im:wecom-sdk]', ...args),
+    };
     const client = this.#createClient({
       botId: this.#config.remoteBotId,
       secret: this.#secret,
@@ -109,7 +128,7 @@ export class WecomRuntime {
       throw new TypeError('Enterprise WeChat client factory returned an invalid client');
     }
     this.#client = client;
-    this.#bridge = new WecomHarnessBridge({
+    this.#bridge = this.#createBridge({
       client,
       harness: this.#harness,
       state: this.#state,
@@ -118,6 +137,8 @@ export class WecomRuntime {
       status: this.#status,
       logger: this.#logger,
       replyTimeoutMs: this.#replyTimeoutMs,
+      streamRotateAfterMs: this.#streamRotateAfterMs,
+      streamSilentProbeMs: this.#streamSilentProbeMs,
       signal,
     });
 
@@ -136,7 +157,7 @@ export class WecomRuntime {
       this.#status.wecomConnectionState = 'connected';
       this.#status.lastCheckedAt = now;
       this.#status.lastConnectedAt = now;
-      this.#status.lastError = null;
+      this.#status.lastError = null; this.#status.error = null; this.#diagnostics.clear();
       readyResolve();
     };
     const onDisconnected = () => {
@@ -159,7 +180,8 @@ export class WecomRuntime {
         this.#status.ready = false;
         this.#status.wecomConnectionState = 'failed';
       }
-      this.#status.lastError = terminal ? error.name : 'connection-error';
+      this.#status.error = this.#diagnostics.report(error, { operation: 'connection.monitor', botId: this.#config?.botId, automatic: true }).publicError;
+      this.#status.lastError = this.#status.error.message;
       this.#logger.warn?.(`[dsh-im:wecom] bot ${this.#config.botId} connection error`);
     };
     const onMessage = (frame) => this.#bridge?.accept(frame);
@@ -168,7 +190,7 @@ export class WecomRuntime {
     client.on('reconnecting', onReconnecting);
     client.on('error', onError);
     client.on('message', onMessage);
-    client.on('event.enter_chat', (frame) => this.#bridge?.acceptEvent(frame));
+    // Menus are opened explicitly with /m or /menu; chat entry stays silent.
     client.on('event.template_card_event', (frame) => this.#bridge?.acceptEvent(frame));
 
     let timer;
@@ -191,7 +213,8 @@ export class WecomRuntime {
       }
       this.#status.ready = false;
       this.#status.wecomConnectionState = 'failed';
-      this.#status.lastError = error?.message ?? String(error);
+      this.#status.error = this.#diagnostics.report(error, { operation: 'connection.monitor', botId: this.#config?.botId, automatic: true }).publicError;
+      this.#status.lastError = this.#status.error.message;
       await this.#stopActive();
       throw error;
     } finally {
@@ -226,7 +249,17 @@ export class WecomRuntime {
     });
   }
 
-  async sendProactiveText(target, text, { signal } = {}) {
+  async presentSessionSyncApproval(target, interaction, options = {}) {
+    if (!this.#status.ready || !this.#bridge) return false;
+    const actor = typeof target?.route?.chatId === 'string' ? target.route.chatId.trim() : '';
+    if (!actor) return false;
+    return this.#bridge.presentSessionSyncApproval(interaction, {
+      key: options.key, actor, validate: options.validate,
+      send: (text) => this.sendProactiveText(target, text),
+    }, options);
+  }
+
+  async sendProactiveText(target, text, { signal, format = 'plain' } = {}) {
     const chatId = typeof target?.route?.chatId === 'string'
       ? target.route.chatId.trim() : '';
     if ((target?.kind !== 'user' && target?.kind !== 'group') || !chatId) {
@@ -240,10 +273,15 @@ export class WecomRuntime {
       throw error;
     }
     signal?.throwIfAborted();
-    await this.#client.sendMessage(chatId, {
-      msgtype: 'markdown',
-      markdown: { content: text },
-    });
+    // At most three UTF-8 bytes per UTF-16 unit: stay within the existing
+    // bridge's 18,000-byte budget while keeping Markdown structures intact.
+    const chunks = format === 'markdown' ? chunkMarkdownText(text, 6_000) : [text];
+    for (const content of chunks) {
+      signal?.throwIfAborted();
+      await this.#client.sendMessage(chatId, {
+        msgtype: 'markdown', markdown: { content },
+      });
+    }
     return { sent: true };
   }
 

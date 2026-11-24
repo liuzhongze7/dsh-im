@@ -1,3 +1,4 @@
+import { extractConnectionEvidence, createConnectionDiagnostics, atConnectionStage } from '../shared/connection-error.mjs';
 import { QQBot, contentSanitizer, typingIndicator } from '@tencent-connect/qqbot-nodejs';
 
 import {
@@ -7,6 +8,8 @@ import {
 import { t } from '../shared/i18n.mjs';
 import { evaluateInboundAccess } from '../shared/inbound-access.mjs';
 import { createQqBridgeStatus, QqHarnessBridge } from './qq-bridge.mjs';
+import { isQqMessageAddressed, normalizeQqMentions } from './qq-mention.mjs';
+import { sendMarkdownReply } from './markdown-reply.mjs';
 
 function timeoutError() {
   const error = new Error('QQ WebSocket did not become ready in time');
@@ -33,8 +36,10 @@ export class QqRuntime {
   #harness;
   #state;
   #contextEnhancement;
+  #groupHistory;
   #accessPolicy;
   #logger;
+  #diagnostics;
   #replyTimeoutMs;
   #connectTimeoutMs;
   #createBot;
@@ -52,6 +57,7 @@ export class QqRuntime {
     harness,
     state,
     contextEnhancement,
+    groupHistory,
     accessPolicy,
     logger = console,
     replyTimeoutMs = 600_000,
@@ -67,8 +73,9 @@ export class QqRuntime {
     this.#harness = harness;
     this.#state = state;
     this.#contextEnhancement = contextEnhancement;
+    this.#groupHistory = groupHistory;
     this.#accessPolicy = accessPolicy;
-    this.#logger = logger;
+    this.#logger = logger; this.#diagnostics = createConnectionDiagnostics({ channel: 'qq', logger });
     this.#replyTimeoutMs = replyTimeoutMs;
     this.#connectTimeoutMs = connectTimeoutMs;
     this.#createBot = createBot;
@@ -101,7 +108,17 @@ export class QqRuntime {
     return { sent: true };
   }
 
-  async sendProactiveText(target, text, { signal } = {}) {
+  async presentSessionSyncApproval(target, interaction, options = {}) {
+    if (!this.#status.ready || !this.#bridge) return false;
+    const actor = typeof target?.route?.userOpenId === 'string' ? target.route.userOpenId.trim() : '';
+    if (!actor) return false;
+    return this.#bridge.presentSessionSyncApproval(interaction, {
+      key: options.key, actor, validate: options.validate,
+      send: (text) => this.sendProactiveText(target, text),
+    }, options);
+  }
+
+  async sendProactiveText(target, text, { signal, format = 'plain' } = {}) {
     const nativeId = target?.kind === 'user'
       ? (typeof target?.route?.userOpenId === 'string' ? target.route.userOpenId.trim() : '')
       : target?.kind === 'group'
@@ -118,10 +135,17 @@ export class QqRuntime {
       throw error;
     }
     signal?.throwIfAborted();
-    return this.#bot.sendText({
+    const replyTarget = {
       scope: target.kind === 'user' ? 'c2c' : 'group',
       targetId: nativeId,
-    }, text);
+    };
+    if (format === 'markdown') {
+      await sendMarkdownReply(this.#bot, replyTarget, text, {
+        logger: this.#logger, signal, requireComplete: true,
+      });
+      return { sent: true };
+    }
+    return this.#bot.sendText(replyTarget, text);
   }
 
   async start() {
@@ -137,8 +161,8 @@ export class QqRuntime {
     await this.stop();
     this.#status.startedAt = new Date().toISOString();
     this.#status.qqConnectionState = 'connecting';
-    this.#status.lastError = null;
-    await this.#harness.ensureRunning();
+    this.#status.lastError = null; this.#status.error = null; this.#diagnostics.clear();
+    await atConnectionStage('harness.check', () => this.#harness.ensureRunning());
     this.#status.harnessReachable = true;
 
     const sdkLogger = {
@@ -170,11 +194,17 @@ export class QqRuntime {
       harness: this.#harness,
       state: this.#state,
       contextEnhancement: this.#contextEnhancement,
+      groupHistory: this.#groupHistory,
       accessPolicy: this.#accessPolicy,
       status: this.#status,
       logger: this.#logger,
       replyTimeoutMs: this.#replyTimeoutMs,
       signal: controller.signal,
+    });
+    const botMentionIds = new Set([this.#config.appId]);
+    bot.use(async (ctx, next) => {
+      ctx.message = normalizeQqMentions(ctx.message, botMentionIds);
+      await next();
     });
     // QQ delivers emoji/face messages as opaque `<faceType=..,faceId="..",ext="..">`
     // tags. Parse them into readable text so the Harness sees what the sender
@@ -184,8 +214,7 @@ export class QqRuntime {
       keepAlive: true,
       predicate: (ctx) => {
         const message = ctx?.message;
-        if (!message || (message.kind === 'group'
-          && message.rawEventType !== 'GROUP_AT_MESSAGE_CREATE')) return false;
+        if (!isQqMessageAddressed(message)) return false;
         if (!this.#accessPolicy) {
           return message.kind === 'group'
             || this.#config.ownerUserOpenid === '*'
@@ -205,20 +234,24 @@ export class QqRuntime {
       readyResolve = resolve;
       readyReject = reject;
     });
-    const onReady = () => {
+    const onReady = (data) => {
+      if (typeof data?.user?.id === 'string' && data.user.id.trim()) {
+        botMentionIds.add(data.user.id.trim());
+      }
       const now = Date.now();
       this.#status.ready = true;
       this.#status.qqConnectionState = 'connected';
       this.#status.lastCheckedAt = now;
       this.#status.lastConnectedAt = now;
-      this.#status.lastError = null;
+      this.#status.lastError = null; this.#status.error = null; this.#diagnostics.clear();
       readyResolve();
     };
     const onError = (error) => {
       if (!this.#status.ready) readyReject(error);
       else {
-        this.#status.lastError = error?.message ?? String(error);
-        this.#logger.warn?.(`[dsh-im:qq] bot ${this.#config.botId} connection error:`, error);
+        this.#status.error = this.#diagnostics.report(error, { operation: 'connection.monitor', botId: this.#config?.botId, automatic: true }).publicError;
+        this.#status.lastError = this.#status.error.message;
+        this.#logger.warn?.(`[dsh-im:qq] bot ${this.#config.botId} connection error:`, extractConnectionEvidence(error).details);
       }
     };
     const onMessage = (_ctx, message) => {
@@ -228,7 +261,7 @@ export class QqRuntime {
         if (controller.signal.aborted) return;
         this.#logger.error?.(
           `[dsh-im:qq] bot ${this.#config.botId} message handling failed:`,
-          error,
+          extractConnectionEvidence(error).details,
         );
       });
     };
@@ -244,8 +277,9 @@ export class QqRuntime {
       readyReject(error);
       this.#status.ready = false;
       this.#status.qqConnectionState = 'failed';
-      this.#status.lastError = error?.message ?? String(error);
-      this.#logger.error?.(`[dsh-im:qq] bot ${this.#config.botId} connection stopped:`, error);
+      this.#status.error = this.#diagnostics.report(error, { operation: 'connection.monitor', botId: this.#config?.botId, automatic: true }).publicError;
+      this.#status.lastError = this.#status.error.message;
+      this.#logger.error?.(`[dsh-im:qq] bot ${this.#config.botId} connection stopped:`, extractConnectionEvidence(error).details);
     });
 
     let timer;
@@ -264,7 +298,8 @@ export class QqRuntime {
     } catch (error) {
       this.#status.ready = false;
       this.#status.qqConnectionState = 'failed';
-      this.#status.lastError = error?.message ?? String(error);
+      this.#status.error = this.#diagnostics.report(error, { operation: 'connection.monitor', botId: this.#config?.botId, automatic: true }).publicError;
+      this.#status.lastError = this.#status.error.message;
       await this.stop();
       throw error;
     } finally {
@@ -284,7 +319,7 @@ export class QqRuntime {
     try {
       bot?.stop();
     } catch (error) {
-      this.#logger.warn?.(`[dsh-im:qq] bot ${this.#config.botId} failed to stop cleanly:`, error);
+      this.#logger.warn?.(`[dsh-im:qq] bot ${this.#config.botId} failed to stop cleanly:`, extractConnectionEvidence(error).details);
     }
     await Promise.race([
       runTask?.catch(() => undefined) ?? Promise.resolve(),

@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { promises as fs } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+import { mkdtemp, mkdir, open, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -86,6 +88,146 @@ async function waitForJob(service, expected) {
   }
   assert.fail(`Expected ${expected}, received ${JSON.stringify(snapshot)}`);
 }
+
+async function historicalUpdate(t, state = 'restart-required') {
+  const f = await fixture(t, {
+    service: { runningVersion: '4.21.0' },
+    environment: { installedVersion: '4.21.0' },
+  });
+  f.state.release = release('4.21.1');
+  await f.submit('historical-request');
+  await waitForJob(f.service, 'restart-required');
+  await f.service.close();
+  const directory = await f.directory();
+  const statePath = join(directory, 'state.json');
+  const job = JSON.parse(await readFile(statePath, 'utf8'));
+  await writeFile(statePath, JSON.stringify({ ...job, state }));
+  f.environment.installedVersion = '4.23.0';
+  f.environment.installationKey = 'external-installation';
+  f.state.release = release('4.24.0');
+  return { ...f, directory, statePath };
+}
+
+test('historical successful jobs allow subsequent updates after external upgrades or rollbacks', async (t) => {
+  for (const state of ['restart-required', 'completed']) {
+    for (const version of ['4.23.0', '4.20.0']) {
+      await t.test(`${state}, now running ${version}`, async (t) => {
+        const f = await historicalUpdate(t, state);
+        f.environment.installedVersion = version;
+        const original = await readFile(f.statePath, 'utf8');
+        const host = f.restart(version);
+        for (let attempt = 0; attempt < 3; attempt++) {
+          f.state.time += 3_000;
+          const result = await host.check();
+          assert.equal(result.job.targetVersion, '4.21.1');
+          assert.equal(result.job.state, 'interrupted');
+          assert.equal(result.job.message, 'installation-changed');
+          assert.equal(result.job.recoverable, true);
+          assert.equal(result.latestVersion, '4.24.0');
+          assert.equal(result.blockedReason, null);
+          assert.equal(result.canInstall, true);
+        }
+        await host.close();
+        const restarted = f.restart(version);
+        assert.equal((await restarted.status()).job.recoverable, true);
+        const checked = await restarted.check();
+        assert.equal(await readFile(f.statePath, 'utf8'), original);
+        const replay = await restarted.install({ checkId: checked.checkId, requestId: 'historical-request' });
+        assert.equal(replay.job.targetVersion, '4.21.1');
+        assert.deepEqual(f.state.installs, ['4.21.1']);
+
+        await restarted.install({ checkId: checked.checkId, requestId: 'next-update' });
+        const finished = await waitForJob(restarted, 'restart-required');
+        assert.equal(finished.job.targetVersion, '4.24.0');
+        assert.equal(finished.job.recoverable, false);
+        await restarted.close();
+        const nextHost = f.restart('4.24.0');
+        assert.equal((await nextHost.status()).job.state, 'completed');
+        f.state.release = release('4.25.0');
+        const next = await nextHost.check();
+        await nextHost.install({ checkId: next.checkId, requestId: 'following-update' });
+        await waitForJob(nextHost, 'restart-required');
+        assert.deepEqual(f.state.installs, ['4.21.1', '4.24.0', '4.25.0']);
+      });
+    }
+  }
+});
+
+test('historical recovery preserves locks, installation validation and restart requirements', async (t) => {
+  const cases = [
+    { name: 'live lock', lock: { id: 'other', pid: process.pid } },
+    { name: 'stale lock', lock: { id: 'other', pid: 999_999_999 } },
+    { name: 'null lock', lock: null },
+    { name: 'invalid package', environment: { packageValid: false } },
+    { name: 'ineligible environment', environment: { eligible: false } },
+    { name: 'source installation', environment: { sourceInstall: true, blockedReason: 'source-install', eligible: false } },
+    { name: 'changed profile', environment: { blockedReason: 'installation-changed', eligible: false } },
+    { name: 'unavailable executor', environment: { blockedReason: 'executor-unavailable', eligible: false } },
+    { name: 'registry conflict', environment: { blockedReason: 'registry-conflict', eligible: false } },
+    { name: 'not restarted', runningVersion: '4.21.1' },
+  ];
+  for (const state of ['restart-required', 'completed']) {
+    for (const scenario of cases) {
+      await t.test(`${state}: ${scenario.name}`, async (t) => {
+        const f = await historicalUpdate(t, state);
+        Object.assign(f.environment, scenario.environment);
+        const lockPath = join(f.directory, 'install.lock');
+        if ('lock' in scenario) await writeFile(lockPath, JSON.stringify(scenario.lock));
+        const original = await readFile(f.statePath, 'utf8');
+        const host = f.restart(scenario.runningVersion ?? '4.23.0');
+        const result = await host.check();
+        assert.equal(result.job.recoverable, false);
+        assert.equal(result.canInstall, false);
+        assert.equal(result.checkId, null);
+        await assert.rejects(host.install({ checkId: 'not-confirmed', requestId: 'blocked' }));
+        assert.deepEqual(f.state.installs, ['4.21.1']);
+        assert.equal(await readFile(f.statePath, 'utf8'), original);
+        if ('lock' in scenario) assert.equal(await readFile(lockPath, 'utf8'), JSON.stringify(scenario.lock));
+      });
+    }
+  }
+});
+
+test('recovered history cannot bypass failed checks, expired confirmation or changed installation', async (t) => {
+  const f = await historicalUpdate(t);
+  const host = f.restart('4.23.0');
+  let checked = await host.check();
+  assert.equal(checked.canInstall, true);
+  f.state.time += 3_000;
+  f.state.failFetch = true;
+  await assert.rejects(host.check(), { code: 'check-failed' });
+  assert.equal((await host.status()).canInstall, false);
+  await assert.rejects(host.install({ checkId: checked.checkId, requestId: 'failed-check' }), { code: 'check-expired' });
+
+  f.state.failFetch = false;
+  checked = await host.check();
+  f.state.time += 10 * 60_000;
+  await assert.rejects(host.install({ checkId: checked.checkId, requestId: 'expired' }), { code: 'check-expired' });
+  checked = await host.check();
+  f.environment.installationKey = 'another-external-change';
+  await assert.rejects(host.install({ checkId: checked.checkId, requestId: 'changed' }), { code: 'installation-changed' });
+  assert.deepEqual(f.state.installs, ['4.21.1']);
+});
+
+test('recovery flags are derived again and do not override the new release Node requirement', async (t) => {
+  const f = await historicalUpdate(t);
+  const host = f.restart('4.23.0');
+  assert.equal((await host.check()).job.recoverable, true);
+  f.state.time += 3_000;
+  f.state.release = release('4.24.0', { engines: { node: '>=99' } });
+  const incompatible = await host.check();
+  assert.equal(incompatible.job.recoverable, true);
+  assert.equal(incompatible.blockedReason, 'incompatible-node');
+  assert.equal(incompatible.canInstall, false);
+
+  const job = JSON.parse(await readFile(f.statePath, 'utf8'));
+  await writeFile(f.statePath, JSON.stringify({ ...job, recoverable: true }));
+  f.environment.packageValid = false;
+  const invalid = await host.status();
+  assert.equal(invalid.job.recoverable, false);
+  assert.equal(invalid.blockedReason, 'recovery-required');
+  assert.equal(invalid.canInstall, false);
+});
 
 test('status is local and npm checking only happens on demand', async (t) => {
   const f = await fixture(t);
@@ -177,6 +319,38 @@ test('installation pins the confirmed version, verifies disk and waits for a man
   assert.doesNotMatch(JSON.stringify(finished), new RegExp(f.homeDir));
 });
 
+test('a journal reader cannot turn a verified update into a persistence failure', async (t) => {
+  let reader;
+  let readerOpened;
+  const opened = new Promise((resolve) => { readerOpened = resolve; });
+  const f = await fixture(t, { install: async ({ environment, version }) => {
+    reader = await open(join(await f.directory(), 'state.json'), 'r');
+    environment.installedVersion = version;
+    readerOpened();
+  } });
+  try {
+    const submitted = await f.submit();
+    await opened;
+    const directory = await f.directory();
+    // Keep a real reader across the post-install write, as status polling can on Windows.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(JSON.parse(await reader.readFile('utf8')).state, 'installing');
+    if (process.platform === 'win32') {
+      assert.equal(JSON.parse(await readFile(join(directory, 'state.json'), 'utf8')).state, 'installing');
+      assert.equal(JSON.parse(await readFile(join(directory, 'install.lock'), 'utf8')).id, submitted.job.id);
+    }
+    await reader.close();
+    reader = null;
+    await waitForJob(f.service, 'restart-required');
+    await f.service.close();
+    assert.equal(JSON.parse(await readFile(join(directory, 'state.json'), 'utf8')).state, 'restart-required');
+    assert.deepEqual((await readdir(directory)).sort(), ['before.json', 'state.json']);
+    assert.equal((await f.restart().status()).job.state, 'completed');
+  } finally {
+    await reader?.close();
+  }
+});
+
 test('idempotent requests and multiple Host instances cannot start a second install', async (t) => {
   let complete;
   const gate = new Promise((resolve) => { complete = resolve; });
@@ -194,6 +368,108 @@ test('idempotent requests and multiple Host instances cannot start a second inst
   assert.equal(f.state.installs.length, 1);
   complete();
   await waitForJob(f.service, 'restart-required');
+});
+
+test('status polling across Hosts cannot race journal replacement', async (t) => {
+  let finishInstaller;
+  const installer = new Promise((resolve) => { finishInstaller = resolve; });
+  const f = await fixture(t, { install: async ({ environment, version }) => {
+    await installer;
+    environment.installedVersion = version;
+  } });
+  await f.submit();
+  const observer = f.restart('3.0.7');
+  const directory = await f.directory();
+  const statePath = join(directory, 'state.json');
+  let readerStarted;
+  const started = new Promise((resolve) => { readerStarted = resolve; });
+  let finishReading;
+  const reading = new Promise((resolve) => { finishReading = resolve; });
+  const originalRead = fs.readFile;
+  let held = false;
+  const mockedRead = t.mock.method(fs, 'readFile', async (path, ...args) => {
+    if (path === statePath && !held) {
+      held = true;
+      readerStarted();
+      await reading;
+    }
+    return originalRead(path, ...args);
+  });
+  syncBuiltinESMExports();
+  let status;
+  try {
+    status = observer.status();
+    await started;
+    finishInstaller();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(JSON.parse(await originalRead(statePath, 'utf8')).state, 'installing');
+    finishReading();
+    await status;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      await Promise.all([f.service.status(), observer.status(), observer.status()]);
+    }
+    await waitForJob(f.service, 'restart-required');
+    await f.service.close();
+    assert.equal((await observer.status()).job.state, 'restart-required');
+    assert.equal((await readdir(directory)).includes('install.lock'), false);
+  } finally {
+    finishReading();
+    finishInstaller();
+    await Promise.allSettled([status]);
+    await f.service.close();
+    mockedRead.mock.restore();
+    syncBuiltinESMExports();
+  }
+});
+
+test('status readers across Hosts retain the owned lock until their reads finish', async (t) => {
+  let stopInstaller;
+  const installer = new Promise((resolve) => { stopInstaller = resolve; });
+  const f = await fixture(t, { install: async () => installer });
+  await f.submit();
+  const observer = f.restart('3.0.7');
+  const lockPath = join(await f.directory(), 'install.lock');
+  let readerStarted;
+  const started = new Promise((resolve) => { readerStarted = resolve; });
+  let finishReading;
+  const reading = new Promise((resolve) => { finishReading = resolve; });
+  const originalRead = fs.readFile;
+  let held = false;
+  const mockedRead = t.mock.method(fs, 'readFile', async (path, ...args) => {
+    if (path === lockPath && !held) {
+      held = true;
+      readerStarted();
+      await reading;
+    }
+    return originalRead(path, ...args);
+  });
+  syncBuiltinESMExports();
+  let closing;
+  let status;
+  try {
+    status = observer.status();
+    await started;
+    let closed = false;
+    closing = f.service.close().then(() => { closed = true; });
+    stopInstaller();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(closed, false, 'cleanup must wait for an already-started lock reader');
+    assert.equal(JSON.parse(await originalRead(lockPath, 'utf8')).pid, process.pid);
+    finishReading();
+    await status;
+    await closing;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const snapshots = await Promise.all(Array.from({ length: 4 }, () => observer.status()));
+      assert.ok(snapshots.every((snapshot) => snapshot.job.state === 'interrupted'));
+    }
+    assert.equal((await readdir(await f.directory())).includes('install.lock'), false);
+  } finally {
+    finishReading();
+    stopInstaller();
+    await Promise.allSettled([status, closing]);
+    mockedRead.mock.restore();
+    syncBuiltinESMExports();
+  }
 });
 
 test('changed installation, expired confirmation or changed latest require a fresh confirmation', async (t) => {
@@ -287,9 +563,17 @@ test('post-install verification stays bound to the original home and profile', a
       environment.eligible = false;
     } });
     await f.submit();
-    const statePath = join(await f.directory(), 'state.json');
-    const result = await waitForJob({ status: async () => ({ job: JSON.parse(await readFile(statePath, 'utf8')) }) }, 'failed');
-    assert.equal(result.job.message, 'installation-changed', field);
+    const directory = await f.directory();
+    // The runtime deliberately moved, so status() no longer addresses this job.
+    // Observe completion without holding Windows journal readers over its writes.
+    const deadline = Date.now() + 4_000;
+    while ((await readdir(directory)).includes('install.lock') && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal((await readdir(directory)).includes('install.lock'), false, field);
+    const job = JSON.parse(await readFile(join(directory, 'state.json'), 'utf8'));
+    assert.equal(job.state, 'failed', field);
+    assert.equal(job.message, 'installation-changed', field);
   }
 });
 
@@ -361,26 +645,43 @@ test('an incomplete package cannot be reported as completed after a restart', as
   assert.equal(result.blockedReason, 'recovery-required');
 });
 
-test('a final journal write failure is visible in memory and leaves its lock intact', {
-  skip: process.platform === 'win32' || process.getuid?.() === 0,
-}, async (t) => {
+test('a final journal write failure is visible in memory and leaves its lock intact', async (t) => {
   let directory;
+  let failWrites = false;
   const f = await fixture(t, { install: async ({ environment, version }) => {
     directory = await f.directory();
     environment.installedVersion = version;
-    await chmod(directory, 0o500);
+    failWrites = true;
   } });
+  const originalRename = fs.rename;
+  let failures = 0;
+  const mockedRename = t.mock.method(fs, 'rename', async (from, to) => {
+    if (failWrites && to === join(directory, 'state.json')) {
+      failures++;
+      throw Object.assign(new Error('journal unavailable'), { code: process.platform === 'win32' ? 'EPERM' : 'EIO' });
+    }
+    return originalRename(from, to);
+  });
+  syncBuiltinESMExports();
   try {
     await f.submit();
     const result = await waitForJob(f.service, 'interrupted');
+    await f.service.close();
+    assert.ok(failures >= 2 && failures <= 12, 'journal retries must be bounded');
     assert.equal(result.job.message, 'state-unavailable');
     assert.equal(result.blockedReason, 'recovery-required');
     assert.equal(JSON.parse(await readFile(join(directory, 'state.json'), 'utf8')).state, 'installing');
     assert.equal(JSON.parse(await readFile(join(directory, 'install.lock'), 'utf8')).id, result.job.id);
-    await chmod(directory, 0o700);
-    assert.equal((await f.service.status()).job.state, 'interrupted');
+    assert.deepEqual((await readdir(directory)).sort(), ['before.json', 'install.lock', 'state.json']);
+    failWrites = false;
+    const restarted = f.restart();
+    assert.equal((await restarted.check()).canInstall, false);
+    await assert.rejects(restarted.install({ checkId: 'unconfirmed', requestId: 'retry-unsaved' }), { code: 'update-busy' });
   } finally {
-    if (directory) await chmod(directory, 0o700);
+    failWrites = false;
+    await f.service.close();
+    mockedRename.mock.restore();
+    syncBuiltinESMExports();
   }
 });
 

@@ -43,7 +43,7 @@ test('QQ production has no per-bot result-file Gate', async (t) => {
 
   const production = await createProductionController({
     credentials: {},
-    apiProxy: {},
+    typertGateway: { invoke() {}, stream() {} },
     logger: () => ({ error() {}, warn() {}, info() {}, debug() {} }),
   }, { dataDir }, {
     ConfigStore,

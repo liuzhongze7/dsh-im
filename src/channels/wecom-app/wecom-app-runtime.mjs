@@ -1,3 +1,4 @@
+import { atConnectionStage } from '../shared/connection-error.mjs';
 import {
   WecomAppApi,
   WecomAppError,
@@ -104,7 +105,7 @@ export class WecomAppRuntime {
     this.#status.startedAt = new Date().toISOString();
     this.#status.lastError = null;
     this.#status.wecomAppConnectionState = 'connecting';
-    await this.#harness.ensureRunning({ signal: this.#signal() });
+    await atConnectionStage('harness.check', () => this.#harness.ensureRunning({ signal: this.#signal() }));
     this.#status.harnessReachable = true;
 
     this.#api = new WecomAppApi({
@@ -190,6 +191,16 @@ export class WecomAppRuntime {
         await this.#api.sendText({ userId: toUserId, content });
       },
     });
+  }
+
+  async presentSessionSyncApproval(target, interaction, options = {}) {
+    if (!this.#started || !this.#bridge) return false;
+    const actor = typeof target?.route?.chatId === 'string' ? target.route.chatId.trim() : '';
+    if (!actor) return false;
+    return this.#bridge.presentSessionSyncApproval(interaction, {
+      key: options.key, actor, validate: options.validate,
+      send: (text) => this.sendProactiveText(target, text),
+    }, options);
   }
 
   async sendProactiveText(target, text, { signal } = {}) {

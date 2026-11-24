@@ -1,9 +1,10 @@
+import { ConnectionError, normalizeConnectionError } from '../../connection-error.js';
 import { BotName } from '../../bot-alias.js';
 import * as React from 'react';
 
 import { CredentialActionIcon, CredentialBindingPanel } from '../../credential-binding.js';
-import { CollapsibleAccountSection } from './collapsible-account.js';
-import { h } from '../../i18n.js';
+import { AccountSettingsToggle, CollapsibleAccountSection } from './collapsible-account.js';
+import { channelName, h, localizeTemplate, localizeText } from '../../i18n.js';
 import { installDingtalkStyles } from '../dingtalk/styles.js';
 import { WorkspaceEditor } from '../../workspace-editor.js';
 import { ContextEnhancementEditor } from '../../context-enhancement.js';
@@ -73,7 +74,7 @@ export function createTokenChannelSettings(definition) {
     platformLabel,
     CredentialPanel = null,
     credentialPayload = ({ secret }) => ({ token: secret }),
-    credentialAriaLabel = `使用 Bot Token 接入 ${channel} 机器人`,
+    credentialAriaLabel = localizeTemplate('使用 Bot Token 接入 {channel} 机器人', { channel: channelName(channel) }),
     credentialOpenLabel = '手动接入',
     credentialCloseLabel = '收起凭据',
     credentialNoun = 'Bot Token',
@@ -82,7 +83,7 @@ export function createTokenChannelSettings(definition) {
     accountSettingsEndpoint = null,
   } = definition;
 
-  function AccountCard({ account, busy, testNotice, removing, onReconnect, onWorkspaceSave, onAliasSave, onModelSave, onAgentPresetSave, onContextEnhancementSave, onAccountSettingsSave, onRequestRemove, onConfirmRemove, onCancelRemove }) {
+  function AccountCard({ account, busy, testNotice, removing, onReconnect, onWorkspaceSave, onAliasSave, onModelSave, onAgentPresetSave, onContextEnhancementSave, onAccountSettingsSave, onRequestRemove, onConfirmRemove, onCancelRemove, rpcCall, reload }) {
     const state = busy === 'reconnect' ? 'connecting' : account.state;
     const tone = account.connected ? 'success' : state === 'error' ? 'error' : 'warning';
     const stateLabel = account.connected ? '运行正常' : state === 'connecting' ? '正在连接' : '连接未就绪';
@@ -91,6 +92,13 @@ export function createTokenChannelSettings(definition) {
     return h('article', { className: 'ddt-card dim-botCard', 'data-bot-id': account.botId },
       h('div', { className: 'ddt-cardBody dim-botCardBody' },
         h(CollapsibleAccountSection, {
+          settings: h(BotSettingsButton, {
+            channel: channel.toLowerCase(),
+            botId: account.botId,
+            botName: account.bot.name,
+            connected: account.connected,
+            accessPolicy: account.accessPolicy,
+          }),
           id: `tok-settings-${account.botId.replace(/[^a-zA-Z0-9_-]/g, '-')}`,
           header: h('div', { className: 'ddt-accountTop dim-botCardTop' },
             h('div', { className: 'ddt-accountIdentity dim-botIdentity' },
@@ -112,13 +120,7 @@ export function createTokenChannelSettings(definition) {
                 lastCheckedAt: account.health.lastCheckedAt,
                 formatCheckedTime: checkedTime,
               }),
-              h(BotSettingsButton, {
-                channel: channel.toLowerCase(),
-                botId: account.botId,
-                botName: account.bot.name,
-                connected: account.connected,
-                accessPolicy: account.accessPolicy,
-              }))),
+              h(AccountSettingsToggle))),
         },
           h(WorkspaceEditor, {
             workspace: account.workspace,
@@ -144,6 +146,11 @@ export function createTokenChannelSettings(definition) {
           account,
           busy: Boolean(busy),
           onSave: onAccountSettingsSave,
+          // Channels with extra settings panels (email session binding) call
+          // their own endpoints through the same RPC bridge.
+          rpcCall,
+          endpoints,
+          onChanged: reload,
         }) : null,
         h('div', { className: 'ddt-accountFooter dim-cardFooter' },
           h('div', { className: 'dim-cardFooterLayout' },
@@ -160,6 +167,7 @@ export function createTokenChannelSettings(definition) {
                 disabled: Boolean(busy),
               }, '移除接入')),
             summary ? h('div', { className: 'ddt-summary dim-cardSummary' }, summary) : null,
+          account.error ? h(ConnectionError, { error: account.error, showMessage: false }) : null,
             account.lastMessageError ? h(LastMessageErrorSummary, {
               className: 'ddt-summary',
               error: account.lastMessageError,
@@ -171,8 +179,11 @@ export function createTokenChannelSettings(definition) {
         ),
       ),
       removing ? h('div', { className: 'ddt-confirm dim-confirm', role: 'alertdialog' },
-        h('strong', null, `从 DeepSeek Harness 移除“${account.bot.name}”？`),
-        h('p', null, `这会停止消息连接，并删除本机保存的 ${credentialNoun}、机器人配置及会话映射。${platformLabel}中的机器人不会被自动删除。`),
+        h('strong', null, localizeTemplate('从 DeepSeek Harness 移除“{name}”？', { name: account.bot.name })),
+        h('p', null, localizeTemplate('这会停止消息连接，并删除本机保存的 {credentials}、机器人配置及会话映射。{platform}中的机器人不会被自动删除。', {
+          credentials: localizeText(credentialNoun),
+          platform: localizeText(platformLabel),
+        })),
         h('div', { className: 'ddt-actions dim-viewActions' },
           h(Button, { onClick: onCancelRemove, disabled: Boolean(busy) }, '保留机器人'),
           h(Button, { kind: 'danger', onClick: onConfirmRemove, disabled: Boolean(busy) },
@@ -180,6 +191,7 @@ export function createTokenChannelSettings(definition) {
   }
 
   function SettingsTab({ rpcCall }) {
+    const [operationError, setOperationError] = React.useState(null);
     const [model, setModel] = React.useState({
       phase: 'loading', bots: [], totals: { configured: 0, connected: 0 }, error: null,
       agentPresetCatalog: EMPTY_AGENT_PRESET_CATALOG,
@@ -206,8 +218,17 @@ export function createTokenChannelSettings(definition) {
     }, []);
 
     const invoke = React.useCallback(async (endpoint, payload = {}, signal) => {
-      if (typeof rpcCall !== 'function') throw new TypeError(`${channel} 设置页缺少 RPC 连接`);
-      return api.unwrapRpcResult(await rpcCall(endpoint, payload, signal));
+      if (typeof rpcCall !== 'function') throw new TypeError(localizeTemplate('{channel} 设置页缺少 RPC 连接', { channel: channelName(channel) }));
+      const operation = !['connection.status', 'provision.poll', 'provision.begin', 'provision.cancel'].includes(endpoint);
+      if (operation && mounted.current) setOperationError(null);
+      try {
+        const value = api.unwrapRpcResult(await rpcCall(endpoint, payload, signal));
+        if (operation && mounted.current) setOperationError(value?.testMessage?.error ?? value?.warnings?.[0] ?? null);
+        return value;
+      } catch (error) {
+        if (operation && mounted.current && !signal?.aborted && error?.name !== 'AbortError') setOperationError(normalizeConnectionError(error));
+        throw error;
+      }
     }, [rpcCall]);
 
     const loadStatus = React.useCallback(async ({ signal, silent = false } = {}) => {
@@ -325,12 +346,14 @@ export function createTokenChannelSettings(definition) {
       ? h('section', { className: 'dim-listSection' },
           h(ChannelListHeading, {
             className: 'ddt-listHeading',
-            title: `已接入的 ${channel} 机器人`,
+            title: localizeTemplate('已接入的 {channel} 机器人', { channel: channelName(channel) }),
             connectionLabel,
           }),
           h('ul', { className: 'ddt-list dim-botList' }, model.bots.map((account) =>
             h('li', { key: account.botId }, h(AccountCard, {
               account,
+              rpcCall,
+              reload: loadStatus,
               busy: busyByBot[account.botId],
               testNotice: testNoticeByBot[account.botId],
               removing: removeTarget === account.botId,
@@ -396,8 +419,9 @@ export function createTokenChannelSettings(definition) {
       value: model.agentPresetCatalog ?? EMPTY_AGENT_PRESET_CATALOG,
     }, h('section', {
       className: `ddt-page ${pageClass} dim-channelPage`,
-      'aria-label': `${channel} 设置`,
+      'aria-label': localizeTemplate('{channel} 设置', { channel: channelName(channel) }),
     },
+    operationError ? h(ConnectionError, { error: operationError }) : null,
     h('div', { className: 'ddt-heading' },
       h('div', { className: 'ddt-tools' },
         h('div', { className: 'dim-bindActions' },
@@ -411,18 +435,22 @@ export function createTokenChannelSettings(definition) {
           }, h(CredentialActionIcon), credentialOpen ? credentialCloseLabel : credentialOpenLabel)),
         model.totals.configured > 0
           ? h('div', { className: 'ddt-badge dim-onlineBadge' },
-              h('span', null, `${model.totals.connected} / ${model.totals.configured} 在线`))
+              h('span', null, localizeTemplate('{connected} / {configured} 在线', {
+                connected: model.totals.connected,
+                configured: model.totals.configured,
+              })))
           : null)),
     model.phase === 'loading'
       ? h('div', {
           className: 'ddt-card ddt-loading dim-surfaceCard dim-loadingView',
           'aria-busy': 'true',
-        }, h('div', { className: 'ddt-spinner dim-spinner' }), `正在读取 ${channel} 机器人状态…`)
+        }, h('div', { className: 'ddt-spinner dim-spinner' }),
+          localizeTemplate('正在读取 {channel} 机器人状态…', { channel: channelName(channel) }))
       : model.phase === 'error'
         ? h('div', { className: 'ddt-card dim-surfaceCard' },
             h('div', { className: 'ddt-inlineError dim-inlineError' },
-              h('h3', null, `无法读取 ${channel} 机器人状态`),
-              h('p', null, model.error?.message),
+              h('h3', null, localizeTemplate('无法读取 {channel} 机器人状态', { channel: channelName(channel) })),
+              h(ConnectionError, { error: model.error }),
               h(Button, { onClick: () => void loadStatus() }, '重新读取')))
         : h(React.Fragment, null,
             credentialOpen ? (CredentialPanel
@@ -433,6 +461,11 @@ export function createTokenChannelSettings(definition) {
                   error: credentialError,
                   onSubmit: bindCredentials,
                   onCancel: () => { setCredentialOpen(false); setCredentialError(null); },
+                  // A transport that authorizes out of band (the Agent mailbox
+                  // shows a QR code) drives its own endpoints through the bridge.
+                  rpcCall,
+                  endpoints,
+                  onAuthorized: bindCredentials,
                 })
               : h(CredentialBindingPanel, {
                   channel,
@@ -449,7 +482,7 @@ export function createTokenChannelSettings(definition) {
                     h('div', { className: 'dim-emptyCopy' },
                       h('div', { className: 'ddt-stateLabel dim-stateLabel' },
                         h('span', { className: 'ddt-dot dim-stateDot' }),
-                        h('span', null, `尚未接入 ${channel} 机器人`)),
+                        h('span', null, localizeTemplate('尚未接入 {channel} 机器人', { channel: channelName(channel) }))),
                       h('h3', null, emptyTitle),
                       h('p', null, emptyDescription),
                       h('div', { className: 'ddt-actions dim-viewActions' },

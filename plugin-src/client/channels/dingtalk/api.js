@@ -1,3 +1,6 @@
+import { normalizeBusyMessageMode } from '../../../../src/channels/shared/message-mode.mjs';
+import { normalizeConnectionError as normalizeTestError } from '../../connection-error.js';
+import { diagnosticFields } from '../../../../src/channels/shared/diagnostic-details.mjs';
 import { normalizeBotAlias } from '../../../../src/channels/shared/bot-alias.mjs';
 import { normalizeAgentPresetCatalog, normalizeAgentPresetId, SET_AGENT_PRESET_ENDPOINT } from '../../agent-preset.js';
 import { normalizeModelCatalog, normalizeModelSelection, SET_MODEL_ENDPOINT } from '../../model-setting.js';
@@ -19,6 +22,7 @@ export const DINGTALK_ENDPOINTS = Object.freeze({
   setModel: SET_MODEL_ENDPOINT,
   setAgentPreset: SET_AGENT_PRESET_ENDPOINT,
   setContextEnhancement: 'bot.context-enhancement.set',
+  setBusyMessageMode: 'bot.message-mode.set',
   setAccessPolicy: 'bot.access-policy.set',
   setAlias: 'bot.alias.set',
 });
@@ -99,6 +103,7 @@ function normalizeError(value, fallbackCode, fallbackMessage) {
   const hint = sanitizeMessage(value.hint, '');
   const referenceId = safeReferenceId(value.referenceId);
   return {
+    ...diagnosticFields(value),
     code: safeErrorCode(value.code, fallbackCode),
     message: sanitizeMessage(value.message, fallbackMessage),
     ...(hint ? { hint } : {}),
@@ -113,7 +118,7 @@ function normalizeTestMessage(value) {
   const code = value.code === 'test-target-unavailable'
     ? 'test-target-unavailable'
     : 'test-message-failed';
-  return { sent: false, code };
+  return { sent: false, code, ...(value.error ? { error: normalizeTestError(value.error) } : {}) };
 }
 
 export function unwrapRpcResult(result) {
@@ -130,6 +135,7 @@ export function unwrapRpcResult(result) {
     error.code = visible.code;
     if (visible.hint) error.hint = visible.hint;
     if (visible.referenceId) error.referenceId = visible.referenceId;
+    Object.assign(error, diagnosticFields(result.error));
     throw error;
   }
   return result.value;
@@ -187,7 +193,7 @@ function normalizeBot(value) {
     workspace: optionalString(value.workspace, 4_096) ?? '',
     model: normalizeModelSelection(value.model),
     agentPreset: normalizeAgentPresetId(value.agentPreset),
-    contextEnhancement: normalizeContextEnhancementConfig(value.contextEnhancement),
+    busyMessageMode: normalizeBusyMessageMode(value.busyMessageMode),    contextEnhancement: normalizeContextEnhancementConfig(value.contextEnhancement),
     ...(Object.hasOwn(value, 'accessPolicy')
       ? { accessPolicy: normalizeAccessPolicy(value.accessPolicy) }
       : {}),

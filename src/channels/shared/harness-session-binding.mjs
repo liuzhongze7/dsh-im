@@ -1,3 +1,4 @@
+import { mkdir } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
 
 const MAX_SESSION_ID_LENGTH = 256;
@@ -37,16 +38,13 @@ function sessionWorkspace(sessionId, value) {
     }
   }
 
-  if (owners.length === 0) {
-    throw bindingError('session-not-registered', 'The session is not registered to a Harness workspace');
-  }
-  if (owners.length !== 1) {
+  if (owners.length > 1) {
     throw bindingError(
       'session-workspace-ambiguous',
       'The session is registered to more than one Harness workspace',
     );
   }
-  if (UNSAFE_WORKSPACE_PATH.test(owners[0].path)) {
+  if (owners.length && UNSAFE_WORKSPACE_PATH.test(owners[0].path)) {
     throw new Error('Harness returned an unsafe workspace path for the session');
   }
   return {
@@ -55,13 +53,24 @@ function sessionWorkspace(sessionId, value) {
   };
 }
 
-function sessionSummary(sessionId, value) {
+/**
+ * @param {string} sessionId - the id the command asked for
+ * @param {object} value - the `session.list` response
+ * @param {boolean} knownToWorkspace - whether `workspace.list` already accounts for it
+ */
+function sessionSummary(sessionId, value, knownToWorkspace = false) {
   if (!Array.isArray(value?.items)
     || value.items.some((item) => typeof item?.sessionId !== 'string' || !item.sessionId)) {
     throw new Error('Harness returned an invalid response for session.list');
   }
   const matches = value.items.filter((item) => item.sessionId === sessionId);
   if (matches.length === 0) {
+    // An id nobody ever registered is not a transient read failure: a workspace
+    // that accounts for the session but has no summary yet may still appear, so
+    // only the pair of answers means "no such session".
+    if (!knownToWorkspace) {
+      throw bindingError('session-not-registered', 'No session with this id is known to Harness');
+    }
     throw bindingError('session-summary-unavailable', 'The session is no longer available from Harness');
   }
   if (matches.length !== 1) {
@@ -82,24 +91,36 @@ function sessionSummary(sessionId, value) {
   if (title !== undefined && title !== null && typeof title !== 'string') {
     throw new Error('Harness returned an invalid session title for session.list');
   }
-  return { title: typeof title === 'string' ? title : null };
+  return { cwd: summary.cwd, title: typeof title === 'string' ? title : null };
 }
 
-export async function adoptRegisteredWorkspaceSession(client, value, options = {}, timeoutMs = 30_000) {
+export async function adoptRegisteredWorkspaceSession(client, value, options = {}, timeoutMs = 30_000, method = 'session.create') {
   const sessionId = validatedSessionId(value);
   await client.ensureRunning(options);
   const workspaceList = await client.rpc('workspace.list', {}, timeoutMs, options);
-  const { workspace, archived } = sessionWorkspace(sessionId, workspaceList);
+  let { workspace, archived } = sessionWorkspace(sessionId, workspaceList);
   const summary = sessionSummary(
     sessionId,
     await client.rpc('session.list', {}, timeoutMs, options),
+    workspace !== undefined || archived === true,
   );
-  const adopted = await client.rpc('session.create', {
-    workspaceId: workspace.workspaceId,
+  if (!workspace) {
+    if (typeof summary.cwd !== 'string' || !isAbsolute(summary.cwd)
+      || UNSAFE_WORKSPACE_PATH.test(summary.cwd)
+      || !await client.isUngroupedWorkspace?.(summary.cwd)) {
+      throw bindingError('session-not-registered', 'The session is not registered to a Harness workspace');
+    }
+    workspace = { path: summary.cwd };
+  }
+  if (await client.isUngroupedWorkspace?.(workspace.path)) {
+    await mkdir(workspace.path, { recursive: true });
+  }
+  const adopted = await client.rpc(method, {
+    ...(workspace.workspaceId ? { workspaceId: workspace.workspaceId } : { cwd: workspace.path }),
     sessionId,
   }, timeoutMs, options);
   if (!adopted || adopted.sessionId !== sessionId) {
-    throw new Error('Harness returned an invalid response for session.create');
+    throw new Error(`Harness returned an invalid response for ${method}`);
   }
   return {
     sessionId,

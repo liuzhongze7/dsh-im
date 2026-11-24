@@ -1,3 +1,5 @@
+import { normalizeBusyMessageMode } from '../../../../src/channels/shared/message-mode.mjs';
+import { diagnosticFields } from '../../../../src/channels/shared/diagnostic-details.mjs';
 import { normalizeBotAlias } from '../../../../src/channels/shared/bot-alias.mjs';
 /**
  * Browser-safe contract for the Feishu Host plugin.
@@ -12,7 +14,10 @@ import { normalizeModelCatalog, normalizeModelSelection, SET_MODEL_ENDPOINT } fr
 import { normalizeLastMessageError } from "../../last-message-error.js";
 import { normalizeAccessPolicy } from "../../../../src/channels/shared/access-policy.mjs";
 import { normalizeContextEnhancementConfig } from "../../../../src/channels/shared/context-enhancement.mjs";
-import { normalizeFeishuStepPushMode } from "../../../../src/channels/feishu/step-push-mode.mjs";
+import { normalizeFeishuStepPushMode, normalizeFeishuStepCardPanels } from "../../../../src/channels/feishu/step-push-mode.mjs";
+import { normalizeFeishuVoiceConfig } from "../../../../src/channels/feishu/voice-config.mjs";
+import { normalizeSlashPanelConfig } from "../../../../src/channels/feishu/slash-command-panel.mjs";
+import { normalizeConversationDirectory } from "../../../../src/channels/shared/conversation-directory.mjs";
 
 export const FEISHU_RPC_CHANNEL = "/feishu";
 
@@ -28,15 +33,21 @@ export const FEISHU_ENDPOINTS = Object.freeze({
   disconnectBot: "bot.disconnect",
   deleteBot: "bot.delete",
   setWorkspace: "bot.workspace.set",
+  setConversationDirectory: "bot.conversation-directory.set",
+  setConversationDirectoryDefault: "bot.conversation-directory.default.set",
   setModel: SET_MODEL_ENDPOINT,
   setAgentPreset: "bot.preset.set",
   setContextEnhancement: "bot.context-enhancement.set",
+  setBusyMessageMode: 'bot.message-mode.set',
   setAccessPolicy: "bot.access-policy.set",
   setAlias: 'bot.alias.set',
   setGroupResponseMode: "bot.group-response-mode.set",
-  setGroupTopicReply: "bot.group-topic-reply.set",
+  setMentionTopicReply: "bot.mention-topic-reply.set",
   setStepPush: "bot.step-push.set",
   setStepPushMode: "bot.step-push-mode.set",
+  setStepCardPanels: "bot.step-card-panels.set",
+  setVoice: "bot.voice.set",
+  setSlashPanel: "bot.slash-panel.set",
   // Kept for rolling upgrades. The multi-bot UI never calls these endpoints.
   testConnection: "connection.test",
   disconnect: "connection.disconnect",
@@ -119,6 +130,7 @@ export function unwrapRpcResult(result) {
     const message = optionalString(result.error?.message) ?? "飞书服务请求失败";
     const error = new Error(message);
     error.code = optionalString(result.error?.code) ?? "FEISHU_RPC_ERROR";
+    Object.assign(error, diagnosticFields(result.error));
     throw error;
   }
   return result.value;
@@ -190,7 +202,7 @@ function normalizeError(value) {
   if (!isRecord(value)) return undefined;
   const message = optionalString(value.message);
   if (!message) return undefined;
-  return { message, code: optionalString(value.code) };
+  return { ...diagnosticFields(value), message, code: optionalString(value.code) };
 }
 
 function authoritativeState(value, connected) {
@@ -215,16 +227,21 @@ export function normalizeBotConnection(value, fallbackBotId) {
     connected,
     configured: value.configured !== false,
     workspace: optionalString(value.workspace)?.slice(0, 4_096) ?? "",
+    conversationDirectory: normalizeConversationDirectory(value.conversationDirectory),
+    conversationDirectoryOverride: normalizeConversationDirectory(value.conversationDirectoryOverride),
     model: normalizeModelSelection(value.model),
     agentPreset: normalizeAgentPresetId(value.agentPreset),
-    contextEnhancement: normalizeContextEnhancementConfig(value.contextEnhancement),
+    busyMessageMode: normalizeBusyMessageMode(value.busyMessageMode),    contextEnhancement: normalizeContextEnhancementConfig(value.contextEnhancement),
     ...(Object.hasOwn(value, "accessPolicy")
       ? { accessPolicy: normalizeAccessPolicy(value.accessPolicy) }
       : {}),
     groupResponseMode: normalizeGroupResponseMode(value.groupResponseMode),
-    groupTopicReply: value.groupTopicReply === true,
+    mentionTopicReply: value.mentionTopicReply !== false,
     stepPush: value.stepPush === true,
     stepPushMode: normalizeFeishuStepPushMode(value.stepPushMode),
+    stepCardPanels: normalizeFeishuStepCardPanels(value.stepCardPanels),
+    voice: normalizeFeishuVoiceConfig(value.voice),
+    slashPanel: normalizeSlashPanelConfig(value.slashPanel),
     groupMessagePermissionGranted: value.groupMessagePermissionGranted === true,
     bot: normalizeBot(value.bot),
     health: normalizeHealth(value.health, connected),
@@ -386,7 +403,7 @@ export function presentError(error) {
   const message = raw
     .replace(/(client[_-]?secret|app[_-]?secret|secret|token)\s*[:=]\s*[^\s,;]+/gi, "$1=••••••")
     .slice(0, 240);
-  return { message, code: optionalString(error?.code) };
+  return { message, code: optionalString(error?.code), ...diagnosticFields(error) };
 }
 
 export function formatRemaining(milliseconds) {

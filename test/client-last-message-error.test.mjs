@@ -5,6 +5,9 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
 import { normalizeLastMessageError } from '../plugin-src/client/last-message-error.js';
+import { classifyMessageFailure, publicMessageFailure } from '../src/channels/shared/message-failure.mjs';
+import { LastMessageErrorSummary } from '../plugin-src/client/channel-card-meta.js';
+import { formatConnectionDiagnostic } from '../plugin-src/client/connection-error.js';
 import { normalizeBotsSnapshot as normalizeFeishu } from '../plugin-src/client/channels/feishu/api.js';
 import { normalizeSnapshot as normalizeDingtalk } from '../plugin-src/client/channels/dingtalk/api.js';
 import { normalizeSnapshot as normalizeWeixin } from '../plugin-src/client/channels/weixin/api.js';
@@ -30,6 +33,21 @@ const publicFailure = Object.freeze({
   message: '模型服务正在限流，本次任务未完成。请稍后重试。',
   referenceId: 'MF-12AB34CD',
   at: Date.UTC(2026, 7, 25, 7, 30),
+});
+
+test('transport classification survives client normalization, rendering and diagnostic copying', () => {
+  const error = normalizeLastMessageError(publicMessageFailure(classifyMessageFailure(
+    new DOMException('private provider detail', 'TimeoutError'), { referenceId: 'MF-12AB34CD' },
+  )));
+  const markup = renderToStaticMarkup(React.createElement(LastMessageErrorSummary, { error }));
+  const copied = formatConnectionDiagnostic(error);
+  for (const text of [markup, copied]) {
+    assert.match(text, /REQUEST_TIMEOUT/u);
+    assert.match(text, /timeout/u);
+    assert.match(text, /MF-12AB34CD/u);
+    assert.match(text, /不要立即重复提交/u);
+    assert.doesNotMatch(text, /private provider detail/u);
+  }
 });
 
 const publicAccessPolicy = Object.freeze({

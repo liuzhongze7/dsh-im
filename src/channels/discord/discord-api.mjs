@@ -123,6 +123,10 @@ export class DiscordApi {
     return this.#request('users/@me', { ...options, method: 'GET' });
   }
 
+  getCurrentApplication(options = {}) {
+    return this.#request('applications/@me', { ...options, method: 'GET' });
+  }
+
   getGatewayBot(options = {}) {
     return this.#request('gateway/bot', { ...options, method: 'GET' });
   }
@@ -295,16 +299,16 @@ export class DiscordApi {
       });
     } catch (error) {
       if (error?.name === 'AbortError' || error?.name === 'TimeoutError') throw error;
-      throw new Error(`Discord ${method} transport failed`);
+      throw new Error(`Discord ${method} transport failed`, { cause: error });
     }
 
     let parsed = null;
     if (expectBody || response.status === 429 || !response.ok) {
       try {
         parsed = await response.json();
-      } catch {
+      } catch (cause) {
         if (expectBody) {
-          const error = new Error(`Discord ${method} returned invalid JSON`);
+          const error = new Error(`Discord ${method} returned invalid JSON`, { cause });
           error.status = response?.status;
           throw error;
         }
@@ -344,4 +348,32 @@ export async function inspectDiscordToken(token, options = {}) {
     name: cleanString(bot.global_name) ?? cleanString(bot.username) ?? t('Discord机器人'),
     username: cleanString(bot.username),
   };
+}
+
+/** Owner lookup is optional metadata, bounded separately from Gateway startup. */
+export async function inspectDiscordOwner(token, {
+  platformId,
+  timeoutMs = 5_000,
+  signal,
+  ...options
+} = {}) {
+  const api = new DiscordApi({ token, ...options });
+  const lookupSignal = requestSignal(signal, positiveTimeout(timeoutMs, 'owner lookup timeout'));
+  const request = { signal: lookupSignal, retry: false };
+  const application = await api.getCurrentApplication(request);
+  const bot = application?.bot ?? await api.getCurrentUser(request);
+  if ((!application?.bot && bot?.bot !== true) || bot?.bot === false
+    || snowflake(bot?.id, 'bot id') !== platformId) {
+    throw new Error('Discord application does not belong to the configured bot');
+  }
+  // A team application belongs to its team owner, not every developer or the
+  // synthetic application owner that Discord can return for team applications.
+  const ownerUserId = snowflake(application?.team != null
+    ? application.team.owner_user_id
+    : application?.owner?.id, 'owner id');
+  if (ownerUserId === platformId || (application?.owner?.bot === true && application?.team == null)) {
+    throw new Error('Discord application owner is not a human identity');
+  }
+  lookupSignal.throwIfAborted();
+  return ownerUserId;
 }

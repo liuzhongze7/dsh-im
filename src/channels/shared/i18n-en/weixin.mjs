@@ -1,9 +1,12 @@
+import diagnostics from '../../weixin/connection-error.en.mjs';
 // English translations (weixin area). Keys are exact Chinese literals passed to t().
 export default {
+  ...diagnostics,
   // weixin-bridge.mjs
   '微信已连接 DeepSeek Harness。': 'WeChat is connected to DeepSeek Harness.',
   '结果文件「{name}」已生成，但微信机器人当前没有文件消息发送权限，请检查机器人文件消息能力。': 'The result file "{name}" was generated, but the WeChat bot currently has no permission to send file messages. Please check the bot\'s file messaging capability.',
   '结果文件「{name}」超过当前微信会话可发送的文件大小，未发送。': 'The result file "{name}" exceeds the file size limit of the current WeChat conversation and was not sent.',
+  '结果文件「{name}」上传微信时长时间没有进展，已超时，文件尚未发送。请检查网络后重试，或压缩、拆分文件后发送。': 'The upload of "{name}" to WeChat stalled and timed out. The file has not been sent. Check your network and retry, or compress or split the file before sending.',
   '结果文件「{name}」暂时被微信限流，未能发送，请稍后重试。': 'The result file "{name}" was temporarily rate-limited by WeChat and was not sent. Please try again later.',
   '结果文件「{name}」已生成，但微信拒绝了该文件消息。': 'The result file "{name}" was generated, but WeChat rejected the file message.',
   '结果文件「{name}」已生成，但暂时未能通过微信发送，请稍后重试。': 'The result file "{name}" was generated but could not be sent via WeChat right now. Please try again later.',
@@ -70,6 +73,7 @@ export default {
   '微信文件上传失败（HTTP {status}）。': 'The WeChat file upload failed (HTTP {status}).',
   '微信文件上传响应缺少下载参数。': 'The WeChat file upload response is missing the download parameter.',
   '微信文件上传失败。': 'The WeChat file upload failed.',
+  '微信文件上传长时间没有进展，已超时。': 'The WeChat file upload stalled and timed out.',
   '拒绝访问不受信任的微信服务地址。': 'Refusing to access an untrusted WeChat service URL.',
   '微信服务请求失败（HTTP {status}）。': 'The WeChat service request failed (HTTP {status}).',
   '微信服务返回了无法解析的响应。': 'The WeChat service returned an unparseable response.',
@@ -81,4 +85,8 @@ export default {
   '微信服务拒绝了文件上传请求。': 'The WeChat service rejected the file upload request.',
   '微信服务拒绝了文件消息。': 'The WeChat service rejected the file message.',
   '微信账号连接启动失败。': 'Failed to start the WeChat account connection.',
+  '/plan  进入计划模式（/plan off 退出，可附带说明文字）':
+    '/plan  Enter plan mode (/plan off to leave; an optional note can be attached)',
+  '/goal [目标]  设置目标（clear 清除、edit 修改、pause 暂停、resume 恢复；不带参数查看）':
+    '/goal [objective]  Set the goal (clear to remove, edit to change, pause to suspend, resume to continue; no argument to view)',
 };

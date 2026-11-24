@@ -1,5 +1,13 @@
 // English translations (feishu area). Keys are exact Chinese literals passed to t().
 export default {
+  '这里需要填写用户的 Open ID，不能填写机器人自己的 Open ID。':
+    'Enter a user Open ID here, not the bot’s own Open ID.',
+  '已结束本轮提问，将在当前会话中继续处理图片。':
+    'The questions have been closed. Your image will be processed in this conversation.',
+  '图片已排队，但暂时无法结束当前提问。请先回答问题或发送 /stop，结束后会继续处理图片。':
+    'Your image is queued, but the current questions could not be closed. Answer them or send /stop; your image will be processed afterward.',
+  '⏹ 提问已结束{progress}': '⏹ Questions closed{progress}',
+  '内容已合并至后续消息。': 'Content has been consolidated into the following messages.',
   // feishu/bridge.mjs — welcome / help
   '北汇星河 AIOS 已连接 DeepSeek Harness。':
     'BeiHui XingHe AIOS is connected to DeepSeek Harness.',
@@ -72,8 +80,8 @@ export default {
   '旧授权链接已作废，已生成新的修复链接。':
     'The previous authorization link was invalidated and a new repair link was generated.',
   '🔧 准备补全权限与回调。': '🔧 Preparing to complete permissions and the callback.',
-  '本次会增量添加当前缺少项：卡片回调 card.action.trigger；飞书显示为“获取单聊、群组消息”的租户权限 im:message:readonly（用于读取用户消息中的图片或文件）；im:resource（用于上传机器人发送的图片或文件）；im:message.group_at_msg.include_bot:readonly（用于接收群内其他机器人 @ 当前机器人的消息）；以及原生命令面板所需的 application:app_slash_command:read / write。确认页只会显示当前缺少的项；若出现上述范围之外的配置，请取消。':
-    'This incrementally adds the currently missing items: the card callback card.action.trigger; the tenant scope im:message:readonly, shown by Feishu as “Read direct and group messages” and used to read images or files in user messages; im:resource, used to upload images or files sent by the bot; im:message.group_at_msg.include_bot:readonly, used to receive group messages from other bots that mention this bot; and application:app_slash_command:read / write for the native command panel. The confirmation page shows only items the app is currently missing; cancel if anything outside this scope appears.',
+  '本次会增量添加当前缺少项：卡片回调 card.action.trigger；im:message.group_msg（用于接收未 @ 的群消息）；飞书显示为“获取单聊、群组消息”的租户权限 im:message:readonly（用于读取用户消息中的图片或文件）；im:resource（用于上传机器人发送的图片或文件）；im:message.group_at_msg.include_bot:readonly（用于接收群内其他机器人 @ 当前机器人的消息）；以及原生命令面板所需的 application:app_slash_command:read / write。群回复方式保持不变，实际收到的群消息和文件会自动保存。确认页只会显示当前缺少的项；若出现上述范围之外的配置，请取消。':
+    'This incrementally adds the currently missing items: the card callback card.action.trigger; im:message.group_msg for group messages without mentions; the tenant scope im:message:readonly, shown by Feishu as “Read direct and group messages” and used to read images or files in user messages; im:resource, used to upload images or files sent by the bot; im:message.group_at_msg.include_bot:readonly, used to receive group messages from other bots that mention this bot; and application:app_slash_command:read / write for the native command panel. The group reply mode stays unchanged, and received group messages and files are saved automatically. The confirmation page shows only items the app is currently missing; cancel if anything outside this scope appears.',
   '当前设备直接打开：': 'Open directly on this device:',
   '若要用另一台设备扫码，发送 /repair qr。{expiry}。':
     'To scan with another device, send /repair qr. {expiry}.',
@@ -137,6 +145,8 @@ export default {
   '请输入补充指令后再提交。': 'Enter an instruction before submitting.',
   '操作过于频繁，请稍后再试。': 'Too many card actions are pending. Please try again shortly.',
   '卡片操作失败，请稍后重试。': 'The card action failed. Please try again later.',
+  '新会话操作的卡片状态未能更新，请发送 /m 重新打开菜单。':
+    'Could not update the new-session card status. Send /m to reopen the menu.',
   '请先选择至少一个会话。': 'Select at least one session first.',
   '已批量关注 {count} 个会话。': 'Now watching {count} sessions.',
   '已批量关注 {count} 个会话，另有 {failed} 个未成功。':
@@ -177,10 +187,21 @@ export default {
   '跟随默认': 'Follow default',
   '切换预设': 'Switch preset',
   '切换模型': 'Switch model',
+  '默认等级': 'Default effort',
+  '切换推理等级': 'Switch reasoning effort',
+  '第 {page}/{pages} 页 · 共 {total} 个模型': 'Page {page}/{pages} · {total} models',
+  '第一页': 'First page',
+  '最后一页': 'Last page',
+  '当前模型不可用：{model}': 'Current model is unavailable: {model}',
   '当前工作区暂无可用会话。': 'There are no available sessions in the current workspace.',
   '🤖 切换预设': '🤖 Switch preset',
   '🧠 切换模型': '🧠 Switch model',
   '🆕 新会话': '🆕 New session',
+  '正在开启…': 'Starting…',
+  '已执行：新会话': 'Done: new session',
+  '正在开启新会话…': 'Starting a new session…',
+  '已执行：新会话。发送消息即可开始。': 'Done: new session. Send a message to start.',
+  '新会话操作失败：{message}': 'New session action failed: {message}',
   '📋 会话/关注': '📋 Sessions / watches',
   '🗂 工作区列表': '🗂 Workspace list',
   '**任务控制**': '**Task controls**',
@@ -244,10 +265,10 @@ export default {
     '/presetlist or /presets  List available Agent Presets',
   '🎮 任务控制': '🎮 Task controls',
   '/steer 指令  给 Agent 补充指令': '/steer INSTRUCTION  Steer the Agent',
-  '**📋 卡片功能**\n\n1. 会话下拉 — 切换当前绑定会话\n2. 工作区下拉 — 切换工作区\n3. 🤖 预设下拉 — 切换 Agent 预设\n4. 🧠 模型下拉 — 切换模型\n5. 🆕 新会话 — 开启全新会话\n6. 📋 会话/关注 — 查看/绑定会话，管理关注\n7. ⏹ 停止 — 停止当前任务\n8. 📐 压缩 — 压缩当前会话上下文\n9. 补充指令 — 给 Agent 发送指令\n10. 🗄 归档切换 — 显示/隐藏归档会话\n11. 📊 状态 — 查看系统连接状态\n12. 📖 帮助 — 查看本帮助':
-    '**📋 Card features**\n\n1. Session dropdown — switch the bound session\n2. Workspace dropdown — switch workspace\n3. 🤖 Preset dropdown — switch Agent Preset\n4. 🧠 Model dropdown — switch model\n5. 🆕 New session — start fresh\n6. 📋 Sessions/watches — view or bind sessions and manage watches\n7. ⏹ Stop — stop the current task\n8. 📐 Compact — compact the current session context\n9. Steer task — send an instruction to the Agent\n10. 🗄 Archived toggle — show or hide archived sessions\n11. 📊 Status — view connection status\n12. 📖 Help — view this help',
-  '**⌨️ 文本命令**\n\n`/m` — 打开菜单卡片\n`/new` — 开启全新会话\n`/session ID` — 绑定已有会话\n`/sessionlist [工作区]` 或 `/sessions [工作区]` — 列出会话\n`/sessionlist --limit N` 或 `/sessions --limit N` — 仅列出当前工作区前 N 个会话\n`/workspace 工作区序号或绝对路径` — 切换工作区\n`/workspacelist` — 列出工作区\n`/status` — 查看连接状态\n`/compact` — 压缩上下文\n`/stop` — 停止当前任务\n`/steer 指令` — 补充指令\n`/watch ID` — 关注会话\n`/watchlist` — 关注列表\n`/unwatch ID` — 取消关注\n`/archived on/off` — 归档显隐\n`/presetlist` 或 `/presets` — 列出预设\n`/preset [序号/ID]` — 切换预设\n`/preset --default` — 跟随默认\n`/models` — 列出模型\n`/reasoninglist` 或 `/reasonings` — 按序号列出当前模型可用推理等级\n`/reasoning [序号、等级ID或 --default]` — 查看或切换当前推理等级\n`/model [序号或完整模型ID] [推理等级ID]` — 查看或切换当前会话模型\n`/batch` — 开启批量输入（仅私聊，最多 10 条文字）\n`/send` — 提交当前批次\n`/cancel` — 取消当前批次\n`/repair` — 补全飞书权限与卡片回调':
-    '**⌨️ Text commands**\n\n`/m` — open the menu card\n`/new` — start a new session\n`/session ID` — bind an existing session\n`/sessionlist [workspace]` or `/sessions [workspace]` — list sessions\n`/sessionlist --limit N` or `/sessions --limit N` — list only the first N sessions in the current workspace\n`/workspace <workspace index or absolute path>` — switch workspace\n`/workspacelist` — list workspaces\n`/status` — view connection status\n`/compact` — compact context\n`/stop` — stop the current task\n`/steer INSTRUCTION` — steer the task\n`/watch ID` — watch a session\n`/watchlist` — list watched sessions\n`/unwatch ID` — stop watching\n`/archived on/off` — show or hide archived sessions\n`/presetlist` or `/presets` — list presets\n`/preset [index/ID]` — switch preset\n`/preset --default` — follow default\n`/models` — list models\n`/reasoninglist` or `/reasonings` — list reasoning efforts for the current model\n`/reasoning [index, effort ID, or --default]` — show or switch reasoning effort\n`/model [index or full model ID] [reasoning effort ID]` — show or switch the current Session model\n`/batch` — start batch input (direct messages only, up to 10 text messages)\n`/send` — submit the current batch\n`/cancel` — cancel the current batch\n`/repair` — complete Feishu permissions and the card callback',
+  '**📋 卡片功能**\n\n1. 会话下拉 — 切换当前绑定会话\n2. 工作区下拉 — 切换工作区\n3. 🤖 预设下拉 — 切换 Agent 预设\n4. 🧠 模型下拉 — 切换模型\n5. 🆕 新会话 — 开启全新会话\n6. 📋 会话/关注 — 查看/绑定会话，管理关注\n7. ⏹ 停止 — 停止当前任务\n8. 📐 压缩 — 压缩当前会话上下文\n9. 🧹 清空上下文 — 清空上下文并保留绑定和历史记录\n10. 补充指令 — 给 Agent 发送指令\n11. 🗄 归档切换 — 显示/隐藏归档会话\n12. 📊 状态 — 查看系统连接状态\n13. 📖 帮助 — 查看本帮助':
+    '**📋 Card features**\n\n1. Session dropdown — switch the bound session\n2. Workspace dropdown — switch workspace\n3. 🤖 Preset dropdown — switch Agent Preset\n4. 🧠 Model dropdown — switch model\n5. 🆕 New session — start fresh\n6. 📋 Sessions/watches — view or bind sessions and manage watches\n7. ⏹ Stop — stop the current task\n8. 📐 Compact — compact the current session context\n9. 🧹 Clear context — clear context while keeping the binding and history\n10. Steer task — send an instruction to the Agent\n11. 🗄 Archived toggle — show or hide archived sessions\n12. 📊 Status — view connection status\n13. 📖 Help — view this help',
+  '**⌨️ 文本命令**\n\n`/m` — 打开菜单卡片\n`/new` — 开启全新会话\n`/session Session ID、当前工作区序号或标题关键词` — 绑定已有会话\n`/sessionlist [工作区]` 或 `/sessions [工作区]` — 列出会话\n`/sessionlist --all` 或 `/sessions --all` — 跨工作区汇总会话（每个工作区默认显示 10 个，可用 --limit N 调整）\n`/sessionlist --limit N` 或 `/sessions --limit N` — 仅列出当前工作区前 N 个会话\n`/workspace 工作区序号或绝对路径` — 切换工作区\n`/workspacelist` — 列出工作区\n`/status` — 查看连接状态\n`/compact` — 压缩上下文\n`/clear` — 清空上下文并保留 Session 绑定和历史记录\n`/stop` — 停止当前任务\n`/steer 指令` — 补充指令\n`/watch ID` — 关注会话\n`/watchlist` — 关注列表\n`/unwatch ID` — 取消关注\n`/archived on/off` — 归档显隐\n`/presetlist` 或 `/presets` — 列出预设\n`/preset [序号/ID]` — 切换预设\n`/preset --default` — 跟随默认\n`/models` — 列出模型\n`/reasoninglist` 或 `/reasonings` — 按序号列出当前模型可用推理等级\n`/reasoning [序号、等级ID或 --default]` — 查看或切换当前推理等级\n`/model [序号或完整模型ID] [推理等级ID]` — 查看或切换当前会话模型\n`/batch` — 开启批量输入（仅私聊，最多 10 条文字）\n`/send` — 提交当前批次\n`/cancel` — 取消当前批次\n`/repair` — 补全飞书权限与卡片回调':
+    '**⌨️ Text commands**\n\n`/m` — open the menu card\n`/new` — start a new session\n`/session Session ID, current workspace index, or title keyword` — bind an existing session\n`/sessionlist [workspace]` or `/sessions [workspace]` — list sessions\n`/sessionlist --all` or `/sessions --all` — summarize sessions across workspaces (10 per workspace by default; use --limit N to change)\n`/sessionlist --limit N` or `/sessions --limit N` — list only the first N sessions in the current workspace\n`/workspace <workspace index or absolute path>` — switch workspace\n`/workspacelist` — list workspaces\n`/status` — view connection status\n`/compact` — compact context\n`/clear` — clear context while keeping the Session binding and history\n`/stop` — stop the current task\n`/steer INSTRUCTION` — steer the task\n`/watch ID` — watch a session\n`/watchlist` — list watched sessions\n`/unwatch ID` — stop watching\n`/archived on/off` — show or hide archived sessions\n`/presetlist` or `/presets` — list presets\n`/preset [index/ID]` — switch preset\n`/preset --default` — follow default\n`/models` — list models\n`/reasoninglist` or `/reasonings` — list reasoning efforts for the current model\n`/reasoning [index, effort ID, or --default]` — show or switch reasoning effort\n`/model [index or full model ID] [reasoning effort ID]` — show or switch the current Session model\n`/batch` — start batch input (direct messages only, up to 10 text messages)\n`/send` — submit the current batch\n`/cancel` — cancel the current batch\n`/repair` — complete Feishu permissions and the card callback',
   '**💡 数字兜底**\n回复数字快速操作：\n**1**工作区列表 · **2**新会话 · **3**会话/关注\n**4**状态 · **5**补全权限 · **6**帮助':
     '**💡 Number fallback**\nReply with a number for a quick action:\n**1** Workspace list · **2** New session · **3** Sessions/watches\n**4** Status · **5** Complete permissions · **6** Help',
   '从下方下拉选择补充指令；最后一项可自定义输入。':
@@ -304,6 +325,8 @@ export default {
   '/watch ID 或序号  关注会话（完成后推送）':
     '/watch ID or index  Watch a session (push when done)',
   '/compact  压缩上下文': '/compact  Compact the context',
+  '🧹 清空上下文': '🧹 Clear context',
+  '清空当前会话上下文并保留绑定和历史记录': 'Clear the current session context while keeping the binding and history',
   '/workspace 绝对路径  切换工作区': '/workspace <absolute path>  Switch workspace',
   '/presetlist  列出可用 Agent Preset': '/presetlist  List available Agent Presets',
   '任务完成会自动推送，回复数字或点按钮取消关注：':
@@ -375,6 +398,7 @@ export default {
   '🔐 工具审批': '🔐 Tool approval',
   // feishu/feishu-cards.mjs — question card
   '❓ 请补充信息{progress}': '❓ Please provide more information{progress}',
+  '选择 {number}': 'Select {number}',
   // feishu/bridge.mjs — deferred delivery terminal statuses
   '后台任务已结束（{reason}），没有可推送的最终结果。':
     'The background task has finished ({reason}); there is no final result to deliver.',
@@ -383,6 +407,9 @@ export default {
   '任务失败': 'Failed',
   // feishu/bridge.mjs — step push context injection
   '📎 已注入会话上下文': '📎 Context injected',
+  // feishu/bridge.mjs — goal rounds opened outside the IM (issue #454)
+  '🔄 目标自动续跑': '🔄 Goal auto-continued',
+  '🔄 目标自动续跑（第 {round} 轮）': '🔄 Goal auto-continued (round {round})',
   // feishu/feishu-cards.mjs — question card answered state + custom entry (issue #162)
   '✏️ 其他答案…': '✏️ Other answer…',
   '✅ 已回答{progress}': '✅ Answered{progress}',

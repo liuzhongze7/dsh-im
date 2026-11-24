@@ -2,6 +2,7 @@ import { registerManagementRpc } from '../../../management-rpc.mjs';
 import { onImHostLanguageChange } from '../../../../src/channels/shared/i18n.mjs';
 import { resolveRpcAuthority } from '../../rpc-authority.mjs';
 import { publicChannelInitializing, publicChannelStartupError } from './startup-error.mjs';
+import { createConnectionDiagnostics, diagnosticRpcResult } from '../../../../src/channels/shared/connection-error.mjs';
 
 /**
  * Keep a channel's platform-side command menu in the current host message
@@ -26,17 +27,22 @@ function followHostLanguage(ctx, channel, controller, logger) {
 
 /** Mount the native management RPC before any fallible production initialization. */
 export async function installProductionChannel(ctx, config, {
-  channel, rpcChannel, createProduction, createHandler,
+  channel, rpcChannel, createProduction, createHandler, reportStartupError,
 }) {
   let startupError = publicChannelInitializing(channel);
   let handler = async () => ({ ok: false, error: startupError });
-  const disposeRpc = registerManagementRpc(ctx, rpcChannel, (endpoint, payload, signal) => {
+  const logger = typeof ctx.logger === 'function' ? ctx.logger(`dsh-im:${channel}`) : (ctx.logger ?? console);
+  const diagnostics = createConnectionDiagnostics({ channel, logger });
+  const disposeRpc = registerManagementRpc(ctx, rpcChannel, async (endpoint, payload, signal) => {
     if (signal?.aborted) {
       return { ok: false, error: { code: 'cancelled', message: 'The request was cancelled.', details: {} } };
     }
-    return handler(endpoint, payload, signal);
+    try { return await handler(endpoint, payload, signal); }
+    catch (error) {
+      // Preserve a final Host diagnostic if an endpoint misses its own catch.
+      return diagnosticRpcResult(diagnostics, error, { ok: false, error: { code: `${channel}-operation-failed` } }, { operation: endpoint });
+    }
   }, { authority: resolveRpcAuthority(config.rpcAuthority) });
-  const logger = typeof ctx.logger === 'function' ? ctx.logger(`dsh-im:${channel}`) : (ctx.logger ?? console);
   let production;
   let unregisterDelivery;
   let closing;
@@ -56,12 +62,14 @@ export async function installProductionChannel(ctx, config, {
     followHostLanguage(ctx, channel, production.controller, logger);
     handler = readyHandler;
   } catch (error) {
-    startupError = publicChannelStartupError(channel, error);
-    logger.error?.(`[dsh-im] failed to activate ${channel}; management RPC remains available`, error);
+    startupError = reportStartupError
+      ? reportStartupError(error, false)
+      : diagnostics.report(error, { operation: 'startup', stage: 'startup.load', publicError: publicChannelStartupError(channel, error) }).publicError;
     try {
       await closeProduction();
     } catch (cleanupError) {
-      logger.error?.(`[dsh-im] failed to close partially initialized ${channel} resources`, cleanupError);
+      if (reportStartupError) reportStartupError(cleanupError, true);
+      else diagnostics.report(cleanupError, { operation: 'startup', stage: 'connection.stop', warning: true });
     }
   }
   return disposeRpc;

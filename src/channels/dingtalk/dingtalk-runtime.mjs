@@ -1,3 +1,4 @@
+import { atConnectionStage, createConnectionDiagnostics } from '../shared/connection-error.mjs';
 import { createDingtalkApi } from './dingtalk-api.mjs';
 import {
   createDingtalkBridgeStatus,
@@ -87,7 +88,7 @@ async function connectStream(client, timeoutMs, pollIntervalMs, signal) {
         void connectTask.then(() => client.disconnect()).catch(() => undefined);
       }
       if (signal.aborted) throw signal.reason;
-      throw new Error(`DingTalk Stream handshake timed out after ${timeoutMs}ms`);
+      throw Object.assign(new Error(`DingTalk Stream handshake timed out after ${timeoutMs}ms`), { code: 'ETIMEDOUT', timeoutMs, cause: error });
     }
     throw error;
   }
@@ -134,6 +135,7 @@ export class DingtalkRuntime {
   #contextEnhancement;
   #accessPolicy;
   #logger;
+  #diagnostics;
   #replyTimeoutMs;
   #maxMessageChars;
   #connectTimeoutMs;
@@ -161,7 +163,7 @@ export class DingtalkRuntime {
     maxMessageChars = 4_000,
     connectTimeoutMs = 15_000,
     connectPollIntervalMs = 25,
-    api = createDingtalkApi(),
+    api = createDingtalkApi({ logger }),
     streamFactory = defaultStreamFactory,
   }) {
     if (!config || !nonEmptyString(config.clientId) || !nonEmptyString(clientSecret)) {
@@ -176,6 +178,7 @@ export class DingtalkRuntime {
     this.#contextEnhancement = contextEnhancement;
     this.#accessPolicy = accessPolicy;
     this.#logger = logger;
+    this.#diagnostics = createConnectionDiagnostics({ channel: 'dingtalk', logger, prefix: 'DT-CONN' });
     this.#replyTimeoutMs = replyTimeoutMs;
     this.#maxMessageChars = maxMessageChars;
     this.#connectTimeoutMs = connectTimeoutMs;
@@ -228,7 +231,7 @@ export class DingtalkRuntime {
     let startStage = 'dingtalk-harness-connect-failed';
 
     try {
-      await this.#harness.ensureRunning({ signal });
+      await atConnectionStage('harness.check', () => this.#harness.ensureRunning({ signal }));
       this.#status.harnessReachable = true;
       startStage = 'dingtalk-runtime-prepare-failed';
       if (typeof this.#state.removePendingSenderByStaffId === 'function') {
@@ -308,6 +311,7 @@ export class DingtalkRuntime {
         } catch {
           // Optional settings failures leave the original message path active.
         }
+        const busyMessageMode = this.#harness.currentBusyMessageMode?.() ?? 'queue';
         const task = Promise.resolve().then(async () => {
           if (this.#bridge !== bridge) return;
           let message;
@@ -327,7 +331,7 @@ export class DingtalkRuntime {
             get botId() { return contextEnhancement?.botId; },
           }, message.conversationType === '1' || message.conversationType === 1 ? 'direct'
             : message.conversationType === '2' || message.conversationType === 2 ? 'group' : null);
-          await bridge.accept(message, { contextSnapshot });
+          await bridge.accept(message, { contextSnapshot, busyMessageMode });
         }).catch(() => {
           if (signal.aborted || this.#bridge !== bridge) return;
           this.#status.lastError = t('钉钉消息处理失败。');
@@ -348,12 +352,22 @@ export class DingtalkRuntime {
       this.#status.lastConnectedAt = Date.now();
       this.#status.lastCheckedAt = Date.now();
       this.#status.lastError = null;
+      this.#status.error = null;
+      this.#diagnostics.clear();
       this.#connectionMonitor = setInterval(() => {
         const connected = streamIsOpen(client);
         this.#status.ready = connected;
         this.#status.dingtalkStreamState = connected ? 'connected' : 'reconnecting';
         this.#status.lastCheckedAt = Date.now();
-        if (connected) this.#status.lastError = null;
+        if (connected) {
+          this.#status.lastError = null;
+          this.#status.error = null;
+          this.#diagnostics.clear();
+        } else {
+          this.#status.error = this.#diagnostics.report(null, { operation: 'connection.monitor', automatic: true, botId: this.#config.botId,
+            publicError: { code: 'stream-connect-failed', message: t('钉钉连接未就绪，请稍后重试。') } }).publicError;
+          this.#status.lastError = this.#status.error.message;
+        }
       }, 1_000);
       this.#connectionMonitor.unref?.();
       return this.status;
@@ -362,7 +376,7 @@ export class DingtalkRuntime {
       const failure = aborted ? error : dingtalkRuntimeStartError(startStage, error);
       this.#status.ready = false;
       this.#status.dingtalkStreamState = aborted ? 'idle' : 'failed';
-      this.#status.lastError = aborted ? null : (failure?.message ?? String(failure));
+      this.#status.lastError = aborted ? null : t('钉钉连接未就绪，请稍后重试。');
       await this.stop({ preserveError: !aborted });
       throw failure;
     }
@@ -370,6 +384,7 @@ export class DingtalkRuntime {
 
   async stop({ preserveError = false } = {}) {
     const lastError = preserveError ? this.#status.lastError : null;
+    const publicError = preserveError ? this.#status.error : null;
     const abortController = this.#abortController;
     this.#abortController = null;
     abortController?.abort(new DOMException('DingTalk runtime stopped', 'AbortError'));
@@ -393,6 +408,8 @@ export class DingtalkRuntime {
     this.#bridge = null;
     this.#status.dingtalkStreamState = preserveError ? 'failed' : 'idle';
     this.#status.lastError = lastError;
+    this.#status.error = publicError;
+    if (!preserveError) this.#diagnostics.clear();
     return this.status;
   }
 
@@ -416,7 +433,17 @@ export class DingtalkRuntime {
     });
   }
 
-  async sendProactiveText(target, text, { signal } = {}) {
+  async presentSessionSyncApproval(target, interaction, options = {}) {
+    if (!this.#status.ready || !this.#bridge) return false;
+    const actor = typeof target?.route?.userId === 'string' ? target.route.userId.trim() : '';
+    if (!actor) return false;
+    return this.#bridge.presentSessionSyncApproval(interaction, {
+      key: options.key, actor, validate: options.validate,
+      send: (text) => this.sendProactiveText(target, text),
+    }, options);
+  }
+
+  async sendProactiveText(target, text, { signal, format = 'plain' } = {}) {
     const userId = typeof target?.route?.userId === 'string'
       ? target.route.userId.trim() : '';
     const openConversationId = typeof target?.route?.openConversationId === 'string'
@@ -444,6 +471,7 @@ export class DingtalkRuntime {
           ...(target.kind === 'user' ? { userId } : { openConversationId }),
         },
         text,
+        format,
         signal: signal ?? this.#abortController.signal,
       });
     } catch (cause) {

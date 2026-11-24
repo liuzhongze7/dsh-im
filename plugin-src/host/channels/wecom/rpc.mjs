@@ -1,6 +1,9 @@
+import { SET_MESSAGE_MODE_ENDPOINT, validMessageModePayload } from '../../../../src/channels/shared/message-mode.mjs';
+import { createConnectionDiagnostics, diagnosticRpcResult } from '../../../../src/channels/shared/connection-error.mjs';
 import { SET_ALIAS_ENDPOINT, validAliasPayload } from '../shared/bot-alias-rpc.mjs';
 import { registerManagementRpc } from '../../../management-rpc.mjs';
-import QRCode from 'qrcode';
+import QRCode from '../../../../src/channels/shared/qrcode.mjs';
+import { qrEncodingError } from '../../../../src/channels/shared/qr-encoding-error.mjs';
 import { SET_CONTEXT_ENHANCEMENT_ENDPOINT, validContextEnhancementPayload } from '../shared/context-enhancement-rpc.mjs';
 import { SET_ACCESS_POLICY_ENDPOINT, validAccessPolicyPayload } from '../shared/access-policy-rpc.mjs';
 import { resolveRpcAuthority } from '../../rpc-authority.mjs';
@@ -25,6 +28,7 @@ export const WECOM_ENDPOINTS = Object.freeze({
   setModel: SET_MODEL_ENDPOINT,
   setAgentPreset: SET_AGENT_PRESET_ENDPOINT,
   setContextEnhancement: SET_CONTEXT_ENHANCEMENT_ENDPOINT,
+  setBusyMessageMode: SET_MESSAGE_MODE_ENDPOINT,
   setAccessPolicy: SET_ACCESS_POLICY_ENDPOINT,
   setAlias: SET_ALIAS_ENDPOINT,
 });
@@ -88,6 +92,10 @@ function payloadFailure(endpoint, payload) {
     return validAgentPresetPayload(payload)
       ? null : '请选择 Agent Preset。';
   }
+  if (endpoint === WECOM_ENDPOINTS.setBusyMessageMode) {
+    return validMessageModePayload(payload)
+      ? null : '请提交有效的消息处理方式。';
+  }
   if (endpoint === WECOM_ENDPOINTS.setContextEnhancement) {
     return validContextEnhancementPayload(payload)
       ? null : '请提交有效的上下文增强设置。';
@@ -131,6 +139,7 @@ async function publicStatus(status, encodeQr) {
 }
 
 export function createWecomRpcHandler(controller, { encodeQr = qrDataUrl } = {}) {
+  const diagnostics = controller.diagnostics ?? createConnectionDiagnostics({ channel: 'wecom' });
   for (const method of ['status', 'startProvisioning', 'registrationStatus', 'cancelProvisioning', 'bindCredentials', 'reconnectBot', 'deleteBot']) {
     if (typeof controller?.[method] !== 'function') {
       throw new TypeError(`A complete Enterprise WeChat controller is required (${method})`);
@@ -141,7 +150,10 @@ export function createWecomRpcHandler(controller, { encodeQr = qrDataUrl } = {})
     let encoded = qrCache.get(url);
     if (!encoded) {
       if (qrCache.size >= 16) qrCache.delete(qrCache.keys().next().value);
-      encoded = Promise.resolve().then(() => encodeQr(url));
+      encoded = Promise.resolve().then(() => encodeQr(url)).catch(error => {
+        if (qrCache.get(url) === encoded) qrCache.delete(url);
+        throw qrEncodingError(error);
+      });
       qrCache.set(url, encoded);
     }
     return encoded;
@@ -185,7 +197,7 @@ export function createWecomRpcHandler(controller, { encodeQr = qrDataUrl } = {})
               await controller.sendConnectionTest(payload.botId);
               testMessage = publicConnectionTestResult();
             } catch (error) {
-              testMessage = publicConnectionTestResult(error);
+              testMessage = publicConnectionTestResult(error, { diagnostics, botId: payload.botId });
             }
           }
         }
@@ -201,6 +213,11 @@ export function createWecomRpcHandler(controller, { encodeQr = qrDataUrl } = {})
         value = await publicStatus(
           await controller.updateModel(payload.botId, payload.model),
           cachedEncode,
+        );
+      } else if (endpoint === WECOM_ENDPOINTS.setBusyMessageMode) {
+        if (typeof controller.updateBusyMessageMode !== 'function') throw new Error('Message mode update is unavailable');
+        value = await controller.updateBusyMessageMode(
+          payload.botId, payload.busyMessageMode, (status) => publicStatus(status, cachedEncode),
         );
       } else if (endpoint === WECOM_ENDPOINTS.setContextEnhancement) {
         if (typeof controller.updateContextEnhancement !== 'function') throw new Error('Context enhancement update is unavailable');
@@ -231,10 +248,10 @@ export function createWecomRpcHandler(controller, { encodeQr = qrDataUrl } = {})
         : { ok: true, value };
     } catch (error) {
       const workspaceError = publicWorkspaceError(error);
-      return signal?.aborted
+      return diagnosticRpcResult(diagnostics, error, signal?.aborted
         ? { ok: false, error: { code: 'cancelled', message: 'The request was cancelled.' } }
         : { ok: false, error: workspaceError
-          ?? { code: 'wecom-operation-failed', message: '企业微信操作失败，请稍后重试。' } };
+          ?? { code: 'wecom-operation-failed', message: '企业微信操作失败，请稍后重试。' } }, { operation: endpoint, botId: payload?.botId });
     }
   };
 }

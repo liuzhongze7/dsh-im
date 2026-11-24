@@ -1,3 +1,5 @@
+import { SET_MESSAGE_MODE_ENDPOINT, validMessageModePayload } from '../../../../src/channels/shared/message-mode.mjs';
+import { createConnectionDiagnostics, diagnosticRpcResult } from '../../../../src/channels/shared/connection-error.mjs';
 import { SET_ALIAS_ENDPOINT, validAliasPayload } from './bot-alias-rpc.mjs';
 import { registerManagementRpc } from '../../../management-rpc.mjs';
 import { SET_CONTEXT_ENHANCEMENT_ENDPOINT, validContextEnhancementPayload } from './context-enhancement-rpc.mjs';
@@ -14,6 +16,9 @@ import {
   validAgentPresetPayload,
 } from './agent-preset-rpc.mjs';
 import { SET_MODEL_ENDPOINT, validModelPayload } from './model-setting-rpc.mjs';
+import { SET_THINKING_TRACES_ENDPOINT, validThinkingTracesPayload } from './thinking-traces-rpc.mjs';
+import { SET_THINKING_CADENCE_ENDPOINT, validThinkingCadencePayload } from './thinking-cadence-rpc.mjs';
+import { SET_SEND_LIMIT_ENDPOINT, validSendLimitPayload } from './send-limit-rpc.mjs';
 
 export const TOKEN_BOT_ENDPOINTS = Object.freeze({
   status: 'connection.status',
@@ -24,8 +29,12 @@ export const TOKEN_BOT_ENDPOINTS = Object.freeze({
   setModel: SET_MODEL_ENDPOINT,
   setAgentPreset: SET_AGENT_PRESET_ENDPOINT,
   setContextEnhancement: SET_CONTEXT_ENHANCEMENT_ENDPOINT,
+  setBusyMessageMode: SET_MESSAGE_MODE_ENDPOINT,
   setAccessPolicy: SET_ACCESS_POLICY_ENDPOINT,
   setAlias: SET_ALIAS_ENDPOINT,
+  setThinkingTraces: SET_THINKING_TRACES_ENDPOINT,
+  setThinkingCadence: SET_THINKING_CADENCE_ENDPOINT,
+  setSendLimit: SET_SEND_LIMIT_ENDPOINT,
 });
 
 const ENDPOINTS = Object.freeze(Object.values(TOKEN_BOT_ENDPOINTS));
@@ -84,6 +93,10 @@ function payloadFailure(endpoint, payload) {
     return validAgentPresetPayload(payload)
       ? null : '请选择 Agent Preset。';
   }
+  if (endpoint === TOKEN_BOT_ENDPOINTS.setBusyMessageMode) {
+    return validMessageModePayload(payload)
+      ? null : '请提交有效的消息处理方式。';
+  }
   if (endpoint === TOKEN_BOT_ENDPOINTS.setContextEnhancement) {
     return validContextEnhancementPayload(payload)
       ? null : '请提交有效的上下文增强设置。';
@@ -95,6 +108,18 @@ function payloadFailure(endpoint, payload) {
   if (endpoint === TOKEN_BOT_ENDPOINTS.setAlias) {
     return validAliasPayload(payload)
       ? null : '请输入有效的别名（最多 80 个字符）。';
+  }
+  if (endpoint === TOKEN_BOT_ENDPOINTS.setThinkingTraces) {
+    return validThinkingTracesPayload(payload)
+      ? null : '请提交有效的思考过程留痕设置。';
+  }
+  if (endpoint === TOKEN_BOT_ENDPOINTS.setThinkingCadence) {
+    return validThinkingCadencePayload(payload)
+      ? null : '请提交有效的思考帧节奏设置。';
+  }
+  if (endpoint === TOKEN_BOT_ENDPOINTS.setSendLimit) {
+    return validSendLimitPayload(payload)
+      ? null : '请提交有效的消息发送上限。';
   }
   return 'Unknown bot endpoint.';
 }
@@ -131,6 +156,7 @@ function operationError(channel, error) {
 }
 
 export function createTokenBotRpcHandler(controller, { channel }) {
+  const diagnostics = controller.diagnostics ?? createConnectionDiagnostics({ channel: channel.toLowerCase() });
   for (const method of ['status', 'bindCredentials', 'reconnectBot', 'deleteBot']) {
     if (typeof controller?.[method] !== 'function') {
       throw new TypeError(`A complete ${channel} controller is required (${method})`);
@@ -172,7 +198,7 @@ export function createTokenBotRpcHandler(controller, { channel }) {
           } catch (error) {
             testError = error;
           }
-          value = { ...value, testMessage: publicConnectionTestResult(testError) };
+          value = { ...value, testMessage: publicConnectionTestResult(testError, { diagnostics, botId: payload.botId }) };
         }
       } else if (endpoint === TOKEN_BOT_ENDPOINTS.setWorkspace) {
         if (typeof controller.updateWorkspace !== 'function') throw new Error('Workspace update is unavailable');
@@ -180,6 +206,9 @@ export function createTokenBotRpcHandler(controller, { channel }) {
       } else if (endpoint === TOKEN_BOT_ENDPOINTS.setModel) {
         if (typeof controller.updateModel !== 'function') throw new Error('Model update is unavailable');
         value = await controller.updateModel(payload.botId, payload.model);
+      } else if (endpoint === TOKEN_BOT_ENDPOINTS.setBusyMessageMode) {
+        if (typeof controller.updateBusyMessageMode !== 'function') throw new Error('Message mode update is unavailable');
+        value = await controller.updateBusyMessageMode(payload.botId, payload.busyMessageMode);
       } else if (endpoint === TOKEN_BOT_ENDPOINTS.setContextEnhancement) {
         if (typeof controller.updateContextEnhancement !== 'function') throw new Error('Context enhancement update is unavailable');
         value = await controller.updateContextEnhancement(payload.botId, payload.config);
@@ -192,6 +221,18 @@ export function createTokenBotRpcHandler(controller, { channel }) {
       } else if (endpoint === TOKEN_BOT_ENDPOINTS.setAgentPreset) {
         if (typeof controller.updateAgentPreset !== 'function') throw new Error('Agent preset update is unavailable');
         value = await controller.updateAgentPreset(payload.botId, payload.agentPreset);
+      } else if (endpoint === TOKEN_BOT_ENDPOINTS.setThinkingTraces) {
+        if (typeof controller.setThinkingTraces !== 'function') throw new Error('Thinking traces update is unavailable');
+        value = await controller.setThinkingTraces(payload.botId, payload.thinkingTraces);
+      } else if (endpoint === TOKEN_BOT_ENDPOINTS.setThinkingCadence) {
+        if (typeof controller.setThinkingCadence !== 'function') throw new Error('Thinking trace cadence update is unavailable');
+        value = await controller.setThinkingCadence(payload.botId, {
+          thinkingNumbering: payload.thinkingNumbering,
+          thinkingIntervalSeconds: payload.thinkingIntervalSeconds,
+        });
+      } else if (endpoint === TOKEN_BOT_ENDPOINTS.setSendLimit) {
+        if (typeof controller.setSendLimitPerMinute !== 'function') throw new Error('Send limit update is unavailable');
+        value = await controller.setSendLimitPerMinute(payload.botId, payload.sendLimitPerMinute);
       } else {
         value = await controller.deleteBot(payload.botId);
       }
@@ -199,9 +240,9 @@ export function createTokenBotRpcHandler(controller, { channel }) {
         ? { ok: false, error: { code: 'cancelled', message: 'The request was cancelled.' } }
         : { ok: true, value: sanitizePublic(value) };
     } catch (error) {
-      return signal?.aborted
+      return diagnosticRpcResult(diagnostics, error, signal?.aborted
         ? { ok: false, error: { code: 'cancelled', message: 'The request was cancelled.' } }
-        : { ok: false, error: operationError(channel, error) };
+        : { ok: false, error: operationError(channel, error) }, { operation: endpoint, botId: payload?.botId });
     }
   };
 }

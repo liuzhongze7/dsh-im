@@ -1,12 +1,14 @@
+import { WeixinConnectionError, provisioningErrorTitle } from './connection-error.js';
 import { BotName } from '../../bot-alias.js';
 import * as React from 'react';
 
 import { WeixinLogoGlyph } from '../../channel-logos.js';
 import { QrActionIcon } from '../../credential-binding.js';
-import { CollapsibleAccountSection } from '../shared/collapsible-account.js';
-import { h } from '../../i18n.js';
+import { AccountSettingsToggle, CollapsibleAccountSection } from '../shared/collapsible-account.js';
+import { h, localizeTemplate } from '../../i18n.js';
 import {
   WEIXIN_ENDPOINTS,
+  managementRequestError,
   formatRemaining,
   normalizeProvisioning,
   normalizeSnapshot,
@@ -61,7 +63,7 @@ function Heading({ totals, adding, busy, onAdd, addButtonRef }) {
       }, h(QrActionIcon), adding ? '正在接入' : '扫码接入机器人'),
       totals.configured > 0
         ? h('div', { className: 'dxw-badge dim-onlineBadge' },
-            h('span', null, `${totals.connected} / ${totals.configured} 在线`))
+            h('span', null, localizeTemplate('{connected} / {configured} 在线', { connected: totals.connected, configured: totals.configured })))
         : null,
     ),
   );
@@ -189,9 +191,8 @@ function ProvisionError({ provision, busy, onRetry, onClose }) {
   const error = provision.error ?? { code: 'WEIXIN_PROVISION_FAILED', message: '微信绑定没有完成' };
   return h('div', { className: 'dxw-card dim-surfaceCard' },
     h('div', { className: 'dxw-error dim-inlineError', role: 'alert' },
-      h('h3', null, provision.status === 'expired' ? '二维码已过期' : '微信没有绑定完成'),
-      h('p', null, error.message),
-      h('span', { className: 'dxw-errorCode' }, error.code),
+      h('h3', null, provision.status === 'expired' ? '二维码已过期' : provisioningErrorTitle(error)),
+      h(WeixinConnectionError, { error }),
       h('div', { className: 'dxw-actions dim-viewActions' },
         h(Button, { kind: 'primary', onClick: onRetry, disabled: busy }, '重新生成二维码'),
         h(Button, { onClick: onClose, disabled: busy }, '关闭'))));
@@ -229,6 +230,13 @@ export function AccountCard({
   return h('article', { className: 'dxw-card dim-botCard', tabIndex: -1, 'data-bot-id': account.botId },
     h('div', { className: 'dxw-cardBody dim-botCardBody' },
       h(CollapsibleAccountSection, {
+        settings: h(BotSettingsButton, {
+          channel: 'weixin',
+          botId: account.botId,
+          botName: account.bot.name,
+          connected: account.connected,
+          accessPolicy: account.accessPolicy,
+        }),
         id: `dxw-settings-${account.botId.replace(/[^a-zA-Z0-9_-]/g, '-')}`,
         header: h('div', { className: 'dxw-accountTop dim-botCardTop' },
         h('div', { className: 'dxw-accountIdentity dim-botIdentity' },
@@ -248,13 +256,7 @@ export function AccountCard({
             lastCheckedAt: account.health.lastCheckedAt,
             formatCheckedTime: checkedTime,
           }),
-          h(BotSettingsButton, {
-            channel: 'weixin',
-            botId: account.botId,
-            botName: account.bot.name,
-            connected: account.connected,
-            accessPolicy: account.accessPolicy,
-          })))
+          h(AccountSettingsToggle)))
       },
         h(WorkspaceEditor, {
         workspace: account.workspace,
@@ -283,7 +285,8 @@ export function AccountCard({
             h(Button, { className: 'dim-cardAction', onClick: onReconnect, disabled: Boolean(busy) },
               busy === 'reconnect' ? '检查中…' : account.connected ? '检查连接' : '重试连接'),
             h(Button, { className: 'dim-cardAction', kind: 'danger', onClick: onRequestRemove, disabled: Boolean(busy) }, '移除接入')),
-          summary ? h('div', { className: 'dxw-summary dim-cardSummary' }, summary) : null,
+          account.error ? h(WeixinConnectionError, { error: account.error })
+            : summary ? h('div', { className: 'dxw-summary dim-cardSummary' }, summary) : null,
           account.lastMessageError ? h(LastMessageErrorSummary, {
             className: 'dxw-summary',
             error: account.lastMessageError,
@@ -292,7 +295,7 @@ export function AccountCard({
             className: 'dxw-summary dim-cardFeedback',
             role: 'status',
             'aria-live': 'polite',
-          }, feedback) : null)),
+          }, typeof feedback === 'string' ? feedback : h(WeixinConnectionError, { error: feedback })) : null)),
       ),
     ),
     removing ? h('div', { className: 'dxw-confirm dim-confirm', role: 'alertdialog' },
@@ -358,6 +361,7 @@ export function WeixinSettingsTab({ rpcCall }) {
   const [feedbackByBot, setFeedbackByBot] = React.useState({});
   const [removeTarget, setRemoveTarget] = React.useState(null);
   const [notice, setNotice] = React.useState('');
+  const [operationWarnings, setOperationWarnings] = React.useState([]);
   const [now, setNow] = React.useState(() => Date.now());
   const addButtonRef = React.useRef(null);
   const mountedRef = React.useRef(true);
@@ -376,7 +380,13 @@ export function WeixinSettingsTab({ rpcCall }) {
     }, 'announcement');
   }, [scheduleAnimationFrame]);
   const invoke = React.useCallback(async (endpoint, payload = {}, signal) => {
-    return unwrapRpcResult(await rpcCall(endpoint, payload, signal));
+    let result;
+    try { result = await rpcCall(endpoint, payload, signal); }
+    catch (error) {
+      if (signal?.aborted) throw error;
+      throw managementRequestError(error, endpoint);
+    }
+    return unwrapRpcResult(result);
   }, [rpcCall]);
   const loadStatus = React.useCallback(async ({
     signal,
@@ -606,12 +616,12 @@ export function WeixinSettingsTab({ rpcCall }) {
         setFeedbackByBot((current) => ({ ...current, [account.botId]: feedback }));
       }
       announce(feedback);
-    } catch {
-      const feedback = '连接检查失败，请稍后重试。';
+    } catch (error) {
+      const feedback = presentError(error);
       if (mountedRef.current) {
         setFeedbackByBot((current) => ({ ...current, [account.botId]: feedback }));
       }
-      announce(feedback);
+      announce(feedback.message);
     } finally {
       const shouldRefresh = workspaceFence.endMutation();
       if (shouldRefresh && mountedRef.current) void loadStatus({ silent: true });
@@ -622,6 +632,7 @@ export function WeixinSettingsTab({ rpcCall }) {
   const saveWorkspace = React.useCallback(async (account, workspace) => {
     const workspaceVersion = workspaceFence.beginMutation();
     setBotBusy(account.botId, 'workspace');
+    setFeedbackByBot(current => ({ ...current, [account.botId]: null }));
     try {
       const snapshot = normalizeSnapshot(await invoke(
         WEIXIN_ENDPOINTS.setWorkspace,
@@ -635,6 +646,9 @@ export function WeixinSettingsTab({ rpcCall }) {
           modelCatalog: snapshot.modelCatalog ?? EMPTY_MODEL_CATALOG,
         });
       }
+    } catch (error) {
+      if (mountedRef.current) setFeedbackByBot(current => ({ ...current, [account.botId]: presentError(error) }));
+      throw error;
     } finally {
       const shouldRefresh = workspaceFence.endMutation();
       if (shouldRefresh && mountedRef.current) void loadStatus({ silent: true });
@@ -645,6 +659,7 @@ export function WeixinSettingsTab({ rpcCall }) {
   const saveBotSetting = React.useCallback(async (account, operation, endpoint, payload) => {
     const snapshotVersion = workspaceFence.beginMutation();
     setBotBusy(account.botId, operation);
+    setFeedbackByBot(current => ({ ...current, [account.botId]: null }));
     try {
       const snapshot = normalizeSnapshot(await invoke(
         endpoint,
@@ -658,6 +673,9 @@ export function WeixinSettingsTab({ rpcCall }) {
           modelCatalog: snapshot.modelCatalog ?? EMPTY_MODEL_CATALOG,
         });
       }
+    } catch (error) {
+      if (mountedRef.current) setFeedbackByBot(current => ({ ...current, [account.botId]: presentError(error) }));
+      throw error;
     } finally {
       const shouldRefresh = workspaceFence.endMutation();
       if (shouldRefresh && mountedRef.current) void loadStatus({ silent: true });
@@ -668,6 +686,8 @@ export function WeixinSettingsTab({ rpcCall }) {
   const remove = React.useCallback(async (account) => {
     const snapshotVersion = workspaceFence.beginMutation();
     setBotBusy(account.botId, 'delete');
+    setOperationWarnings([]);
+    setFeedbackByBot(current => ({ ...current, [account.botId]: null }));
     try {
       const snapshot = normalizeSnapshot(await invoke(WEIXIN_ENDPOINTS.deleteBot, {
         botId: account.botId,
@@ -680,10 +700,13 @@ export function WeixinSettingsTab({ rpcCall }) {
           modelCatalog: snapshot.modelCatalog ?? current.modelCatalog,
         }));
       }
+      setOperationWarnings(snapshot.warnings);
       setRemoveTarget(null);
       announce('微信账号及本机凭据已移除。');
     } catch (error) {
-      announce(`移除失败：${presentError(error).message}`);
+      const failure = presentError(error);
+      if (mountedRef.current) setFeedbackByBot(current => ({ ...current, [account.botId]: failure }));
+      announce(failure.message);
     } finally {
       const shouldRefresh = workspaceFence.endMutation();
       if (shouldRefresh && mountedRef.current) void loadStatus({ silent: true });
@@ -731,8 +754,10 @@ export function WeixinSettingsTab({ rpcCall }) {
       addButtonRef,
     }),
     h('div', { className: 'dxw-visuallyHidden', role: 'status', 'aria-live': 'polite' }, notice),
+    ...operationWarnings.map((error, index) => h(WeixinConnectionError, { key: error.details?.referenceId ?? index, error, warning: true })),
     model.error && model.phase === 'ready'
-      ? h('div', { className: 'dxw-statusNotice dim-statusNotice' }, `状态刷新失败：${model.error.message}`)
+      ? h('div', { className: 'dxw-statusNotice dim-statusNotice' },
+          h('p', null, '状态读取失败，以下是上次读取的状态。'), h(WeixinConnectionError, { error: model.error }))
       : null,
     model.phase === 'loading'
       ? h(LoadingView)
@@ -740,7 +765,7 @@ export function WeixinSettingsTab({ rpcCall }) {
         ? h('div', { className: 'dxw-card dim-surfaceCard' },
             h('div', { className: 'dxw-error dim-inlineError' },
               h('h3', null, '无法读取微信状态'),
-              h('p', null, model.error?.message ?? '请稍后重试'),
+              h(WeixinConnectionError, { error: model.error }),
               h(Button, { onClick: () => void loadStatus() }, '重新读取')))
         : h(React.Fragment, null,
             provisionView,

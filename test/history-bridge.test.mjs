@@ -12,9 +12,16 @@ import { TelegramHarnessBridge } from '../src/channels/telegram/telegram-bridge.
 import { WecomHarnessBridge } from '../src/channels/wecom/wecom-bridge.mjs';
 import { WeixinHarnessBridge } from '../src/channels/weixin/weixin-bridge.mjs';
 import { WhatsappHarnessBridge } from '../src/channels/whatsapp/whatsapp-bridge.mjs';
+import { WecomAppBridge } from '../src/channels/wecom-app/wecom-app-bridge.mjs';
+import { MatrixHarnessBridge } from '../src/channels/matrix/matrix-bridge.mjs';
+import { IMessageHarnessBridge } from '../src/channels/imessage/imessage-bridge.mjs';
+import { EmailHarnessBridge } from '../src/channels/email/email-bridge.mjs';
 
 const CHANNELS = ['weixin', 'feishu', 'dingtalk', 'wecom', 'qq', 'slack', 'telegram', 'discord', 'whatsapp'];
 const TEXT_BRIDGES = {
+  matrix: MatrixHarnessBridge,
+  imessage: IMessageHarnessBridge,
+  email: EmailHarnessBridge,
   slack: SlackHarnessBridge,
   telegram: TelegramHarnessBridge,
   discord: DiscordHarnessBridge,
@@ -76,7 +83,7 @@ function fixture(channel, { sessionId = SESSION_ID, ask, readHistory, send } = {
   const sent = [];
   const seen = new Set();
   const calls = { reads: [], asks: [], mutations: [], downloads: [] };
-  const key = ['weixin', 'feishu', 'dingtalk'].includes(channel) ? 'p2p:owner'
+  const key = ['weixin', 'feishu', 'dingtalk', 'wecom-app'].includes(channel) ? 'p2p:owner'
     : channel === 'qq' ? 'c2c:owner'
       : channel === 'wecom' ? 'direct:owner' : 'direct:chat';
   const sessions = new Map(sessionId ? [[key, sessionId]] : []);
@@ -124,7 +131,8 @@ function fixture(channel, { sessionId = SESSION_ID, ask, readHistory, send } = {
     calls.downloads.push('download');
     throw new Error('history must not download attachments');
   };
-  const options = { harness, state, logger: { warn() {}, error() {} } };
+  const status = { messagesReceived: 0, messagesReplied: 0, messagesRejected: 0 };
+  const options = { harness, state, status, logger: { warn() {}, error() {} } };
   let bridge;
   let message;
   if (channel === 'weixin') {
@@ -145,7 +153,7 @@ function fixture(channel, { sessionId = SESSION_ID, ask, readHistory, send } = {
   } else if (channel === 'feishu') {
     bridge = new FeishuHarnessBridge({
       ...options,
-      channel: {}, status: {}, allowedSenderOpenIds: new Set(['owner']),
+      channel: {}, allowedSenderOpenIds: new Set(['owner']),
       client: { im: { v1: { message: { create: async ({ data }) => {
         await record(data.receive_id, data.msg_type === 'text' ? JSON.parse(data.content).text : data.content);
         return { code: 0, data: { message_id: `out-${sent.length}` } };
@@ -198,6 +206,11 @@ function fixture(channel, { sessionId = SESSION_ID, ask, readHistory, send } = {
         ] } } : {}),
       },
     });
+  } else if (channel === 'wecom-app') {
+    bridge = new WecomAppBridge({ ...options,
+      api: { sendText: ({ userId, content }) => record(userId, content) },
+    });
+    message = (id, text) => ({ msgid: id, msgtype: 'text', from: { userid: 'owner' }, text: { content: text } });
   } else if (channel === 'qq') {
     bridge = new QqHarnessBridge({ ...options, ownerUserOpenid: 'owner', bot: { sendText: record }, fetchImpl: download });
     message = (id, text, { image = false, file = false, group = false, sender = 'owner', echo = false } = {}) => ({
@@ -217,7 +230,25 @@ function fixture(channel, { sessionId = SESSION_ID, ask, readHistory, send } = {
       files: file ? [{ name: 'test.txt', load: download }] : [],
     });
   }
-  return { bridge, message, sent, calls, sessions, key, seen };
+  return { bridge, message, sent, calls, sessions, key, seen, status };
+}
+
+for (const channel of [...CHANNELS, 'wecom-app', 'matrix', 'imessage', 'email']) {
+  for (const [code, publicCode] of [['session-archived', 'SESSION_ARCHIVED'], ['turn-blocked', 'TURN_BLOCKED']]) {
+    test(`${channel}: ${code} is visible and preserves the existing binding`, async () => {
+      const f = fixture(channel, { ask: async () => {
+        throw Object.assign(new Error('private failure'), { code });
+      } });
+      await f.bridge.accept(f.message('archive-failure', 'hello'));
+      assert.match(f.sent.at(-1)?.text ?? '', new RegExp(publicCode));
+      assert.match(f.sent.at(-1).text, /MF-[A-F0-9]{8}/);
+      assert.equal(f.status.lastMessageError.code, publicCode);
+      assert.equal(f.sessions.get(f.key), SESSION_ID);
+      assert.equal(f.calls.asks.length, 1);
+      assert.deepEqual(f.calls.mutations, []);
+      assert.equal(f.status.messagesReplied, 0);
+    });
+  }
 }
 
 function previewMarkers(sent) {

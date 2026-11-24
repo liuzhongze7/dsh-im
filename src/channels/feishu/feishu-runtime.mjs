@@ -1,13 +1,17 @@
+import { createConnectionDiagnostics, atConnectionStage } from '../shared/connection-error.mjs';
+import { readExternalHistory } from './history-reader.mjs';
 import { randomUUID } from 'node:crypto';
 import { FeishuHarnessBridge } from './bridge.mjs';
 import { cardActionProbeCard } from './feishu-cards.mjs';
-import { VerifiedFeishuChannel } from './feishu-channel.mjs';
+import { VerifiedFeishuChannel, waitForFeishuOperation } from './feishu-channel.mjs';
 import { normalizeFeishuGroupResponseMode } from './group-response-mode.mjs';
-import { normalizeFeishuStepPushMode } from './step-push-mode.mjs';
+import { normalizeFeishuStepPushMode, normalizeFeishuStepCardPanels } from './step-push-mode.mjs';
+import { createVoice } from './voice.mjs';
 import {
-  registerSlashCommands,
-  SLASH_COMMAND_MANIFEST,
+  syncSlashCommands,
 } from './slash-command-registry.mjs';
+import { normalizeSlashPanelConfig, feishuSlashManifest } from './slash-command-panel.mjs';
+import { channelCapabilities } from '../shared/channel-capabilities.mjs';
 import {
   connectionTestTargetUnavailable,
   sendRememberedConnectionTest,
@@ -93,6 +97,7 @@ export function createBridgeStatus({ allowedSenderCount = 1 } = {}) {
     slashCommandsRegistered: 0,
     slashCommandsExisting: 0,
     slashCommandsFailed: 0,
+    slashCommandsRemoved: 0,
     slashCommandsError: null,
   };
 }
@@ -111,23 +116,29 @@ export class FeishuRuntime {
   #domain;
   #botOpenId;
   #groupResponseMode;
-  #groupTopicReply;
+  #mentionTopicReply;
   #stepPush;
   #stepPushMode;
+  #stepCardPanels;
+  #voice = null;
   #sessionSyncTargetsFor;
   #ownerOpenIds;
   #harness;
   #state;
   #contextEnhancement;
+  #groupHistory;
   #accessPolicy;
   #replyTimeoutMs;
   #connectTimeoutMs;
   #requestTimeoutMs;
   #wsAgent;
   #logger;
+  #diagnostics;
   #repair;
   #client = null;
   #bridge = null;
+  #consumerMode;
+  #acceptExternal;
   #wsClient = null;
   #starting = null;
   #stopping = null;
@@ -135,30 +146,51 @@ export class FeishuRuntime {
   #pendingCardActionProbes = new Map();
   #status;
   #slashCommands = true;
+  /** Which commands the "/" panel should offer, and in which order. */
+  #slashPanel = null;
+  /** Capability-narrowed manifest (no /fork without fork, honest /tail). */
+  #slashManifest = null;
+  /** HTTP instance kept for panel re-syncs after startup. */
+  #slashHttpInstance = null;
+  /**
+   * Bumped on every panel change: a sync started for an older config stops at
+   * its next checkpoint instead of racing the newer one (last writer wins).
+   */
+  #slashSyncEpoch = 0;
+  /** Cancels the panel sync in flight; it stops before its next request. */
+  #slashSyncCancel = null;
+  /** Panel syncs run one after another, so two plans never interleave. */
+  #slashSyncQueue = Promise.resolve();
 
   constructor({
     lark,
+    consumerMode = 'standalone',
+    acceptExternal,
     botId,
     appId,
     appSecret,
     domain = 'feishu',
     botOpenId,
     groupResponseMode,
-    groupTopicReply = false,
+    mentionTopicReply = true,
     stepPush = false,
     stepPushMode = 'post',
+    stepCardPanels,
+    voice = null,
     sessionSyncTargetsFor = null,
     ownerOpenId,
     ownerOpenIds,
     harness,
     state,
     contextEnhancement,
+    groupHistory,
     accessPolicy,
     repair,
     replyTimeoutMs = 600000,
     connectTimeoutMs = 15000,
     requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
     slashCommands = true,
+    slashPanel = null,
     wsAgent,
     logger = console,
   }) {
@@ -176,6 +208,8 @@ export class FeishuRuntime {
       throw new TypeError('FeishuRuntime requestTimeoutMs must be a positive number');
     }
 
+    this.#consumerMode = consumerMode;
+    this.#acceptExternal = acceptExternal;
     this.#lark = lark;
     this.#botId = nonEmptyString(botId);
     this.#appId = appId;
@@ -183,9 +217,15 @@ export class FeishuRuntime {
     this.#domain = domain;
     this.#botOpenId = nonEmptyString(botOpenId);
     this.#groupResponseMode = normalizeFeishuGroupResponseMode(groupResponseMode);
-    this.#groupTopicReply = groupTopicReply === true;
+    this.#mentionTopicReply = mentionTopicReply !== false;
     this.#stepPush = stepPush === true;
     this.#stepPushMode = normalizeFeishuStepPushMode(stepPushMode);
+    this.#stepCardPanels = normalizeFeishuStepCardPanels(stepCardPanels);
+    // voice 为 { config, secret } 来源;凭据缺失时 createVoice 返回禁用对象,
+    // 桥接层完全跳过语音路径,不影响连接。
+    this.#voice = voice == null
+      ? null
+      : createVoice({ settings: voice.config, secret: voice.secret, logger });
     this.#sessionSyncTargetsFor = typeof sessionSyncTargetsFor === 'function'
       ? sessionSyncTargetsFor
       : null;
@@ -193,14 +233,22 @@ export class FeishuRuntime {
     this.#harness = harness;
     this.#state = state;
     this.#contextEnhancement = contextEnhancement;
+    this.#groupHistory = groupHistory;
     this.#accessPolicy = accessPolicy;
     this.#repair = repair ?? null;
     this.#replyTimeoutMs = replyTimeoutMs;
     this.#connectTimeoutMs = connectTimeoutMs;
     this.#requestTimeoutMs = requestTimeoutMs;
-    this.#slashCommands = Boolean(slashCommands);
+    this.#slashCommands = consumerMode !== 'external-consumer' && Boolean(slashCommands);
+    this.#slashPanel = normalizeSlashPanelConfig(slashPanel);
+    this.#slashManifest = feishuSlashManifest({
+      supportsFork: typeof harness?.supportsSessionFork === 'function'
+        ? harness.supportsSessionFork()
+        : true,
+      fileSend: channelCapabilities('feishu').fileSend,
+    });
     this.#wsAgent = wsAgent;
-    this.#logger = logger;
+    this.#logger = logger; this.#diagnostics = createConnectionDiagnostics({ channel: 'feishu', logger });
     this.#status = createBridgeStatus({ allowedSenderCount: normalizedOwners.length });
   }
 
@@ -213,9 +261,9 @@ export class FeishuRuntime {
     this.#bridge?.setGroupResponseMode(this.#groupResponseMode);
   }
 
-  setGroupTopicReply(value) {
-    this.#groupTopicReply = value === true;
-    this.#bridge?.setGroupTopicReply(this.#groupTopicReply);
+  setMentionTopicReply(value) {
+    this.#mentionTopicReply = value !== false;
+    this.#bridge?.setMentionTopicReply(this.#mentionTopicReply);
   }
 
   setStepPush(value) {
@@ -226,6 +274,29 @@ export class FeishuRuntime {
   setStepPushMode(value) {
     this.#stepPushMode = normalizeFeishuStepPushMode(value);
     this.#bridge?.setStepPushMode(this.#stepPushMode);
+  }
+
+  setStepCardPanels(value) {
+    this.#stepCardPanels = normalizeFeishuStepCardPanels(value);
+    this.#bridge?.setStepCardPanels(this.#stepCardPanels);
+  }
+
+  setVoice(source) {
+    this.#voice = source == null
+      ? null
+      : createVoice({ settings: source.config, secret: source.secret, logger: this.#logger });
+    this.#bridge?.setVoice(this.#voice);
+  }
+
+  /**
+   * Record which commands the "/" panel should offer. The panel itself lives on
+   * Feishu's side, so a connected bot re-syncs it in the background; the newer
+   * config wins and any sync still running for the older one stops.
+   */
+  setSlashPanel(value) {
+    this.#slashPanel = normalizeSlashPanelConfig(value);
+    this.#slashSyncEpoch += 1;
+    this.#scheduleSlashPanelSync();
   }
 
   async start() {
@@ -277,10 +348,10 @@ export class FeishuRuntime {
     };
     this.#status.startedAt = new Date().toISOString();
     this.#status.feishuLongConnectionState = 'connecting';
-    this.#status.lastError = null;
+    this.#status.lastError = null; this.#status.error = null; this.#diagnostics.clear();
 
     try {
-      await this.#harness.ensureRunning({ signal });
+      await atConnectionStage('harness.check', () => this.#harness.ensureRunning({ signal }));
       assertCurrentStart();
       this.#status.harnessReachable = true;
 
@@ -303,12 +374,14 @@ export class FeishuRuntime {
         client,
         initialText: t('已连接 DeepSeek Harness，正在思考…'),
       });
-      const bridge = new FeishuHarnessBridge({
+      const bridge = this.#consumerMode === 'external-consumer' ? null : new FeishuHarnessBridge({
         client,
         channel,
         harness: this.#harness,
         state: this.#state,
         contextEnhancement: this.#contextEnhancement,
+      groupHistory: this.#groupHistory,
+        groupHistoryScope: this.#domain,
         accessPolicy: this.#accessPolicy,
         status: this.#status,
         allowedSenderOpenIds: new Set(this.#ownerOpenIds),
@@ -316,11 +389,14 @@ export class FeishuRuntime {
         appId: this.#appId,
         botOpenId: this.#botOpenId,
         groupResponseMode: this.#groupResponseMode,
-        groupTopicReply: this.#groupTopicReply,
+        mentionTopicReply: this.#mentionTopicReply,
         stepPush: this.#stepPush,
         stepPushMode: this.#stepPushMode,
+        stepCardPanels: this.#stepCardPanels,
+        voice: this.#voice,
         sessionSyncTargetsFor: this.#sessionSyncTargetsFor,
         repair: this.#repair,
+        requestTimeoutMs: this.#requestTimeoutMs,
         replyTimeoutMs: this.#replyTimeoutMs,
         // Interaction cards (approval/question buttons) are on by default.
         // Set DSH_IM_INTERACTION_CARDS=0 to fall back to plain-text replies.
@@ -334,6 +410,12 @@ export class FeishuRuntime {
 
       const dispatcher = new this.#lark.EventDispatcher({}).register({
         'im.message.receive_v1': (event) => {
+          if (this.#consumerMode === 'external-consumer') {
+            assertCurrentStart();
+            if (typeof this.#acceptExternal !== 'function')
+              throw Object.assign(new Error('consumer-unavailable'), { code: 'consumer-unavailable' });
+            return this.#acceptExternal(event, { signal });
+          }
           if (isCurrentStart()) void bridge.accept(event);
         },
         'im.message.reaction.created_v1': () => undefined,
@@ -342,7 +424,7 @@ export class FeishuRuntime {
         // subscribes card.action.trigger; the number-reply fallback covers
         // apps that do not).
         'card.action.trigger': (event) => {
-          if (!isCurrentStart()) return;
+          if (!isCurrentStart() || this.#consumerMode === 'external-consumer') return;
           this.#status.cardActionsReceived += 1;
           this.#status.lastCardActionAt = new Date().toISOString();
           if (!this.#consumeCardActionProbe(event)) void bridge.onCardAction(event);
@@ -391,15 +473,16 @@ export class FeishuRuntime {
           if (!isCurrentStart()) return;
           this.#status.feishuLongConnectionState = 'connected';
           this.#status.ready = true;
-          this.#status.lastError = null;
+          this.#status.lastError = null; this.#status.error = null; this.#diagnostics.clear();
           settleReady();
         },
         onError: (error) => {
           if (!isCurrentStart()) return;
           this.#status.feishuLongConnectionState = 'failed';
           this.#status.ready = false;
-          this.#status.lastError = error?.message ?? String(error);
-          this.#logger.error('[dsh-feishu] Feishu long connection failed:', this.#status.lastError);
+          this.#status.error = this.#diagnostics.report(error, { operation: 'connection.monitor', botId: this.#botId, automatic: true }).publicError;
+          this.#status.lastError = this.#status.error.message;
+
           settleError(error);
         },
         onReconnecting: () => {
@@ -411,7 +494,7 @@ export class FeishuRuntime {
           if (!isCurrentStart()) return;
           this.#status.feishuLongConnectionState = 'connected';
           this.#status.ready = true;
-          this.#status.lastError = null;
+          this.#status.lastError = null; this.#status.error = null; this.#diagnostics.clear();
         },
       });
       this.#wsClient = wsClient;
@@ -425,9 +508,11 @@ export class FeishuRuntime {
       assertCurrentStart();
       // Register the native Slash Command panel best-effort and asynchronously
       // so it never blocks the long-connection startup. The panel is only a
-      // client-side convenience; failure here must not take the bot down.
+      // client-side convenience; failure here must not take the bot down. The
+      // HTTP instance is kept so a later panel change can re-sync while running.
       if (this.#slashCommands && httpInstance) {
-        void this.#registerSlashCommands(httpInstance, isCurrentStart, signal);
+        this.#slashHttpInstance = httpInstance;
+        this.#scheduleSlashPanelSync();
       }
       return this.status;
     } catch (error) {
@@ -436,7 +521,8 @@ export class FeishuRuntime {
       if (signal.aborted) throw error;
       this.#status.ready = false;
       this.#status.feishuLongConnectionState = 'failed';
-      this.#status.lastError = error?.message ?? String(error);
+      this.#status.error = this.#diagnostics.report(error, { operation: 'connection.restore', reuse: true, botId: this.#botId, automatic: true }).publicError;
+      this.#status.lastError = this.#status.error.message;
       await this.#cleanup({ preserveError: true, abortController });
       throw error;
     }
@@ -624,7 +710,28 @@ export class FeishuRuntime {
     });
   }
 
-  async sendProactiveText(target, text, { signal } = {}) {
+  async presentSessionSyncApproval(target, interaction, options = {}) {
+    if (!this.#status.ready || !this.#bridge) return false;
+    const actor = typeof target?.route?.openId === 'string' ? target.route.openId.trim() : '';
+    if (!actor) return false;
+    return this.#bridge.presentSessionSyncApproval(interaction, {
+      key: options.key, actor, validate: options.validate,
+      chatId: actor, receiveIdType: 'open_id',
+      send: (text) => this.sendProactiveText(target, text),
+    }, options);
+  }
+
+  async presentSessionSyncQuestion(target, interaction, options = {}) {
+    if (!this.#status.ready || !this.#bridge || target?.kind !== 'user') return false;
+    const actor = nonEmptyString(target.route?.openId);
+    if (!actor) return false;
+    return this.#bridge.presentSessionSyncQuestion(interaction, {
+      key: options.key, actor, validate: options.validate,
+      chatId: actor, receiveIdType: 'open_id', requiresMention: false,
+    }, options);
+  }
+
+  async sendProactiveText(target, text, { signal, format = 'plain', receipt = false } = {}) {
     if (!this.#status.ready || !this.#client) {
       const error = new Error('飞书机器人尚未连接');
       error.code = 'bot-not-connected';
@@ -642,45 +749,155 @@ export class FeishuRuntime {
       error.code = 'invalid-target';
       throw error;
     }
+    if (format !== 'plain' && format !== 'markdown') {
+      const error = new TypeError('Message format must be plain or markdown');
+      error.code = 'bad-request';
+      throw error;
+    }
+    if (typeof receipt !== 'boolean' || (receipt && target.kind !== 'group'))
+      throw Object.assign(new Error('capability-unavailable'), { code: 'capability-unavailable' });
     signal?.throwIfAborted();
-    const response = await this.#client.im.v1.message.create({
+    // Use the same native Markdown element as chat, without opening a stream
+    // or retrying as plain text after a possibly accepted delivery.
+    const content = format === 'markdown'
+      ? { schema: '2.0', body: { elements: [{ tag: 'markdown', content: text }] } }
+      : { text };
+    const activeSignal = signal
+      ? AbortSignal.any([signal, this.#abortController.signal])
+      : this.#abortController.signal;
+    const response = await waitForFeishuOperation(() => this.#client.im.v1.message.create({
       params: { receive_id_type: receiveIdType },
       data: {
         receive_id: receiveId,
-        msg_type: 'text',
-        content: JSON.stringify({ text }),
+        msg_type: format === 'markdown' ? 'interactive' : 'text',
+        content: JSON.stringify(content),
       },
+    }), {
+      signal: activeSignal,
+      timeoutMs: this.#requestTimeoutMs,
+      stage: `proactive text send (${this.#requestTimeoutMs}ms)`,
     });
     if (response?.code && response.code !== 0) {
       const error = new Error(`Feishu proactive delivery failed: ${response.msg || response.code}`);
       error.code = 'target-rejected';
       throw error;
     }
-    return { sent: true };
+    if (!receipt) return { sent: true };
+    const messageId = response?.data?.message_id;
+    const conversationId = response?.data?.chat_id;
+    if (typeof messageId !== 'string' || !messageId || messageId.length > 512 || conversationId !== receiveId)
+      throw Object.assign(new Error('send-result-unknown'), { code: 'send-result-unknown' });
+    return { sent: true, receipt: { version: 1, messageId, conversationId } };
   }
 
-  async #registerSlashCommands(httpInstance, isCurrentStart, signal) {
+  async historyChecked(identity, route, query, { signal } = {}) {
+    const client = this.#client;
+    if (!client || this.#consumerMode !== 'external-consumer')
+      throw Object.assign(new Error('bot-not-connected'), { code: 'bot-not-connected' });
+    const result = await readExternalHistory(client, identity, route, query, signal);
+    signal?.throwIfAborted();
+    if (this.#client !== client)
+      throw Object.assign(new Error('bot-not-connected'), { code: 'bot-not-connected' });
+    return result;
+  }
+
+  async replyChecked(route, text, { signal } = {}) {
+    if (!route || typeof route.messageId !== 'string' || typeof route.conversationId !== 'string'
+      || typeof route.actorId !== 'string' || typeof text !== 'string' || !text.trim() || text.length > 4000)
+      throw Object.assign(new Error('bad-request'), { code: 'bad-request' });
+    const client = this.#client;
+    if (!client || this.#consumerMode !== 'external-consumer')
+      throw Object.assign(new Error('bot-not-connected'), { code: 'bot-not-connected' });
+    signal?.throwIfAborted();
+    const current = await client.im.v1.message.get({ path: { message_id: route.messageId } });
+    const source = current?.data?.items?.find(item => item.message_id === route.messageId);
+    if (current?.code || !source || source.deleted === true || source.chat_id !== route.conversationId
+      || source.sender?.sender_type !== 'user' || source.sender?.id_type !== 'open_id'
+      || source.sender?.id !== route.actorId || (source.thread_id || undefined) !== route.threadId
+      || (source.root_id || undefined) !== route.rootId || (source.parent_id || undefined) !== route.parentId)
+      throw Object.assign(new Error('stale-route'), { code: 'stale-route' });
+    signal?.throwIfAborted();
+    if (this.#client !== client) throw Object.assign(new Error('bot-not-connected'), { code: 'bot-not-connected' });
+    let response;
+    try {
+      response = await client.im.v1.message.reply({
+        path: { message_id: route.messageId },
+        data: { msg_type: 'text', content: JSON.stringify({ text }), reply_in_thread: Boolean(route.threadId) },
+      });
+    } catch (cause) {
+      // The request may have reached Lark. Do not turn an ambiguous result into
+      // a retryable pre-send failure or send again on the group mainline.
+      throw Object.assign(new Error('reply-result-unknown', { cause }), { code: 'reply-result-unknown' });
+    }
+    const messageId = response?.data?.message_id;
+    if (response?.code || typeof messageId !== 'string' || !messageId)
+      throw Object.assign(new Error('reply-result-unknown'), { code: 'reply-result-unknown' });
+    return { sent: true, messageId };
+  }
+
+  /**
+   * Queue one panel sync for the current config.
+   *
+   * Two saves in a row used to run two syncs concurrently, and the older one
+   * kept deleting and creating commands from a plan nobody wanted anymore. Here
+   * the run in flight is cancelled first — it stops at its next checkpoint while
+   * requests already sent are left to finish — and the new run starts only once
+   * it has settled, so the panel converges to the newest config.
+   */
+  #scheduleSlashPanelSync() {
+    const httpInstance = this.#slashHttpInstance;
+    const connectionSignal = this.#abortController?.signal;
+    if (!this.#slashCommands || !httpInstance || !connectionSignal || connectionSignal.aborted) return;
+    const epoch = this.#slashSyncEpoch;
+    this.#slashSyncCancel?.();
+    const controller = new AbortController();
+    const cancel = () => controller.abort();
+    const forwardAbort = () => cancel();
+    this.#slashSyncCancel = cancel;
+    connectionSignal.addEventListener('abort', forwardAbort, { once: true });
+    if (connectionSignal.aborted) cancel();
+    const run = this.#slashSyncQueue.then(() => this.#registerSlashCommands(
+      httpInstance,
+      () => !connectionSignal.aborted && this.#abortController?.signal === connectionSignal,
+      controller.signal,
+      epoch,
+    ));
+    const settled = run.then(() => {}, () => {});
+    this.#slashSyncQueue = settled;
+    void settled.then(() => {
+      connectionSignal.removeEventListener('abort', forwardAbort);
+      if (this.#slashSyncCancel === cancel) this.#slashSyncCancel = null;
+    });
+  }
+
+  async #registerSlashCommands(httpInstance, isCurrentStart, signal, epoch = this.#slashSyncEpoch) {
     this.#status.slashCommandRegistration = 'registering';
     this.#status.slashCommandsError = null;
     try {
-      const result = await registerSlashCommands({
+      const result = await syncSlashCommands({
         appId: this.#appId,
         appSecret: this.#appSecret,
         domain: this.#domain,
         httpInstance,
         signal,
-        manifest: SLASH_COMMAND_MANIFEST,
+        manifest: this.#slashManifest,
+        config: this.#slashPanel,
       });
-      if (!isCurrentStart()) return;
+      // A newer panel config took over while this sync was running: its own run
+      // reports the outcome, so this one only stops.
+      if (!isCurrentStart() || epoch !== this.#slashSyncEpoch || result.superseded === true) return;
       this.#status.slashCommandRegistration = 'done';
       this.#status.slashCommandsRegistered = result.created.length;
       this.#status.slashCommandsExisting = result.existing.length;
       this.#status.slashCommandsFailed = result.failed.length;
+      this.#status.slashCommandsRemoved = result.deleted.length;
       this.#status.slashCommandsError = result.failed.length > 0
         ? result.failed.map((f) => `/${f.command}: ${f.error?.message ?? String(f.error)}`).join('; ')
         : null;
-      if (result.created.length > 0) {
-        this.#logger.info?.(`[dsh-feishu] registered ${result.created.length} slash command(s)`);
+      if (result.created.length > 0 || result.deleted.length > 0) {
+        this.#logger.info?.(
+          `[dsh-feishu] slash panel synced: ${result.created.length} added, ${result.deleted.length} removed`,
+        );
       }
       if (result.failed.length > 0) {
         this.#logger.warn?.(
@@ -720,6 +937,7 @@ export class FeishuRuntime {
 
   async #cleanup({ preserveError = false, abortController } = {}) {
     const error = preserveError ? this.#status.lastError : null;
+    const diagnostic = preserveError ? this.#status.error : null;
     if (this.#abortController === abortController) this.#abortController = null;
     abortController?.abort(new DOMException('Feishu runtime stopped', 'AbortError'));
     for (const probe of this.#pendingCardActionProbes.values()) {
@@ -738,11 +956,25 @@ export class FeishuRuntime {
     wsClient?.close({ force: true });
     const bridge = this.#bridge;
     this.#bridge = null;
-    if (bridge) await bridge.waitForIdle();
+    let timer;
+    try {
+      const idle = await Promise.race([
+        (bridge?.waitForIdle() ?? Promise.resolve()).then(() => true),
+        new Promise((resolve) => {
+          timer = setTimeout(() => resolve(false), 2_000);
+          timer.unref?.();
+        }),
+      ]);
+      if (!idle) this.#logger.warn?.('[dsh-feishu] bridge idle wait timed out after 2000ms; continuing cleanup');
+    } finally {
+      clearTimeout(timer);
+    }
     this.#client = null;
     this.#status.feishuLongConnectionState = preserveError ? 'failed' : 'idle';
     this.#status.slashCommandRegistration = 'idle';
+    this.#status.error = diagnostic;
     this.#status.lastError = error;
+    if (!preserveError) this.#diagnostics.clear();
     return this.status;
   }
 }

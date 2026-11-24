@@ -44,7 +44,7 @@ test('WhatsApp production has no per-bot result-file Gate', async (t) => {
     createConnectionSupervisor,
   };
   const ctx = {
-    apiProxy: {},
+    typertGateway: { invoke() {}, stream() {} },
     logger: () => ({ error() {}, warn() {}, info() {}, debug() {} }),
   };
 

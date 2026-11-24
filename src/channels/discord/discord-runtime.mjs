@@ -1,4 +1,8 @@
+import { captureGroupHistory, groupHistoryEntry } from '../shared/group-history.mjs';
+import { extractConnectionEvidence, createConnectionDiagnostics, atConnectionStage } from '../shared/connection-error.mjs';
 import { createEditableMessageStream, splitMessageText } from '../shared/editable-message-stream.mjs';
+import { chunkMarkdownText } from '../shared/markdown-chunks.mjs';
+import { createTextDeliveryBlock } from '../shared/semantic/delivery.mjs';
 import { fetchFileStream } from '../shared/file-download.mjs';
 import { fetchImageBuffer } from '../shared/image-prompt.mjs';
 import { t } from '../shared/i18n.mjs';
@@ -66,7 +70,10 @@ function gatewayCloseError(code) {
 
 function stripBotMention(text, botId) {
   if (typeof text !== 'string') return '';
-  return text.replace(new RegExp(`<@!?${botId}>`, 'g'), '').trim();
+  return text
+    .split(`<@${botId}>`).join('')
+    .split(`<@!${botId}>`).join('')
+    .trim();
 }
 
 function cleanThreadName(message, botId) {
@@ -424,10 +431,19 @@ export class DiscordBotClient {
     this.#signal = signal;
   }
 
-  async sendText(target, text) {
+  sendText(target, text) {
+    return this.#sendText(target, text, false);
+  }
+
+  sendDelivery(target, value) {
+    const block = createTextDeliveryBlock(value);
+    return this.#sendText(target, block.text, block.format === 'markdown');
+  }
+
+  async #sendText(target, text, markdown) {
     const notice = !this.#deliveredNotices.has(target) && target?.notice
       ? String(target.notice) : null;
-    const chunks = splitMessageText(notice ? `${notice}\n\n${text}` : text, 1_900);
+    const chunks = (markdown ? chunkMarkdownText : splitMessageText)(notice ? `${notice}\n\n${text}` : text, 1_900);
     const providerMessageIds = [];
     for (const [index, chunk] of chunks.entries()) {
       const result = await this.#api.createMessage({
@@ -529,8 +545,10 @@ export class DiscordRuntime {
   #harness;
   #state;
   #contextEnhancement;
+  #groupHistory;
   #accessPolicy;
   #logger;
+  #diagnostics;
   #replyTimeoutMs;
   #connectTimeoutMs;
   #createApi;
@@ -561,6 +579,7 @@ export class DiscordRuntime {
     harness,
     state,
     contextEnhancement,
+    groupHistory,
     accessPolicy,
     logger = console,
     replyTimeoutMs = 600_000,
@@ -578,8 +597,9 @@ export class DiscordRuntime {
     this.#harness = harness;
     this.#state = state;
     this.#contextEnhancement = contextEnhancement;
+    this.#groupHistory = groupHistory;
     this.#accessPolicy = accessPolicy;
-    this.#logger = logger;
+    this.#logger = logger; this.#diagnostics = createConnectionDiagnostics({ channel: 'discord', logger });
     this.#replyTimeoutMs = replyTimeoutMs;
     this.#connectTimeoutMs = connectTimeoutMs;
     this.#createApi = createApi;
@@ -598,6 +618,19 @@ export class DiscordRuntime {
       throw error;
     }
     return this.#bridge.sendConnectionTest(text);
+  }
+
+  async presentSessionSyncApproval(target, interaction, options = {}) {
+    if (!this.#status.ready || !this.#bridge) return false;
+    const channelId = target?.route?.channelId;
+    const channel = await this.#api.getChannel({ channelId, signal: options.signal });
+    const actor = channel?.type === 1 && channel.recipients?.length === 1
+      ? channel.recipients[0]?.id : '';
+    if (!actor) return false;
+    return this.#bridge.presentSessionSyncApproval(interaction, {
+      key: options.key, actor, validate: options.validate,
+      send: (text) => this.sendProactiveText(target, text),
+    }, options);
   }
 
   async sendProactiveText(target, text, options = {}) {
@@ -636,8 +669,8 @@ export class DiscordRuntime {
     this.#routing.clear();
     this.#status.startedAt = new Date().toISOString();
     this.#status.connectionState = 'connecting';
-    this.#status.lastError = null;
-    await this.#harness.ensureRunning();
+    this.#status.lastError = null; this.#status.error = null; this.#diagnostics.clear();
+    await atConnectionStage('harness.check', () => this.#harness.ensureRunning());
     this.#status.harnessReachable = true;
     const controller = new AbortController();
     this.#abortController = controller;
@@ -669,7 +702,7 @@ export class DiscordRuntime {
         await Promise.race([
           this.#openSocket(false),
           new Promise((_, reject) => {
-            timer = setTimeout(() => reject(new Error('Discord Gateway did not become ready in time')), this.#connectTimeoutMs);
+            timer = setTimeout(() => reject(Object.assign(new Error('Discord Gateway did not become ready in time'), { code: 'ETIMEDOUT', timeoutMs: this.#connectTimeoutMs })), this.#connectTimeoutMs);
           }),
         ]);
       } finally {
@@ -679,7 +712,8 @@ export class DiscordRuntime {
     } catch (error) {
       this.#status.ready = false;
       this.#status.connectionState = 'failed';
-      this.#status.lastError = error?.message ?? String(error);
+      this.#status.error = this.#diagnostics.report(error, { operation: 'connection.restore', reuse: true, botId: this.#config?.botId, automatic: true }).publicError;
+      this.#status.lastError = this.#status.error.message;
       await this.stop();
       throw error;
     }
@@ -702,7 +736,7 @@ export class DiscordRuntime {
         this.#status.connectionState = 'connected';
         this.#status.lastCheckedAt = now;
         this.#status.lastConnectedAt = now;
-        this.#status.lastError = null;
+        this.#status.lastError = null; this.#status.error = null; this.#diagnostics.clear();
         resolve();
       };
       addSocketListener(socket, 'message', (event) => {
@@ -787,7 +821,7 @@ export class DiscordRuntime {
               if (generation !== this.#generation || this.#stopped) return;
               this.#logger.error?.(
                 `[dsh-im:discord] bot ${this.#config.botId} message handling failed:`,
-                error,
+                extractConnectionEvidence(error).details,
               );
             });
           }
@@ -804,7 +838,8 @@ export class DiscordRuntime {
         const error = gatewayCloseError(Number(event.code) || 0);
         this.#status.ready = false;
         this.#status.connectionState = 'connecting';
-        this.#status.lastError = error.message;
+        this.#status.error = this.#diagnostics.report(error, { operation: 'connection.monitor', botId: this.#config?.botId, automatic: true }).publicError;
+        this.#status.lastError = this.#status.error.message;
         if (!settled) {
           settled = true;
           reject(error);
@@ -815,9 +850,11 @@ export class DiscordRuntime {
         }
         this.#scheduleReconnect();
       });
-      addSocketListener(socket, 'error', () => {
+      addSocketListener(socket, 'error', (event) => {
+        const error = event?.error ?? new Error('WebSocket error');
         if (generation !== this.#generation || this.#stopped) return;
-        this.#status.lastError = 'Discord Gateway WebSocket error';
+        this.#status.error = this.#diagnostics.report(error, { operation: 'connection.monitor', botId: this.#config?.botId, automatic: true }).publicError;
+        this.#status.lastError = this.#status.error.message;
       });
     });
   }
@@ -831,6 +868,9 @@ export class DiscordRuntime {
     const messageId = String(message?.id ?? '');
     if (!messageId || this.#state.hasSeen(messageId)) return;
     const preflight = normalizeDiscordMessage(message, this.#config.platformId);
+    if (preflight) await captureGroupHistory(this.#groupHistory, preflight, groupHistoryEntry('discord', message, preflight, {
+      groupName: this.#channels.get(String(message.channel_id))?.name,
+    }), { logger: this.#logger });
     let accessDecision;
     if (preflight?.kind === 'group' && preflight.addressed === true
       && preflight.senderIsBot !== true) {
@@ -854,13 +894,14 @@ export class DiscordRuntime {
         this.#contextEnhancement,
         message.guild_id ? 'group' : 'direct',
       );
+      const busyMessageMode = this.#harness.currentBusyMessageMode?.() ?? 'queue';
       const pendingRoute = resolveDiscordMessageRoute(message, this.#config.platformId, {
         api: this.#api,
         channel: this.#channels.get(String(message.channel_id)),
         signal: this.#abortController?.signal,
         onChannel: (resolved) => this.#rememberChannel(resolved),
       });
-      route = { pendingRoute, contextSnapshot };
+      route = { pendingRoute, contextSnapshot, busyMessageMode };
       this.#routing.set(messageId, route);
       void pendingRoute.finally(() => {
         if (this.#routing.get(messageId) === route) this.#routing.delete(messageId);
@@ -869,8 +910,10 @@ export class DiscordRuntime {
     try {
       const normalized = await route.pendingRoute;
       if (normalized) {
+        normalized.groupHistory = preflight?.groupHistory;
         await bridge.accept(normalized, {
           contextSnapshot: route.contextSnapshot,
+          busyMessageMode: route.busyMessageMode,
           ...(accessDecision ? { accessDecision } : {}),
         });
       }
@@ -928,7 +971,7 @@ export class DiscordRuntime {
       this.#reconnectTimer = null;
       void this.#openSocket(Boolean(this.#sessionId)).catch((error) => {
         if (this.#stopped) return;
-        this.#logger.warn?.('[dsh-im:discord] Gateway reconnect failed:', error);
+        this.#logger.warn?.('[dsh-im:discord] Gateway reconnect failed:', extractConnectionEvidence(error).details);
         this.#scheduleReconnect();
       });
     }, delay);
@@ -952,7 +995,7 @@ export class DiscordRuntime {
     try {
       if (socket && socket.readyState < 2) socket.close(1000, 'Plugin stopped');
     } catch (error) {
-      this.#logger.warn?.(`[dsh-im:discord] bot ${this.#config.botId} failed to close Gateway:`, error);
+      this.#logger.warn?.(`[dsh-im:discord] bot ${this.#config.botId} failed to close Gateway:`, extractConnectionEvidence(error).details);
     }
     await Promise.race([
       bridge?.waitForIdle() ?? Promise.resolve(),

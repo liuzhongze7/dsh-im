@@ -242,6 +242,7 @@ test('HarnessClient sends structured image content without rewriting it', async 
   let promptRpcId;
   let historyCalls = 0;
   client.rpc = async (method, payload, _timeoutMs, options) => {
+    if (method === 'workspace.list') return { items: [], archivedSessionIds: [] };
     if (method === 'session.prompt') {
       promptPayload = payload;
       promptRpcId = options.rpcId;

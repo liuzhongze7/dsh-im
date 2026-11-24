@@ -1,3 +1,4 @@
+import { assertTestMessageFailure } from '../../fixtures/connection-diagnostics.mjs';
 import { managementFetch } from '../../fixtures/management-rpc.mjs';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
@@ -14,6 +15,7 @@ import {
   createProductionController,
   createProvisioningBackedController,
 } from '../../../plugin-src/host/channels/feishu/index.mjs';
+import { assertPathMatches, toPosixPath } from '../../support/filesystem.mjs';
 
 const signal = () => new AbortController().signal;
 
@@ -263,7 +265,7 @@ test('Host validates and updates the Feishu group topic reply flag', async () =>
       connected: true,
       configured: true,
       groupResponseMode: 'mention',
-      groupTopicReply: topicReply,
+      mentionTopicReply: topicReply,
       bot: { name: '话题机器人', domain: 'feishu' },
       connection: {
         ready: true,
@@ -277,7 +279,7 @@ test('Host validates and updates the Feishu group topic reply flag', async () =>
     startRegistration: async () => current(),
     cancelRegistration: async () => current(),
     disconnect: async () => status(),
-    updateGroupTopicReply: async (botId, value) => {
+    updateMentionTopicReply: async (botId, value) => {
       assert.equal(botId, 'bot_topic');
       topicReply = value;
       return current();
@@ -286,16 +288,16 @@ test('Host validates and updates the Feishu group topic reply flag', async () =>
   const fx = await rpcFixture(controller);
 
   const updated = await fx.registration.handler(
-    FEISHU_ENDPOINTS.setGroupTopicReply,
-    { botId: 'bot_topic', groupTopicReply: true },
+    FEISHU_ENDPOINTS.setMentionTopicReply,
+    { botId: 'bot_topic', mentionTopicReply: true },
     signal(),
   );
   assert.equal(updated.ok, true);
-  assert.equal(updated.value.bots[0].groupTopicReply, true);
+  assert.equal(updated.value.bots[0].mentionTopicReply, true);
 
   const invalid = await fx.registration.handler(
-    FEISHU_ENDPOINTS.setGroupTopicReply,
-    { botId: 'bot_topic', groupTopicReply: 'sometimes' },
+    FEISHU_ENDPOINTS.setMentionTopicReply,
+    { botId: 'bot_topic', mentionTopicReply: 'sometimes' },
     signal(),
   );
   assert.equal(invalid.ok, false);
@@ -315,7 +317,7 @@ test('Host validates and updates the Feishu step push flag', async () => {
       connected: true,
       configured: true,
       groupResponseMode: 'mention',
-      groupTopicReply: false,
+      mentionTopicReply: false,
       stepPush,
       bot: { name: '分步直推机器人', domain: 'feishu' },
       connection: {
@@ -354,6 +356,94 @@ test('Host validates and updates the Feishu step push flag', async () => {
   assert.equal(invalid.ok, false);
   assert.equal(invalid.error.code, 'bad-request');
   await fx.dispose();
+});
+
+test('Host validates and updates the Feishu command panel', async () => {
+  let slashPanel = { mode: 'default', order: [] };
+  const current = () => status({
+    schemaVersion: 2,
+    revision: 6,
+    configured: true,
+    bots: [{
+      botId: 'bot_panel',
+      phase: 'connected',
+      connected: true,
+      configured: true,
+      slashPanel,
+      bot: { name: '指令面板机器人', domain: 'feishu' },
+      connection: {
+        ready: true,
+        feishuLongConnectionState: 'connected',
+        harnessReachable: true,
+      },
+    }],
+  });
+  const controller = {
+    status: async () => current(),
+    startRegistration: async () => current(),
+    cancelRegistration: async () => current(),
+    disconnect: async () => status(),
+    updateSlashPanel: async (botId, value) => {
+      assert.equal(botId, 'bot_panel');
+      slashPanel = value;
+      return current();
+    },
+  };
+  const fx = await rpcFixture(controller);
+
+  const updated = await fx.registration.handler(
+    FEISHU_ENDPOINTS.setSlashPanel,
+    { botId: 'bot_panel', slashPanel: { mode: 'custom', order: ['new', 'stop'] } },
+    signal(),
+  );
+  assert.equal(updated.ok, true);
+  assert.deepEqual(updated.value.bots[0].slashPanel, { mode: 'custom', order: ['new', 'stop'] });
+
+  for (const damaged of [
+    { mode: 'custom', order: ['nope'] },
+    { mode: 'custom', order: ['/new'] },
+    { mode: 'custom', order: ['new', 'new'] },
+    { mode: 'default', order: ['new'] },
+  ]) {
+    const invalid = await fx.registration.handler(
+      FEISHU_ENDPOINTS.setSlashPanel,
+      { botId: 'bot_panel', slashPanel: damaged },
+      signal(),
+    );
+    assert.equal(invalid.ok, false);
+    assert.equal(invalid.error.code, 'bad-request');
+  }
+  await fx.dispose();
+});
+
+test('manual credentials accept only supported optional domains and forward them unchanged', async (t) => {
+  const calls = [];
+  const fx = await rpcFixture({
+    status: async () => status(),
+    startRegistration: async () => status(),
+    cancelRegistration: async () => status(),
+    disconnect: async () => status(),
+    bindCredentials: async (payload) => {
+      calls.push(payload);
+      return status();
+    },
+  });
+  t.after(() => fx.dispose());
+  const credentials = { appId: 'cli_manual', appSecret: 'manual-private-secret' };
+  for (const payload of [credentials, { ...credentials, domain: 'feishu' }, { ...credentials, domain: 'lark' }]) {
+    const result = await fx.registration.handler(FEISHU_ENDPOINTS.bindCredentials, payload, signal());
+    assert.equal(result.ok, true);
+    assert.deepEqual(calls.at(-1), payload);
+    assert.doesNotMatch(JSON.stringify(result), /manual-private-secret|appSecret/);
+  }
+  for (const domain of ['', 'Lark', 'https://open.larksuite.com', 'unknown', null, false, 1, {}]) {
+    const result = await fx.registration.handler(
+      FEISHU_ENDPOINTS.bindCredentials, { ...credentials, domain }, signal(),
+    );
+    assert.equal(result.ok, false);
+    assert.equal(result.error.code, 'bad-request');
+  }
+  assert.equal(calls.length, 3);
 });
 
 test('RPC dispatch matches every endpoint in client/api.js', async () => {
@@ -1028,10 +1118,7 @@ test('Feishu reconnect test delivery is best-effort and requires the target bot 
     signal(),
   );
   assert.equal(failedSend.ok, true);
-  assert.deepEqual(failedSend.value.testMessage, {
-    sent: false,
-    code: 'test-message-failed',
-  });
+  assertTestMessageFailure(failedSend.value.testMessage);
   assert.doesNotMatch(JSON.stringify(failedSend), /private Feishu provider failure/);
   assert.equal(sendCalls, 1);
 
@@ -1098,12 +1185,14 @@ test('dependency failures and AbortSignal use valid RpcResult error branches', a
   };
   const fx = await rpcFixture(controller);
   const failure = await fx.registration.handler(FEISHU_ENDPOINTS.status, {}, signal());
+  assert.equal(failure.error.details.stage, 'status.read');
+  assert.match(failure.error.details.referenceId, /^IM-CONN-[A-F0-9]{8}$/);
   assert.deepEqual(failure, {
     ok: false,
     error: {
       code: 'internal',
       message: 'The Feishu integration operation failed.',
-      details: {},
+      details: failure.error.details,
     },
   });
   assert.doesNotMatch(JSON.stringify(failure), new RegExp(secret));
@@ -1231,7 +1320,7 @@ test('DSH credential adapter stores refs off the browser plane and clears them',
   assert.equal(await store.configured(), false);
 });
 
-test('production assembly uses ctx credentials and the active Host apiProxy without a webServer', async () => {
+test('production assembly uses ctx credentials and the modern Host gateway without a webServer', async () => {
   const constructed = {};
   const httpInstance = { request: async () => ({}) };
   const wsAgent = {
@@ -1264,10 +1353,10 @@ test('production assembly uses ctx credentials and the active Host apiProxy with
     async close() { constructed.closed = true; }
   }
   const credentials = {};
-  const apiProxy = {};
+  const typertGateway = { invoke() {}, stream() {} };
   const production = await createProductionController({
     credentials,
-    apiProxy,
+    typertGateway,
     logger: console,
   }, {
     dshHome: '/tmp/dsh-feishu-host-test',
@@ -1301,20 +1390,23 @@ test('production assembly uses ctx credentials and the active Host apiProxy with
   assert.equal(constructed.verifyOptions.httpInstance, httpInstance);
   assert.equal(constructed.wsAgentCreated, 1);
   assert.equal(constructed.wsProxyUrl, 'http://proxy.test:8080');
-  assert.equal(constructed.harness.apiProxy, apiProxy);
+  assert.equal(typeof constructed.harness.apiProxy.sessions.prompt, 'function');
   assert.equal(Object.hasOwn(constructed.harness, 'baseUrl'), false);
   assert.equal(constructed.harness.autostart, false);
-  assert.match(constructed.configPath, /integrations\/dsh-feishu\/config\.json$/);
+  assertPathMatches(constructed.configPath, /integrations\/dsh-feishu\/config\.json$/);
 
   await constructed.controller.createRuntime({
     config: {
+      // Every bot a real config store hands over carries an id (`normalizeBot`
+      // derives one even for the pre-v2 bot), and the state memo is keyed by it.
+      id: 'fs_created',
       appId: 'cli_created',
       domain: 'feishu',
       ownerOpenId: 'ou_owner',
     },
     appSecret: 'host-only',
   });
-  assert.match(constructed.statePath, /integrations\/dsh-feishu\/state\.json$/);
+  assertPathMatches(constructed.statePath, /integrations\/dsh-feishu\/state\.json$/);
   assert.equal(constructed.runtime.appSecret, 'host-only');
   assert.equal(constructed.runtime.wsAgent, wsAgent);
   assert.equal(constructed.runtime.slashCommands, false);
@@ -1349,8 +1441,8 @@ test('production assembly uses ctx credentials and the active Host apiProxy with
   const betaState = constructed.runtime.state;
   assert.equal(Object.hasOwn(constructed.runtime, 'outboundArtifactsEnabled'), false);
   assert.notEqual(alphaState, betaState);
-  assert.ok(constructed.statePaths.some((path) => /bots\/bot_alpha\/state\.json$/.test(path)));
-  assert.ok(constructed.statePaths.some((path) => /bots\/bot_beta\/state\.json$/.test(path)));
+  assert.ok(constructed.statePaths.some((path) => /bots\/bot_alpha\/state\.json$/.test(toPosixPath(path))));
+  assert.ok(constructed.statePaths.some((path) => /bots\/bot_beta\/state\.json$/.test(toPosixPath(path))));
   await production.close();
   assert.equal(constructed.closed, true);
   assert.equal(constructed.harnessStopped, true);
@@ -1402,7 +1494,7 @@ test('a corrupt legacy state file cannot prevent a healthy v2 bot from starting'
       async set(ref, value) { secrets.set(ref, value); },
       async unset(ref) { secrets.delete(ref); },
     },
-    apiProxy: {},
+    typertGateway: { invoke() {}, stream() {} },
     logger: console,
   }, { dataDir, workspace: dataDir }, {
     lark: { registerApp: async () => ({}) },

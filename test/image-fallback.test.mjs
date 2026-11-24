@@ -57,6 +57,7 @@ function scriptedClient({ workspaceRoot, fileIngressExecutor, onPrompt }) {
   const promptCalls = [];
   let historyCalls = 0;
   client.rpc = async (method, payload, _timeoutMs, options) => {
+    if (method === 'workspace.list') return { items: [], archivedSessionIds: [] };
     if (method === 'session.prompt') {
       promptCalls.push({ payload, rpcId: options.rpcId });
       return onPrompt(promptCalls.length, options.rpcId);

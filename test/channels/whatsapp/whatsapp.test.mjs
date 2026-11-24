@@ -1,10 +1,10 @@
+import { assertTestMessageFailure } from '../../fixtures/connection-diagnostics.mjs';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import {
   mkdtemp,
   rm,
-  stat,
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -39,8 +39,11 @@ import {
   WHATSAPP_ENDPOINTS,
   createWhatsappRpcHandler,
 } from '../../../plugin-src/host/channels/whatsapp/rpc.mjs';
+import { assertRestrictiveMode } from '../../support/filesystem.mjs';
+import { accessPolicyProvider } from '../../../plugin-src/host/channels/shared/access-policy-production.mjs';
 
 const ACCOUNT_JID = '16505550123@s.whatsapp.net';
+const ACCOUNT_LID = '123456789012345@lid';
 const AUTH_DIRECTORY = '7fe8c17e-4fb7-4c5b-a9dc-c36525575dd1';
 
 function deferred() {
@@ -104,6 +107,10 @@ async function committedArtifact(t, {
       ],
     },
   };
+  t.after(registry.openConsumer(sessionId, rpcId));
+  for (const event of agent.session.events) {
+    registry.observeSessionEvent(agent.session, event);
+  }
   await writeFile(join(workspace, fileName), content);
   const tool = createOutboundArtifactTool({ registry });
   const exec = {
@@ -123,7 +130,10 @@ async function committedArtifact(t, {
 
 function artifactState(sessionId = 'session-whatsapp-artifact') {
   const seen = new Set();
+  const botMessages = new Set();
   return {
+    isBotMessage: (jid, id) => botMessages.has(`${jid}:${id}`),
+    rememberBotMessage: async (jid, id) => { botMessages.add(`${jid}:${id}`); },
     hasSeen: (messageId) => seen.has(messageId),
     markSeen: async (messageId) => { seen.add(messageId); },
     sessionFor: () => sessionId,
@@ -177,7 +187,7 @@ test('WhatsApp config stores only linked-device metadata with restrictive permis
   await store.save(linkedConfig());
   assert.equal(store.list()[0].accountJid, ACCOUNT_JID);
   assert.equal(store.list()[0].accessMode, WHATSAPP_ACCESS_MODES.open);
-  assert.equal((await stat(path)).mode & 0o777, 0o600);
+  await assertRestrictiveMode(path, 0o600);
   await assert.rejects(() => store.save(linkedConfig({ botId: 'whatsapp_invalid' })));
 });
 
@@ -237,7 +247,7 @@ test('WhatsApp Web session reports QR and linked identity without printing eithe
     accountJid: ACCOUNT_JID,
     name: 'Harness WhatsApp',
   });
-  assert.equal((await stat(root)).mode & 0o777, 0o700);
+  await assertRestrictiveMode(root, 0o700);
   await session.close();
   assert.equal(ended, true);
 });
@@ -415,13 +425,79 @@ test('WhatsApp normalizes direct, linked-account, and explicitly mentioned group
   }, ACCOUNT_JID);
   assert.equal(linkedAccountGroup.kind, 'group');
   assert.equal(linkedAccountGroup.senderId, ACCOUNT_JID);
-  assert.equal(linkedAccountGroup.addressed, true);
+  assert.equal(linkedAccountGroup.addressed, false);
   assert.equal(linkedAccountGroup.selfChat, false);
 
   assert.equal(normalizeWhatsappMessage({
     key: { remoteJid: '16505550999@s.whatsapp.net', id: 'outbound-1', fromMe: true },
     message: { conversation: 'ordinary outbound message' },
   }, ACCOUNT_JID), null);
+});
+
+test('WhatsApp recognizes trusted account aliases in group mentions and replies', () => {
+  const aliases = [ACCOUNT_LID.replace('@', ':9@'), null, 'not-a-jid'];
+  const cases = [
+    { jid: ACCOUNT_JID, addressed: true },
+    { jid: ACCOUNT_JID.replace('@', ':4@'), addressed: true },
+    { jid: ACCOUNT_LID, addressed: true },
+    { jid: ACCOUNT_LID.replace('@', ':7@'), addressed: true },
+    { jid: '999999999999999@lid', addressed: false },
+    { jid: ACCOUNT_JID.replace('@s.whatsapp.net', '@lid'), addressed: false },
+    { jid: ACCOUNT_LID.replace('@lid', '@s.whatsapp.net'), addressed: false },
+    { jid: 'not-a-jid', addressed: false },
+    { jid: '', addressed: false },
+  ];
+  for (const { jid, addressed } of cases) {
+    for (const contextInfo of [{ mentionedJid: [jid] }, { participant: jid, stanzaId: 'bot-reply' }]) {
+      const message = normalizeWhatsappMessage({
+        key: {
+          remoteJid: '120363000000000002@g.us',
+          participant: '16505550999@s.whatsapp.net',
+          id: 'alias-group-message',
+          fromMe: false,
+        },
+        message: { extendedTextMessage: { text: 'question', contextInfo } },
+      }, ACCOUNT_JID, {
+        accountAliases: aliases,
+        isBotMessage: (group, id) => group === '120363000000000002@g.us' && id === 'bot-reply',
+      });
+      assert.equal(message.addressed, addressed, JSON.stringify(contextInfo));
+    }
+  }
+
+  const mention = {
+    key: {
+      remoteJid: '120363000000000002@g.us',
+      participant: '16505550999@s.whatsapp.net',
+      id: 'alias-required',
+      fromMe: false,
+    },
+    message: {
+      extendedTextMessage: { text: 'question', contextInfo: { mentionedJid: [ACCOUNT_LID] } },
+    },
+  };
+  assert.equal(normalizeWhatsappMessage(mention, ACCOUNT_JID).addressed, false,
+    'an inbound mention alone must not establish an account alias');
+  assert.equal(normalizeWhatsappMessage(mention, ACCOUNT_JID, {
+    accountAliases: ACCOUNT_LID,
+  }).addressed, false, 'malformed alias lists must not match');
+  mention.message.extendedTextMessage.contextInfo.mentionedJid = [ACCOUNT_JID];
+  assert.equal(normalizeWhatsappMessage(mention, ACCOUNT_LID, {
+    accountAliases: [ACCOUNT_JID],
+  }).addressed, true, 'an account saved as a LID also accepts its trusted phone-number alias');
+});
+
+test('WhatsApp recognizes LID self-chat without accepting other outgoing direct messages', () => {
+  const raw = {
+    key: { remoteJid: ACCOUNT_LID, id: 'lid-self-chat', fromMe: true },
+    message: { conversation: 'message yourself' },
+  };
+  const normalized = normalizeWhatsappMessage(raw, ACCOUNT_JID, { accountAliases: [ACCOUNT_LID] });
+  assert.equal(normalized?.selfChat, true);
+  assert.equal(normalized.senderId, ACCOUNT_JID);
+  assert.equal(normalized.replyTarget.jid, ACCOUNT_LID);
+  raw.key.remoteJid = '999999999999999@lid';
+  assert.equal(normalizeWhatsappMessage(raw, ACCOUNT_JID, { accountAliases: [ACCOUNT_LID] }), null);
 });
 
 test('WhatsApp maps contextInfo.quotedMessage snapshots without downloading or recursing', () => {
@@ -453,7 +529,7 @@ test('WhatsApp maps contextInfo.quotedMessage snapshots without downloading or r
   }, ACCOUNT_JID, {
     download: async () => { throw new Error('quoted media must not be downloaded'); },
   });
-  assert.equal(replied.addressed, true);
+  assert.equal(replied.addressed, false, 'a quote snapshot does not prove the bot sent the message');
   assert.deepEqual(replied.replyTo, {
     messageId: 'quoted-1',
     authorId: ACCOUNT_JID,
@@ -738,10 +814,9 @@ test('WhatsApp runtime uses live unified policy settings and existing JID alias 
     authDir: '/tmp/test-whatsapp-auth',
     harness,
     state,
-    accessPolicy: {
-      getSettings: () => accessSettings,
-      isPrivileged: (senderIds) => senderIds.includes(ACCOUNT_JID),
-    },
+    accessPolicy: accessPolicyProvider({ accessPolicyFor: () => accessSettings }, 'whatsapp_test', {
+      channel: 'whatsapp', config: { accountJid: ACCOUNT_JID }, equals: whatsappAccessPolicyIdsEqual,
+    }),
     createSession: async (options) => {
       callbacks = options;
       return {
@@ -766,6 +841,27 @@ test('WhatsApp runtime uses live unified policy settings and existing JID alias 
   });
   assert.ok(calls.some((call) => call[0] === 'message'
     && call[2].text === 'Harness answer'), 'linked owner bypasses an empty allowlist');
+  const ownerGroupJid = '120363000000000001@g.us';
+  await callbacks.onMessage({
+    key: { remoteJid: ownerGroupJid, id: 'owner-group-policy', fromMe: true },
+    message: { conversation: 'owner group bypass' },
+  });
+  assert.equal(calls.some((call) => call[0] === 'message' && call[1] === ownerGroupJid), false,
+    'privileged owner access must not bypass the group trigger');
+  await callbacks.onMessage({
+    key: { remoteJid: ownerGroupJid, id: 'owner-group-mentioned', fromMe: true },
+    message: { extendedTextMessage: {
+      text: 'owner group request', contextInfo: { mentionedJid: [ACCOUNT_JID] },
+    } },
+  });
+  assert.ok(calls.some((call) => call[0] === 'message' && call[1] === ownerGroupJid
+    && call[2].text === 'Harness answer'), 'linked owner bypasses an empty group allowlist');
+  const beforeEcho = calls.length;
+  await callbacks.onMessage({
+    key: { remoteJid: ownerGroupJid, id: 'reply-1', fromMe: true },
+    message: { conversation: 'Harness answer' },
+  });
+  assert.equal(calls.length, beforeEcho, 'privileged access must not bypass outgoing-message loop protection');
   accessSettings = {
     ...accessSettings,
     direct: {
@@ -795,12 +891,107 @@ test('WhatsApp runtime uses live unified policy settings and existing JID alias 
   await runtime.stop();
 });
 
-test('WhatsApp open mode answers linked-account group messages without processing reply echoes', async (t) => {
+test('WhatsApp runtime handles other members LID mentions and replies with live group access policies', async (t) => {
+  const groupJid = '120363000000000002@g.us';
+  const memberJid = '16505550999@s.whatsapp.net';
+  let callbacks;
+  let askCount = 0;
+  let messageSequence = 0;
+  const sent = [];
+  const settings = {
+    direct: {
+      mode: 'allowlist',
+      open: { defaultCanExecuteCommands: false, commandPermissionOverrides: [] },
+      allowlist: { users: [] },
+    },
+    group: {
+      mode: 'open',
+      open: { defaultCanExecuteCommands: false, commandPermissionOverrides: [] },
+      allowlist: { users: [] },
+    },
+  };
+  const socket = {
+    user: { id: ACCOUNT_JID },
+    sendPresenceUpdate: async () => {},
+    readMessages: async () => {},
+    sendMessage: async (jid, content, options = {}) => {
+      sent.push({ jid, content, options });
+      return { key: { id: options.messageId } };
+    },
+  };
+  const runtime = new WhatsappRuntime({
+    config: linkedConfig(),
+    authDir: '/tmp/test-whatsapp-group-lid-aliases',
+    harness: {
+      ensureRunning: async () => {},
+      sessionExists: async () => true,
+      ask: async () => { askCount += 1; return 'Harness group answer'; },
+    },
+    state: artifactState('session-group-lid-aliases'),
+    accessPolicy: { getSettings: () => settings },
+    createSession: async (options) => {
+      callbacks = options;
+      return {
+        socket,
+        ready: Promise.resolve({ accountJid: ACCOUNT_JID }),
+        close: async () => {},
+        logout: async () => {},
+      };
+    },
+  });
+  t.after(() => runtime.stop());
+  await runtime.start();
+  const receive = async (contextInfo, participantAlt = memberJid) => {
+    const raw = {
+      key: {
+        remoteJid: groupJid,
+        participant: '987654321098765@lid',
+        participantAlt,
+        id: `group-lid-${++messageSequence}`,
+        fromMe: false,
+      },
+      message: { extendedTextMessage: { text: 'question', contextInfo } },
+    };
+    await callbacks.onMessage(raw, { socket });
+    return raw;
+  };
+  await receive({ mentionedJid: [ACCOUNT_LID] });
+  assert.equal(askCount, 0, 'an unknown account LID is ignored');
+
+  socket.user.lid = ACCOUNT_LID.replace('@', ':9@');
+  const mention = await receive({ mentionedJid: [ACCOUNT_LID] });
+  assert.equal(askCount, 1, 'the current socket supplies its trusted LID for incoming mentions');
+  const placeholder = sent.find(({ content }) => content.text === '正在处理…');
+  assert.equal(placeholder.jid, groupJid);
+  assert.equal(placeholder.options.quoted, mention);
+  await receive({ participant: ACCOUNT_LID.replace('@', ':7@'), stanzaId: 'human-message' });
+  assert.equal(askCount, 1, 'a reply to a human message from the linked account stays ignored');
+  await receive({ participant: ACCOUNT_LID.replace('@', ':7@'), stanzaId: placeholder.options.messageId });
+  assert.equal(askCount, 2, 'a reply to a known bot message accepts the linked account LID');
+  await receive({ mentionedJid: ['999999999999999@lid'] });
+  await receive({ mentionedJid: [ACCOUNT_JID.replace('@s.whatsapp.net', '@lid')] });
+  await receive({});
+  assert.equal(askCount, 2, 'unrelated mentions and ordinary group messages stay ignored');
+
+  settings.group.mode = 'allowlist';
+  await receive({ mentionedJid: [ACCOUNT_LID] });
+  assert.equal(askCount, 2, 'recognizing the bot mention must not bypass the group allowlist');
+  settings.group.allowlist.users = [{ id: '16505550999', canExecuteCommands: false }];
+  await receive({ mentionedJid: [ACCOUNT_LID] });
+  assert.equal(askCount, 3, 'an allowed member is matched using their phone-number alternate');
+  await receive({ mentionedJid: [ACCOUNT_LID] }, '16505550888@s.whatsapp.net');
+  assert.equal(askCount, 3, 'other members still cannot bypass the allowlist');
+  assert.equal(sent.filter(({ content }) => content.text === 'Harness group answer').length, 3);
+});
+
+test('WhatsApp owner group messages require a mention or bot reply and never process reply echoes', async (t) => {
   const groupJid = '120363000000000001@g.us';
   let callbacks;
   let replyEchoTask;
   let askCount = 0;
   const sent = [];
+  const captured = [];
+  const groupHistory = { query() {}, capture: async (entry) => { captured.push(entry); return { store: groupHistory, groupId: 'shared-group' }; } };
   const socket = {
     sendPresenceUpdate: async () => {},
     readMessages: async () => {},
@@ -818,10 +1009,12 @@ test('WhatsApp open mode answers linked-account group messages without processin
   const runtime = new WhatsappRuntime({
     config: linkedConfig({ accessMode: WHATSAPP_ACCESS_MODES.open }),
     authDir: '/tmp/test-whatsapp-linked-account-group',
+    groupHistory,
     harness: {
       ensureRunning: async () => {},
       sessionExists: async () => true,
-      ask: async () => {
+      ask: async (_id, _prompt, options) => {
+        assert.equal(options.groupHistory.groupId, 'shared-group');
         askCount += 1;
         return 'Harness group answer';
       },
@@ -845,6 +1038,15 @@ test('WhatsApp open mode answers linked-account group messages without processin
     message: { conversation: 'hello from my group' },
   };
   await callbacks.onMessage(inbound);
+  assert.equal(askCount, 0, 'ordinary owner group messages must stay silent');
+  assert.equal(captured.length, 1);
+  assert.equal(captured[0].text, 'hello from my group');
+  assert.equal(sent.length, 0, 'ignored messages send no placeholder or reaction');
+  inbound.key.id = 'linked-account-mentioned';
+  inbound.message = { extendedTextMessage: {
+    text: 'hello bot', contextInfo: { mentionedJid: [ACCOUNT_JID] },
+  } };
+  await callbacks.onMessage(inbound);
   await replyEchoTask;
   await eventually(() => sent.filter(({ content }) => content.react).length === 2);
 
@@ -865,6 +1067,23 @@ test('WhatsApp open mode answers linked-account group messages without processin
   assert.deepEqual(reactionSends.map(({ content }) => content.react.text), ['👀', '']);
   assert.equal(reactionSends.every(({ jid }) => jid === groupJid), true);
   assert.equal(reactionSends.every(({ content }) => content.react.key === inbound.key), true);
+
+  await callbacks.onMessage({
+    key: { remoteJid: groupJid, id: 'owner-reply-to-human', fromMe: true },
+    message: { extendedTextMessage: {
+      text: 'ordinary reply', contextInfo: { participant: ACCOUNT_JID, stanzaId: 'linked-account-group-1' },
+    } },
+  });
+  assert.equal(askCount, 1, 'replying to the owner\'s manual message must stay silent');
+  await callbacks.onMessage({
+    key: { remoteJid: groupJid, id: 'owner-reply-to-bot', fromMe: true },
+    message: { extendedTextMessage: {
+      text: 'follow-up', contextInfo: { participant: ACCOUNT_JID, stanzaId: textSends[0].options.messageId },
+    } },
+  });
+  await replyEchoTask;
+  assert.equal(askCount, 2, 'replying to the bot\'s edited response triggers once');
+  assert.equal(captured.length, 4, 'outbound echoes are not archived');
 });
 
 test('WhatsApp runtime sends result files with native metadata, quote, stable id, and upload timeout', async (t) => {
@@ -1587,10 +1806,7 @@ test('WhatsApp reconnect RPC sends tests only for the connected target and keeps
     { botId, sendTest: true },
   );
   assert.equal(failedSend.ok, true);
-  assert.deepEqual(failedSend.value.testMessage, {
-    sent: false,
-    code: 'test-message-failed',
-  });
+  assertTestMessageFailure(failedSend.value.testMessage);
   assert.doesNotMatch(JSON.stringify(failedSend), /private provider failure/);
 
   connected = false;

@@ -155,6 +155,8 @@ function requiredString(value, name) {
   return result;
 }
 
+const SLACK_MARKDOWN_TEXT_LIMIT = 12_000;
+
 function safeOutgoingText(value, { trim = true } = {}) {
   const raw = typeof value === 'string' ? value : '';
   const text = trim ? raw.trim() : raw;
@@ -162,6 +164,14 @@ function safeOutgoingText(value, { trim = true } = {}) {
   return text
     .replace(/<@([A-Z0-9]+)>/gi, '@$1')
     .replace(/<!(channel|here|everyone)(?:\^[^>]*)?>/gi, '@$1');
+}
+
+function markdownTextField(value) {
+  const text = safeOutgoingText(value);
+  if (text.length > SLACK_MARKDOWN_TEXT_LIMIT) {
+    throw new TypeError(`Slack markdown_text exceeds ${SLACK_MARKDOWN_TEXT_LIMIT} characters`);
+  }
+  return text;
 }
 
 function apiFailure(method, payload, tokenKind) {
@@ -234,6 +244,13 @@ export class SlackApi {
     });
   }
 
+  async conversationInfo({ channelId, signal } = {}) {
+    const value = await this.#request('conversations.info', {
+      tokenKind: 'bot', signal, body: { channel: slackId(channelId, 'channel id') },
+    });
+    return value.channel;
+  }
+
   async fileInfo({ fileId, signal } = {}) {
     const value = await this.#request('files.info', {
       tokenKind: 'bot',
@@ -264,15 +281,23 @@ export class SlackApi {
       : null;
   }
 
-  postMessage({ channelId, text, threadTs, signal }) {
+  postMessage({ channelId, text, threadTs, signal, format = 'plain' }) {
+    const outgoing = format === 'markdown_text' ? markdownTextField(text) : safeOutgoingText(text);
+    const markdownText = format === 'markdown_text';
     return this.#request('chat.postMessage', {
       tokenKind: 'bot',
       signal,
       body: {
         channel: slackId(channelId, 'channel id'),
-        text: safeOutgoingText(text),
+        // markdown_text cannot be combined with text or blocks.
+        ...(markdownText
+          ? { markdown_text: outgoing }
+          : {
+              text: outgoing,
+              ...(format === 'markdown' ? { blocks: [{ type: 'markdown', text: outgoing }] } : {}),
+              mrkdwn: format !== 'literal',
+            }),
         ...(threadTs ? { thread_ts: cleanString(threadTs) } : {}),
-        mrkdwn: true,
         link_names: false,
         unfurl_links: false,
         unfurl_media: false,
@@ -287,8 +312,7 @@ export class SlackApi {
       body: {
         channel: slackId(channelId, 'channel id'),
         ts: requiredString(ts, 'message timestamp'),
-        text: safeOutgoingText(text),
-        parse: 'none',
+        markdown_text: markdownTextField(text),
         link_names: false,
       },
     });
@@ -522,7 +546,7 @@ export class SlackApi {
       });
     } catch (error) {
       if (error?.name === 'AbortError' || error?.name === 'TimeoutError') throw error;
-      throw new Error(`Slack ${method} transport failed`);
+      throw new Error(`Slack ${method} transport failed`, { cause: error });
     }
 
     if (tokenKind === 'bot') {
@@ -533,8 +557,8 @@ export class SlackApi {
     let payload;
     try {
       payload = await response.json();
-    } catch {
-      throw new Error(`Slack ${method} returned invalid JSON`);
+    } catch (cause) {
+      throw Object.assign(new Error(`Slack ${method} returned invalid JSON`, { cause }), { status: response?.status });
     }
     if (response.status === 429 && retry) {
       const seconds = Number(response.headers.get('retry-after')) || 1;

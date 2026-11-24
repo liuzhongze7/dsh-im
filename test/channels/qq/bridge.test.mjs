@@ -1,3 +1,4 @@
+import { loadDeferredImages } from '../../helpers/deferred-images.mjs';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -19,7 +20,7 @@ import {
 } from '../../../src/channels/shared/semantic/artifact.mjs';
 import {
   COMMAND_PERMISSION_DENIED_MESSAGE,
-  directAccessPolicy,
+  configuredAccessPolicy,
 } from '../access-policy-fixture.mjs';
 
 function deferred() {
@@ -69,6 +70,49 @@ function message(overrides = {}) {
     ...overrides,
   };
 }
+
+test('QQ accepts an explicit self mention delivered as GROUP_MESSAGE_CREATE', async () => {
+  const fixture = stateFixture();
+  const sent = [];
+  const bridge = new QqHarnessBridge({
+    bot: { sendText: async (_target, text) => sent.push(text) },
+    ownerUserOpenid: '*',
+    harness: { ensureRunning: async () => true },
+    state: fixture.state,
+  });
+  await bridge.accept(message({
+    kind: 'group', rawEventType: 'GROUP_MESSAGE_CREATE',
+    groupOpenid: 'group-311', mentions: [{ is_you: true, id: 'bot-openid' }],
+    content: '/status', messageId: 'issue311-self-mention',
+    replyTarget: { scope: 'group', targetId: 'group-311', msgId: 'issue311-self-mention' },
+  }));
+  assert.equal(sent.length, 1);
+  assert.match(sent[0], /连接正常/);
+});
+
+test('QQ full group mentions still enforce access before commands and attachment downloads', async () => {
+  const fixture = stateFixture();
+  const sent = [];
+  const policy = configuredAccessPolicy({ channel: 'qq', config: { ownerUserOpenid: '*' } });
+  policy.getSettings().group.allowlist.users = [{ id: 'member', canExecuteCommands: false }];
+  const bridge = new QqHarnessBridge({
+    bot: { sendText: async (_target, text) => sent.push(text) },
+    ownerUserOpenid: '*', state: fixture.state, accessPolicy: policy,
+    harness: { ensureRunning: async () => assert.fail('denied command reached Harness') },
+    fetchImpl: async () => assert.fail('denied attachment was downloaded'),
+  });
+  const fullGroup = (overrides) => message({
+    kind: 'group', rawEventType: 'GROUP_MESSAGE_CREATE', groupOpenid: 'group-311',
+    mentions: [{ is_you: true, member_openid: 'self-openid' }],
+    replyTarget: { scope: 'group', targetId: 'group-311' }, ...overrides,
+  });
+  await bridge.accept(fullGroup({ senderId: 'member', messageId: 'denied-command', content: '<@self-openid> /status' }));
+  assert.deepEqual(sent, [COMMAND_PERMISSION_DENIED_MESSAGE]);
+  await bridge.accept(fullGroup({ senderId: 'blocked', messageId: 'denied-image', content: '<@self-openid>',
+    attachments: [{ content_type: 'image/png', url: 'https://multimedia.nt.qq.com.cn/blocked.png' }],
+  }));
+  assert.deepEqual(sent, [COMMAND_PERMISSION_DENIED_MESSAGE]);
+});
 
 test('QQ maps msgElements quote snapshots and prefers voice ASR text', () => {
   const inbound = qqInboundMessage(message({
@@ -126,6 +170,32 @@ test('QQ sends quote context to Harness but does not execute quoted commands', a
   assert.deepEqual(prompt.at(-1), { type: 'text', text: '这条指令是什么意思？' });
 });
 
+test('QQ executes plain /clear through the fast command path and preserves its Session binding', async () => {
+  const fixture = stateFixture([['c2c:owner-openid', 'session-clear']]);
+  const sent = [];
+  const calls = [];
+  const bridge = new QqHarnessBridge({
+    bot: { sendText: async (_target, text) => sent.push(text) },
+    ownerUserOpenid: 'owner-openid',
+    harness: {
+      executeCommand: async (...args) => {
+        calls.push(args);
+        return { commandId: 'clear-qq', result: { kind: 'success' } };
+      },
+      ask: async () => assert.fail('plain /clear must not reach the model'),
+    },
+    state: fixture.state,
+  });
+
+  await bridge.accept(message({ messageId: 'qq-clear-fast', content: '/clear' }));
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], 'session-clear');
+  assert.equal(calls[0][1], '/clear');
+  assert.match(sent[0], /上下文已清空/);
+  assert.equal(fixture.state.sessionFor('c2c:owner-openid'), 'session-clear');
+});
+
 async function committedArtifact(t, fileName, content, suffix) {
   const workspace = await mkdtemp(join(tmpdir(), `dsh-im-qq-artifact-${suffix}-`));
   t.after(() => rm(workspace, { recursive: true, force: true }));
@@ -142,6 +212,10 @@ async function committedArtifact(t, fileName, content, suffix) {
       ],
     },
   };
+  t.after(registry.openConsumer(agent.session.header.id, rpcId));
+  for (const event of agent.session.events) {
+    registry.observeSessionEvent(agent.session, event);
+  }
   const tool = createOutboundArtifactTool({ registry });
   const exec = {
     name: OUTBOUND_ARTIFACT_TOOL,
@@ -459,7 +533,8 @@ test('QQ sends image-only attachments to Harness and accepts the SDK file MIME f
     ownerUserOpenid: 'owner-openid',
     harness: {
       sessionExists: async () => true,
-      ask: async (sessionId, content) => {
+      ask: async (sessionId, content, options) => {
+        content = await loadDeferredImages(content, options);
         prompts.push({ sessionId, content });
         return '看到图片了';
       },
@@ -540,9 +615,9 @@ test('QQ applies the unified access policy before attachments or Harness work', 
   let downloads = 0;
   const harnessCalls = [];
   const sent = [];
-  const accessPolicy = directAccessPolicy({
+  const accessPolicy = configuredAccessPolicy({
+    channel: 'qq', config: { ownerUserOpenid: 'owner-openid' },
     users: [{ id: 'member-openid', canExecuteCommands: false }],
-    privilegedIds: ['owner-openid'],
   });
   const bridge = new QqHarnessBridge({
     bot: {
@@ -601,7 +676,81 @@ test('QQ applies the unified access policy before attachments or Harness work', 
   accessPolicy.getSettings().direct.allowlist.users = [];
   await bridge.accept(directMessage('policy-owner-command', 'owner-openid', '/help'));
   assert.match(sent.at(-1), /\/help/);
+  const ownerReplies = sent.length;
+  await bridge.accept(message({
+    messageId: 'policy-unmapped-group-owner', senderId: 'different-member-openid', content: '/help',
+    rawEventType: 'GROUP_AT_MESSAGE_CREATE',
+    replyTarget: { scope: 'group', targetId: 'group-one', msgId: 'policy-unmapped-group-owner' },
+  }));
+  assert.equal(sent.length, ownerReplies, 'an unverified group identity does not inherit the private owner');
 });
+
+for (const recovery of ['unarchive', 'grant-command-permission']) {
+  test(`QQ archived chats guide command-denied users to administrator recovery: ${recovery}`, async () => {
+    const key = 'c2c:member-openid';
+    const fixture = stateFixture([[key, 'archived-session']]);
+    const sent = [];
+    const prompts = [];
+    let archived = true;
+    let creates = 0;
+    const accessPolicy = configuredAccessPolicy({
+      channel: 'qq', config: { ownerUserOpenid: 'owner-openid' },
+      users: [{ id: 'member-openid', canExecuteCommands: false }],
+    });
+    const bridge = new QqHarnessBridge({
+      ownerUserOpenid: 'owner-openid', accessPolicy, state: fixture.state,
+      bot: { sendText: async (_target, text) => {
+        sent.push(text);
+        return { id: `archive-recovery-${sent.length}` };
+      } },
+      harness: {
+        sessionExists: async () => true,
+        createSession: async () => { creates++; return 'new-session'; },
+        ask: async (sessionId, prompt) => {
+          prompts.push([sessionId, prompt]);
+          if (sessionId === 'archived-session' && archived) {
+            throw Object.assign(new Error('archived'), { code: 'session-archived' });
+          }
+          return '已恢复回复';
+        },
+      },
+      logger: { error() {}, warn() {} },
+    });
+    const send = (messageId, content) => bridge.accept(message({
+      messageId, content, senderId: 'member-openid',
+      replyTarget: { scope: 'c2c', targetId: 'member-openid', msgId: messageId },
+    }));
+
+    await send('archived-question', 'hello');
+    assert.match(sent.at(-1), /SESSION_ARCHIVED/);
+    assert.match(sent.at(-1), /有命令权限.*\/new/);
+    assert.match(sent.at(-1), /联系管理员.*取消归档.*开启命令权限/);
+    assert.equal(fixture.state.sessionFor(key), 'archived-session');
+
+    await send('denied-new', '/new');
+    assert.match(sent.at(-1), /没有执行命令的权限.*访问设置.*私聊或群聊.*命令权限/);
+    assert.equal(fixture.state.sessionFor(key), 'archived-session');
+    assert.equal(creates, 0);
+    assert.deepEqual(prompts, [['archived-session', 'hello']]);
+
+    if (recovery === 'unarchive') {
+      archived = false;
+    } else {
+      accessPolicy.getSettings().direct.allowlist.users[0].canExecuteCommands = true;
+      await send('authorized-new', '/new');
+      assert.match(sent.at(-1), /已开启新会话/);
+      assert.equal(fixture.state.sessionFor(key), 'new-session', '/new eagerly creates and binds the session');
+      assert.equal(creates, 1, '/new creates the Session eagerly');
+    }
+    await send('recovered-question', 'hello again');
+    const expectedSession = recovery === 'unarchive' ? 'archived-session' : 'new-session';
+    assert.equal(sent.at(-1), '已恢复回复');
+    assert.equal(fixture.state.sessionFor(key), expectedSession);
+    assert.deepEqual(prompts.at(-1), [expectedSession, 'hello again']);
+    assert.equal(creates, recovery === 'unarchive' ? 0 : 1);
+    assert.equal(bridge.status.lastMessageError, null);
+  });
+}
 
 test('QQ rejects non-platform image URLs without fetching and returns a retryable image error', async () => {
   const fixture = stateFixture([['c2c:owner-openid', 'session-image']]);
@@ -612,7 +761,7 @@ test('QQ rejects non-platform image URLs without fetching and returns a retryabl
     ownerUserOpenid: 'owner-openid',
     harness: {
       sessionExists: async () => true,
-      ask: async () => assert.fail('an untrusted image must not reach Harness'),
+      ask: async (_sessionId, content, options) => { await loadDeferredImages(content, options); assert.fail('invalid images must not reach the model'); },
     },
     state: fixture.state,
     logger: { error() {} },
@@ -957,8 +1106,9 @@ test('QQ private messages deliver the final answer as Markdown without opening a
       sessionExists: async () => true,
       createSession: async () => 'session-new',
       ensureRunning: async () => true,
-      ask: async (_session, _text, { onUpdate, progressMode }) => {
+      ask: async (_session, _text, { onUpdate, progressMode, finalAnswerOnly }) => {
         assert.equal(progressMode, 'all');
+        assert.equal(finalAnswerOnly, true);
         await onUpdate({ type: 'text', text: '最终回' });
         await onUpdate({ type: 'text', text: '最终回答' });
         return '最终回答';
@@ -999,7 +1149,8 @@ test('QQ group messages suppress every successful progress update', async () => 
     ownerUserOpenid: 'owner-openid',
     harness: {
       sessionExists: async () => true,
-      ask: async (_session, _text, { onUpdate }) => {
+      ask: async (_session, _text, { onUpdate, finalAnswerOnly }) => {
+        assert.equal(finalAnswerOnly, true);
         await onUpdate({ type: 'tool', name: 'bash' });
         // 工具结束后 Harness 客户端会下发 status 帧“正在整理结果…”。
         await onUpdate({ type: 'status', text: '正在整理结果…', toolName: 'bash' });
@@ -1072,6 +1223,36 @@ test('QQ group messages append a stable tool failure notice without exposing pro
     '已存入两套记忆。\n\n---\n\n工具调用「add_observations」未成功，请检查工具配置或稍后重试。',
   ]);
   assert.doesNotMatch(sent[0], /Error calling|Status code|404/);
+});
+
+test('QQ sends neutral completion replies and retains tool failure notices', async () => {
+  for (const toolFailed of [false, true]) {
+    const sent = [];
+    const status = createQqBridgeStatus();
+    status.lastError = 'previous failure';
+    status.lastMessageError = { code: 'MODEL_EMPTY_REPLY' };
+    const fixture = stateFixture([['c2c:owner-openid', 'session-empty-completed']]);
+    const bridge = new QqHarnessBridge({
+      bot: { sendText: async (_target, text) => sent.push(text) },
+      ownerUserOpenid: 'owner-openid',
+      status,
+      harness: {
+        sessionExists: async () => true,
+        ask: async (_session, _text, { onUpdate }) => {
+          if (toolFailed) await onUpdate({ type: 'status', toolName: 'bash', error: 'private detail' });
+          return '本轮处理已结束，没有文本回复。';
+        },
+      },
+      state: fixture.state,
+    });
+    await bridge.accept(message());
+    assert.deepEqual(sent, [toolFailed
+      ? '本轮处理已结束，没有文本回复。\n\n---\n\n工具调用「bash」未成功，请检查工具配置或稍后重试。'
+      : '本轮处理已结束，没有文本回复。']);
+    assert.equal(status.messagesReplied, 1);
+    assert.equal(status.lastError, null);
+    assert.equal(status.lastMessageError, null);
+  }
 });
 
 test('QQ delivers final group answers as markdown messages', async () => {
@@ -1281,7 +1462,8 @@ test('QQ credential-bound bots accept senders within the platform visibility sco
   assert.equal(bridge.status.messagesRejected, 0);
 });
 
-test('QQ group questions require the initiating actor to mention the bot and preserve multi-question answers', async () => {
+for (const event of ['GROUP_AT_MESSAGE_CREATE', 'GROUP_MESSAGE_CREATE']) {
+test(`QQ group questions require the initiating actor and preserve multi-question answers (${event})`, async () => {
   const fixture = stateFixture([['group:group-1', 'session-group']]);
   const sent = [];
   const asked = [];
@@ -1341,7 +1523,8 @@ test('QQ group questions require the initiating actor to mention the bot and pre
 
   const first = bridge.accept(message({
     kind: 'group',
-    rawEventType: 'GROUP_AT_MESSAGE_CREATE',
+    rawEventType: event,
+    mentions: [{ is_you: true, member_openid: 'self-openid' }],
     senderId: 'initiator',
     groupOpenid: 'group-1',
     content: '启动群聊交互',
@@ -1356,7 +1539,8 @@ test('QQ group questions require the initiating actor to mention the bot and pre
   submitted.promise.then((result) => { submittedResult = result; });
   const bystander = bridge.accept(message({
     kind: 'group',
-    rawEventType: 'GROUP_AT_MESSAGE_CREATE',
+    rawEventType: event,
+    mentions: [{ is_you: true, member_openid: 'self-openid' }],
     senderId: 'bystander',
     groupOpenid: 'group-1',
     content: '旁观者的普通问题',
@@ -1376,7 +1560,8 @@ test('QQ group questions require the initiating actor to mention the bot and pre
 
   const firstAnswer = bridge.accept(message({
     kind: 'group',
-    rawEventType: 'GROUP_AT_MESSAGE_CREATE',
+    rawEventType: event,
+    mentions: [{ is_you: true, member_openid: 'self-openid' }],
     senderId: 'initiator',
     groupOpenid: 'group-1',
     content: '2',
@@ -1386,7 +1571,8 @@ test('QQ group questions require the initiating actor to mention the bot and pre
   await secondQuestionDelivered.promise;
   const secondAnswer = bridge.accept(message({
     kind: 'group',
-    rawEventType: 'GROUP_AT_MESSAGE_CREATE',
+    rawEventType: event,
+    mentions: [{ is_you: true, member_openid: 'self-openid' }],
     senderId: 'initiator',
     groupOpenid: 'group-1',
     content: '1，文档，发布说明',
@@ -1420,6 +1606,7 @@ test('QQ group questions require the initiating actor to mention the bot and pre
   ].includes(text)), false);
   assert.deepEqual(sent.slice(-2).map(({ text }) => text), ['发起者交互完成', '旁观者问题已回答']);
 });
+}
 
 test('QQ pending questions stay isolated between private conversations', async () => {
   const fixture = stateFixture([
@@ -1495,8 +1682,13 @@ test('QQ pending questions stay isolated between private conversations', async (
   ]);
 });
 
-test('QQ presents concurrent approvals in FIFO order without a code and consumes exact decisions', async () => {
-  const fixture = stateFixture([['c2c:owner-openid', 'session-approval']]);
+for (const group of [false, true]) {
+test(`QQ presents FIFO approvals and consumes exact decisions (${group ? 'all group messages' : 'private'})`, async () => {
+  const approvalMessage = (fields) => message({
+    ...(group ? { kind: 'group', rawEventType: 'GROUP_MESSAGE_CREATE', groupOpenid: 'approval-group',
+      mentions: [{ is_you: true, id: 'self-openid' }] } : {}), ...fields,
+  });
+  const fixture = stateFixture([[group ? 'group:approval-group' : 'c2c:owner-openid', 'session-approval']]);
   const sent = [];
   const asked = [];
   const completed = deferred();
@@ -1545,7 +1737,7 @@ test('QQ presents concurrent approvals in FIFO order without a code and consumes
     state: fixture.state,
   });
 
-  const prompt = bridge.accept(message({
+  const prompt = bridge.accept(approvalMessage({
     messageId: 'approval-start',
     content: '启动两个审批',
   }));
@@ -1555,7 +1747,12 @@ test('QQ presents concurrent approvals in FIFO order without a code and consumes
   assert.match(sent.find(({ text }) => text.includes('允许执行第一步')).text, /批准.*拒绝/s);
   assert.doesNotMatch(sent.find(({ text }) => text.includes('允许执行第一步')).text, /qq-approval-one/);
 
-  await bridge.accept(message({
+  if (group) {
+    await bridge.accept(approvalMessage({ messageId: 'approval-unmentioned', content: '批准', mentions: [] }));
+    assert.equal(responses.length, 0, 'unmentioned decisions cannot approve');
+  }
+
+  await bridge.accept(approvalMessage({
     messageId: 'approval-allow',
     content: '批准',
     replyTarget: { scope: 'c2c', targetId: 'owner-openid', msgId: 'approval-allow' },
@@ -1564,7 +1761,7 @@ test('QQ presents concurrent approvals in FIFO order without a code and consumes
   assert.doesNotMatch(sent.find(({ text }) => text.includes('允许执行第二步')).text, /qq-approval-two/);
 
   await Promise.all([
-    bridge.accept(message({
+    bridge.accept(approvalMessage({
       messageId: 'approval-reject',
       content: '拒绝',
       replyTarget: { scope: 'c2c', targetId: 'owner-openid', msgId: 'approval-reject' },
@@ -1593,6 +1790,7 @@ test('QQ presents concurrent approvals in FIFO order without a code and consumes
   assert.deepEqual(asked, ['启动两个审批']);
   assert.equal(sent.at(-1).text, '审批完成');
 });
+}
 
 test('QQ deduplicates question replays, cancels orphan questions, and keeps approvals fail-closed', async () => {
   const fixture = stateFixture();

@@ -1,3 +1,6 @@
+import { getGroupHistoryStore } from '../../group-history-runtime.mjs';
+import { getImageInputSettingsStore } from '../../../../src/channels/shared/image-input-settings-store.mjs';
+import { t } from '../../../../src/channels/shared/i18n.mjs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { unlink } from 'node:fs/promises';
@@ -26,12 +29,16 @@ import {
   createWorkspaceAwareController,
   observeBotWorkspaceRemovals,
 } from '../../../../src/channels/shared/bot-workspace-store.mjs';
+import { prepareBotWorkspace } from '../../../../src/channels/shared/default-workspace.mjs';
 import { listAgentPresetCatalog } from '../../../../src/channels/shared/agent-preset.mjs';
 import { listModelCatalog } from '../../../../src/channels/shared/model-setting.mjs';
 import { createDeliveryAdapter } from '../../delivery-adapter.mjs';
+import { createAnnouncedStateStore, createBindingAnnouncer } from '../shared/binding-events.mjs';
+import { createSessionSyncTargetsFor } from '../../session-sync-targets.mjs';
 import {
   accessPolicyProvider,
   initialAccessPolicyFor,
+  newBotAccessPolicyFor,
 } from '../shared/access-policy-production.mjs';
 
 // The WebSocket agent built here is only used for the Feishu long connection,
@@ -97,7 +104,7 @@ function pluginPaths(config) {
  */
 export async function createProductionController(ctx, config = {}, internals = {}) {
   if (!ctx?.credentials) throw new TypeError('dsh-feishu requires ctx.credentials');
-  const connection = harnessConnection(ctx, config);
+  const connection = harnessConnection(ctx, config, { competitiveApprovals: true });
 
   const lark = internals.lark ?? Lark;
   const Controller = internals.Controller ?? MultiBotDshFeishuController;
@@ -117,10 +124,10 @@ export async function createProductionController(ctx, config = {}, internals = {
   const agentPresetCatalog = () => listAgentPresetCatalog(ctx);
   const paths = pluginPaths(config);
   const configStore = await new ConfigStore(paths.config).load();
-  const defaultWorkspace = resolve(config.workspace ?? process.cwd());
+  const { defaultWorkspace, ungroupedWorkspace } = await prepareBotWorkspace(config);
   const WorkspaceStore = internals.WorkspaceStore ?? BotWorkspaceStore;
   const workspaces = internals.workspaces
-    ?? await new WorkspaceStore(paths.workspaces, { defaultWorkspace }).load();
+    ?? await new WorkspaceStore(paths.workspaces, { defaultWorkspace, ungroupedWorkspace, groupByAgentPreset: config.groupByAgentPreset }).load();
   const canListConfiguredBots = typeof configStore.list === 'function';
   const listConfiguredBots = () => canListConfiguredBots ? configStore.list() : [];
   const configuredBots = listConfiguredBots();
@@ -148,15 +155,41 @@ export async function createProductionController(ctx, config = {}, internals = {
     || botConfig.secretRef === LEGACY_FEISHU_SECRET_REF
     ? paths.legacyState
     : resolve(paths.bots, botConfig.id, 'state.json');
-  const stateFor = async (botConfig) => {
-    const stateKey = botConfig.id ?? '__legacy__';
-    let state = stateStores.get(stateKey);
-    if (!state) {
-      state = await new SessionStateStore(statePathFor(botConfig)).load();
-      stateStores.set(stateKey, state);
-    }
-    return state;
-  };
+  /**
+   * Every binding change is announced the moment it is written: a bind before the
+   * Session exists, an unbind when the conversation moves to another session or
+   * its binding is cleared. Listeners run synchronously.
+   */
+  const announcer = createBindingAnnouncer({
+    channel: 'feishu',
+    emit: (event, payload) => ctx.emit(event, payload),
+    authorsOf: (botId) => (typeof stateStores.get(botId)?.snapshot === 'function'
+      ? stateStores.get(botId).snapshot()?.authors ?? null
+      : null),
+  });
+  // The memo key is the bot id, and it is also the id the announcer puts into the
+  // event, so a subject without one has to fail loudly: keying it as something
+  // else would announce a bot no rule can match and answer `stateForSync` with
+  // null. `normalizeBot` always assigns an id - the pre-v2 bot gets a derived one
+  // - so this only fires on a programming mistake.
+  const { stateFor, stateForSync, prime, forget } = createAnnouncedStateStore({
+    announcer,
+    StateStore: SessionStateStore,
+    statePath: statePathFor,
+    keyOf: (subject) => {
+      const id = typeof subject === 'string' ? subject : subject?.id;
+      if (typeof id !== 'string' || id === '') {
+        throw new TypeError('a Feishu bot subject needs an id');
+      }
+      return id;
+    },
+    states: stateStores,
+    logger,
+  });
+  // Warm the per-bot state memo now: the synchronous identity lookup can only
+  // answer from state that is already loaded in this process, and the first prompt
+  // of a session arrives long before any delivery call would load it.
+  await prime(configuredBots);
   const stateForBotId = async (botId) => {
     const botConfig = listConfiguredBots().find((bot) => bot.id === botId);
     if (!botConfig) throw new Error('Unknown Feishu bot');
@@ -164,25 +197,15 @@ export async function createProductionController(ctx, config = {}, internals = {
   };
   // Session-sync mirror targets: which synced DMs (openId) belong to a
   // Session. Resolved lazily per turn start so rebinding a delivery target
-  // takes effect without a restart.
-  const sessionSyncTargetsFor = async (sessionId) => {
-    if (typeof workspaces.listSessionSyncTargets !== 'function') return [];
-    const matches = [];
-    for (const entry of workspaces.listSessionSyncTargets()) {
-      let state;
-      try {
-        state = await stateForBotId(entry.botId);
-      } catch {
-        continue;
-      }
-      const bound = state?.snapshot?.().sessions?.[entry.conversationKey];
-      if (bound !== sessionId) continue;
-      const target = workspaces.deliveryTargetFor(entry.botId, entry.targetId);
-      const openId = target?.route?.openId;
-      if (openId) matches.push({ openId, botId: entry.botId, targetId: entry.targetId });
-    }
-    return matches;
-  };
+  // takes effect without a restart. The resolver also reads the global delivery
+  // switches, so the card mirror is silenced by the same predicate as the
+  // coordinator's target path.
+  const sessionSyncTargetsFor = createSessionSyncTargetsFor({
+    channel: 'feishu',
+    workspaces,
+    config,
+    stateForBotId,
+  });
   const commandExecutor = createHarnessCommandExecutor(ctx, internals.commandExecutor);
   const inboundTtl = internals.inboundTtl ?? getInboundTtlRuntime(ctx, config);
   const inboundTtlService = inboundTtl?.service ?? inboundTtl;
@@ -201,6 +224,7 @@ export async function createProductionController(ctx, config = {}, internals = {
   const harness = new Harness({
     ...connection,
     workspace: defaultWorkspace,
+    ungroupedWorkspace,
     // This plugin is already hosted by a running DSH process. Starting a
     // second DSH would create a competing server and lifecycle.
     autostart: false,
@@ -209,28 +233,43 @@ export async function createProductionController(ctx, config = {}, internals = {
     ...(controlExecutor ? { controlExecutor } : {}),
     ...(sessionMaintenanceExecutor ? { sessionMaintenanceExecutor } : {}),
     ...(fileIngressExecutor ? { fileIngressExecutor } : {}),
+    imageInputPolicy: () => getImageInputSettingsStore(config).get(),
   });
   const proxyEnv = internals.proxyEnv ?? process.env;
   const wsAgent = createFeishuWebSocketAgent(proxyEnv, internals.createProxyAgent);
 
-  const modelCatalog = () => listModelCatalog(harness);
+  const modelCatalog = (options) => listModelCatalog(harness, options);
   const coreController = new Controller({
+    logger,
     registerApp: (options) => lark.registerApp(options),
     verifyApp,
     credentials: ctx.credentials,
     configStore: observedConfigStore,
-    createRuntime: async ({ botId, config: botConfig, appSecret, repair }) => {
+    createRuntime: async ({ botId, config: botConfig, appSecret, repair, acceptExternal }) => {
       const state = await stateFor(botConfig);
       const id = botId ?? botConfig.id ?? botConfig.appId;
       await workspaces.ensure(id, {
         defaultAgentPreset: config.agentPreset,
-        initialAccessPolicy: initialAccessPolicyFor('feishu', botConfig),
+        initialAccessPolicy: newBotAccessPolicyFor('feishu', botConfig),
       });
       const workspaceScope = createBotWorkspaceScope(harness, {
+        dsBot: config.deliveryService?.dsBot,
         botId: id, workspaces, state, agentPresetCatalog,
       });
+      // 语音是可选渠道能力:凭据读取失败时静默禁用,不阻断机器人连接。
+      let voiceSource = null;
+      if (botConfig.voice) {
+        try {
+          const resolved = await ctx.credentials.resolve(botConfig.voice.secretRef);
+          if (resolved?.value) voiceSource = { config: botConfig.voice, secret: resolved.value };
+        } catch (error) {
+          logger.warn?.('[dsh-feishu-voice] 语音凭据读取失败,语音已禁用:', error?.message ?? String(error));
+        }
+      }
       return new Runtime({
         lark,
+        consumerMode: botConfig.consumerMode,
+        acceptExternal,
         botId: id,
         repair,
         appId: botConfig.appId,
@@ -238,19 +277,23 @@ export async function createProductionController(ctx, config = {}, internals = {
         domain: botConfig.domain,
         botOpenId: botConfig.botOpenId,
         groupResponseMode: botConfig.groupResponseMode,
-        groupTopicReply: botConfig.groupTopicReply,
+        mentionTopicReply: botConfig.mentionTopicReply,
         stepPush: botConfig.stepPush,
         stepPushMode: botConfig.stepPushMode,
+        stepCardPanels: botConfig.stepCardPanels,
+        voice: voiceSource,
         sessionSyncTargetsFor: sessionSyncTargetsFor,
         ownerOpenIds: botConfig.ownerOpenIds ?? [botConfig.ownerOpenId],
         harness: workspaceScope.harness,
         state: workspaceScope.state,
+        groupHistory: internals.groupHistory ?? getGroupHistoryStore(ctx, config),
         contextEnhancement: { botId: id, getSettings: () => workspaces.contextEnhancementFor(id) },
         accessPolicy: accessPolicyProvider(workspaces, id, {
           channel: 'feishu', config: botConfig,
         }),
         replyTimeoutMs: config.replyTimeoutMs ?? 600_000,
         slashCommands: config.slashCommands !== false,
+        slashPanel: botConfig.slashPanel,
         ...(wsAgent ? { wsAgent } : {}),
         logger: {
           error: (...args) => logger.error?.(`[${botId ?? botConfig.id}]`, ...args),
@@ -261,7 +304,7 @@ export async function createProductionController(ctx, config = {}, internals = {
       });
     },
     deleteState: async ({ botId, config: botConfig }) => {
-      stateStores.delete(botId);
+      forget(botId);
       try {
         await unlink(statePathFor(botConfig));
       } catch (error) {
@@ -270,10 +313,21 @@ export async function createProductionController(ctx, config = {}, internals = {
     },
   });
   const controller = createWorkspaceAwareController(coreController, {
+    harness,
     workspaces,
     stateFor: stateForBotId,
     agentPresetCatalog,
     modelCatalog,
+    validateAccessPolicyForBot(botId, policy) {
+      const botOpenId = configStore.getBot(botId)?.botOpenId;
+      if (!botOpenId) return;
+      if ([policy.direct, policy.group].some((scope) => scope.mode === 'allowlist'
+        && scope.allowlist.users.some((user) => user.id === botOpenId))) {
+        const error = new TypeError(t('这里需要填写用户的 Open ID，不能填写机器人自己的 Open ID。'));
+        error.code = 'access-policy-invalid';
+        throw error;
+      }
+    },
   });
 
   const supervisor = createSupervisor({
@@ -285,8 +339,10 @@ export async function createProductionController(ctx, config = {}, internals = {
   }).start();
   return {
     controller,
-    deliveryAdapter: createDeliveryAdapter({
+    deliveryAdapter: createDeliveryAdapter({ dsBot: config.deliveryService?.dsBot,
       channel: 'feishu', workspaces, coreController, stateFor: stateForBotId,
+      // The same store, without the await: it is a memo of already loaded bots.
+      stateForSync,
     }),
     ready: supervisor.ready,
     async close() {

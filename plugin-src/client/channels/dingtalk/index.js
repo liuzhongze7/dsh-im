@@ -1,9 +1,10 @@
+import { ConnectionError, normalizeConnectionError } from '../../connection-error.js';
 import { BotName } from '../../bot-alias.js';
 import * as React from 'react';
 
 import { CredentialActionIcon, CredentialBindingPanel, QrActionIcon } from '../../credential-binding.js';
-import { CollapsibleAccountSection } from '../shared/collapsible-account.js';
-import { h } from '../../i18n.js';
+import { AccountSettingsToggle, CollapsibleAccountSection } from '../shared/collapsible-account.js';
+import { channelName, h, localizeTemplate, localizeText } from '../../i18n.js';
 import { WorkspaceEditor } from '../../workspace-editor.js';
 import { ContextEnhancementEditor } from '../../context-enhancement.js';
 import {
@@ -91,7 +92,7 @@ function Heading({ totals, adding, busy, onAdd, onCredential, credentialOpen, ad
         }, h(CredentialActionIcon), credentialOpen ? '收起凭据' : '手动接入')),
       totals.configured > 0
         ? h('div', { className: 'ddt-badge dim-onlineBadge' },
-            h('span', null, `${totals.connected} / ${totals.configured} 在线`))
+            h('span', null, localizeTemplate('{connected} / {configured} 在线', { connected: totals.connected, configured: totals.configured })))
         : null));
 }
 
@@ -106,7 +107,7 @@ function EmptyView({ busy, onStart }) {
     h('div', { className: 'ddt-cardBody ddt-empty dim-surfaceBody dim-emptyView' },
       h('div', { className: 'dim-emptyCopy' },
         h('div', { className: 'ddt-stateLabel dim-stateLabel' },
-          h('span', { className: 'ddt-dot dim-stateDot' }), h('span', null, '尚未接入钉钉机器人')),
+          h('span', { className: 'ddt-dot dim-stateDot' }), h('span', null, localizeTemplate('尚未接入 {channel} 机器人', { channel: channelName('钉钉') }))),
         h('h3', null, '扫一次码，自动创建并连接机器人'),
         h('p', null, '授权由钉钉官方页面完成。扫码账号必须已加入一个企业/组织并有权创建机器人；创建成功后，应用凭据会直接写入 Harness Host。'),
         h('div', { className: 'ddt-actions dim-viewActions' },
@@ -176,16 +177,7 @@ function ProgressPanel({ status, busy, onCancel }) {
       h(Button, { onClick: onCancel, disabled: busy }, '取消接入')));
 }
 
-function ConnectionErrorDiagnostic({ error }) {
-  if (!error) return null;
-  return h('div', { className: 'ddt-errorDiagnostic' },
-    error.hint ? h('p', { className: 'ddt-errorHint' }, error.hint) : null,
-    h('span', { className: 'ddt-errorCode' },
-      h('span', null, '错误码'), `: ${error.code}`,
-      error.referenceId
-        ? h(React.Fragment, null, ' · ', h('span', null, '参考号'), `: ${error.referenceId}`)
-        : null));
-}
+function ConnectionErrorDiagnostic({ error }) { return error ? h(ConnectionError, { error, showMessage: false }) : null; }
 
 function ProvisionError({ provision, busy, onRetry, onClose }) {
   const error = provision.error ?? {
@@ -198,8 +190,7 @@ function ProvisionError({ provision, busy, onRetry, onClose }) {
       h('h3', null, provision.status === 'expired'
         ? '二维码已过期'
         : connectionFailed ? '机器人已保存，但连接未就绪' : '钉钉机器人没有接入完成'),
-      h('p', null, error.message),
-      h(ConnectionErrorDiagnostic, { error }),
+      h(ConnectionError, { error }),
       h('div', { className: 'ddt-actions dim-viewActions' },
         connectionFailed
           ? h(Button, { kind: 'primary', onClick: onClose, disabled: busy }, '查看已保存的机器人')
@@ -225,12 +216,12 @@ function RemoveConfirmation({ account, busy, onConfirm, onCancel }) {
   return h('div', {
     className: 'ddt-confirm dim-confirm',
     role: 'alertdialog',
-    'aria-label': `移除${account.bot.name}`,
+    'aria-label': localizeTemplate('移除{name}', { name: account.bot.name }),
     onKeyDown: (event) => {
       if (event.key === 'Escape' && !busy) onCancel();
     },
   },
-  h('strong', null, `从 DeepSeek Harness 移除“${account.bot.name}”？`),
+  h('strong', null, localizeTemplate('从 DeepSeek Harness 移除“{name}”？', { name: account.bot.name })),
   h('p', null, '这会停止消息连接，并删除本机保存的应用凭据、机器人配置及会话映射。钉钉开放平台中的机器人不会被自动删除。'),
   h('div', { className: 'ddt-actions dim-viewActions' },
     h(Button, { ref: cancelRef, onClick: onCancel, disabled: busy }, '保留机器人'),
@@ -260,6 +251,13 @@ export function AccountCard({
   return h('article', { className: 'ddt-card dim-botCard', tabIndex: -1, 'data-bot-id': account.botId },
     h('div', { className: 'ddt-cardBody dim-botCardBody' },
       h(CollapsibleAccountSection, {
+        settings: h(BotSettingsButton, {
+          channel: 'dingtalk',
+          botId: account.botId,
+          botName: account.bot.name,
+          connected: account.connected,
+          accessPolicy: account.accessPolicy,
+        }),
         id: `ddt-settings-${account.botId.replace(/[^a-zA-Z0-9_-]/g, '-')}`,
         header: h('div', { className: 'ddt-accountTop dim-botCardTop' },
         h('div', { className: 'ddt-accountIdentity dim-botIdentity' },
@@ -281,13 +279,7 @@ export function AccountCard({
             lastCheckedAt: account.health.lastCheckedAt,
             formatCheckedTime: checkedTime,
           }),
-          h(BotSettingsButton, {
-            channel: 'dingtalk',
-            botId: account.botId,
-            botName: account.bot.name,
-            connected: account.connected,
-            accessPolicy: account.accessPolicy,
-          })))
+          h(AccountSettingsToggle)))
       },
         h(WorkspaceEditor, {
         workspace: account.workspace,
@@ -364,6 +356,7 @@ function AccountList(props) {
 const EMPTY_TOTALS = Object.freeze({ configured: 0, connected: 0 });
 
 export function DingtalkSettingsTab({ rpcCall }) {
+  const [operationError, setOperationError] = React.useState(null);
   const [model, setModel] = React.useState({
     phase: 'loading', bots: [], totals: EMPTY_TOTALS, revision: 0, error: null,
     agentPresetCatalog: EMPTY_AGENT_PRESET_CATALOG,
@@ -445,7 +438,16 @@ export function DingtalkSettingsTab({ rpcCall }) {
 
   const invoke = React.useCallback(async (endpoint, payload = {}, signal) => {
     if (typeof rpcCall !== 'function') throw new TypeError('钉钉设置页缺少 RPC 连接');
-    return unwrapRpcResult(await rpcCall(endpoint, payload, signal));
+    const operation = !['connection.status', 'provision.poll', 'provision.begin', 'provision.cancel'].includes(endpoint);
+    if (operation && mountedRef.current) setOperationError(null);
+    try {
+      const value = unwrapRpcResult(await rpcCall(endpoint, payload, signal));
+      if (operation && mountedRef.current) setOperationError(value?.testMessage?.error ?? value?.warnings?.[0] ?? null);
+      return value;
+    } catch (error) {
+      if (endpoint === 'bot.delete' && mountedRef.current && !signal?.aborted && error?.name !== 'AbortError') setOperationError(normalizeConnectionError(error));
+      throw error;
+    }
   }, [rpcCall]);
 
   const loadStatus = React.useCallback(async ({
@@ -755,9 +757,12 @@ export function DingtalkSettingsTab({ rpcCall }) {
       const visibleError = presentError(error);
       const failureMessage = operation === 'reconnect'
         ? visibleError.referenceId
-          ? `连接检查失败：${visibleError.message}（参考号：${visibleError.referenceId}）`
+          ? localizeTemplate('连接检查失败：{error}（参考号：{reference}）', {
+            error: localizeText(visibleError.message),
+            reference: visibleError.referenceId,
+          })
           : '连接检查失败，请稍后重试。'
-        : `操作失败：${visibleError.message}`;
+        : localizeTemplate('操作失败：{error}', { error: localizeText(visibleError.message) });
       if (operation === 'reconnect') {
         setFeedbackByBot((current) => ({
           ...current,
@@ -896,6 +901,7 @@ export function DingtalkSettingsTab({ rpcCall }) {
   }, h(AgentPresetCatalogContext.Provider, {
     value: model.agentPresetCatalog ?? EMPTY_AGENT_PRESET_CATALOG,
   }, h('section', { className: 'ddt-page dim-channelPage', 'aria-label': '钉钉设置' },
+    operationError ? h(ConnectionError, { error: operationError }) : null,
     h(Heading, {
       totals: model.totals,
       adding: Boolean(provision),
@@ -907,14 +913,14 @@ export function DingtalkSettingsTab({ rpcCall }) {
     }),
     h('div', { className: 'ddt-visuallyHidden', role: 'status', 'aria-live': 'polite' }, notice),
     model.error && model.phase === 'ready'
-      ? h('div', { className: 'ddt-statusNotice dim-statusNotice', role: 'alert' }, `状态刷新失败：${model.error.message}`)
+      ? h('div', { className: 'ddt-statusNotice dim-statusNotice', role: 'alert' }, localizeTemplate('状态刷新失败：{error}', { error: localizeText(model.error.message) }))
       : null,
     model.phase === 'loading'
       ? h(LoadingView)
       : model.phase === 'error'
         ? h('div', { className: 'ddt-card dim-surfaceCard' },
             h('div', { className: 'ddt-inlineError dim-inlineError', role: 'alert' },
-              h('h3', null, '无法读取钉钉机器人状态'),
+              h('h3', null, localizeTemplate('无法读取 {channel} 机器人状态', { channel: channelName('钉钉') })),
               h('p', null, model.error?.message ?? '请稍后重试'),
               h(Button, { onClick: () => void loadStatus() }, '重新读取')))
         : h(React.Fragment, null,

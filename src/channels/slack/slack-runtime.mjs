@@ -1,4 +1,8 @@
+import { captureGroupHistory, groupHistoryEntry } from '../shared/group-history.mjs';
+import { extractConnectionEvidence, createConnectionDiagnostics, atConnectionStage } from '../shared/connection-error.mjs';
 import { splitMessageText } from '../shared/editable-message-stream.mjs';
+import { chunkMarkdownParts } from '../shared/markdown-chunks.mjs';
+import { createTextDeliveryBlock } from '../shared/semantic/delivery.mjs';
 import { t } from '../shared/i18n.mjs';
 import { SlackApi } from './slack-api.mjs';
 import { createSlackBridgeStatus, SlackHarnessBridge } from './slack-bridge.mjs';
@@ -6,6 +10,8 @@ import { createSlackBridgeStatus, SlackHarnessBridge } from './slack-bridge.mjs'
 const RECONNECT_DELAYS_MS = Object.freeze([1_000, 3_000, 5_000, 10_000, 30_000]);
 const SLACK_MESSAGE_LIMIT = 38_000;
 const SLACK_STREAM_CHUNK_LIMIT = 11_000;
+const SLACK_MARKDOWN_BLOCK_REJECTION = Object.freeze(['invalid_blocks', 'invalid_blocks_format']);
+const SLACK_MARKDOWN_REJECTION = Object.freeze([...SLACK_MARKDOWN_BLOCK_REJECTION, 'invalid_markdown']);
 const IMAGE_MEDIA_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
 
 function addSocketListener(socket, event, listener) {
@@ -40,7 +46,9 @@ function decodeSlackText(value) {
 
 function stripBotMention(value, botUserId) {
   return decodeSlackText(value)
-    .replace(new RegExp(`<@${botUserId}>`, 'gi'), '')
+    .split(`<@${botUserId}>`).join('')
+    .split(`<@${String(botUserId).toLowerCase()}>`).join('')
+    .split(`<@${String(botUserId).toUpperCase()}>`).join('')
     .trim();
 }
 
@@ -162,7 +170,8 @@ export function normalizeSlackEvent(payload, botUserId, {
   if (!event || !payload?.event_id || !event.channel || !event.user || !event.ts) return null;
   const direct = event.type === 'message' && event.channel_type === 'im';
   const mentioned = event.type === 'app_mention';
-  if (!direct && !mentioned) return null;
+  const group = event.type === 'message' && ['channel', 'group'].includes(event.channel_type);
+  if (!direct && !mentioned && !group) return null;
   if ((event.subtype && event.subtype !== 'file_share') || event.bot_id || event.app_id) return null;
   const threadTs = String(event.thread_ts ?? event.ts);
   const replyTo = slackThreadReplyReference(event, loadReply);
@@ -297,18 +306,40 @@ async function createSlackMessageStream({ api, target, signal, logger }) {
       if (!broken && first.startsWith(appended)) {
         await appendInChunks(api, target, ts, first.slice(appended.length), signal);
         await api.stopStream({ channelId: target.channelId, ts, signal });
+        for (const chunk of chunks.slice(1)) {
+          const result = await api.postMessage({
+            channelId: target.channelId,
+            threadTs: target.threadTs,
+            text: chunk,
+            signal,
+          });
+          if (typeof result?.ts === 'string' && result.ts) providerMessageIds.push(result.ts);
+        }
       } else {
+        const reason = broken ? 'broken' : 'prefix-mismatch';
         await api.stopStream({ channelId: target.channelId, ts, signal }).catch(() => undefined);
-        await api.updateMessage({ channelId: target.channelId, ts, text: first, signal });
-      }
-      for (const chunk of chunks.slice(1)) {
-        const result = await api.postMessage({
+        const source = typeof text === 'string' && text.trim() ? text.trim() : t('处理完成。');
+        const parts = chunkMarkdownParts(source, SLACK_STREAM_CHUNK_LIMIT);
+        const markdownParts = parts.length > 0 ? parts : [{ markdown: source }];
+        logger?.warn?.(
+          `[dsh-im:slack] stream finalize fell back to chat.update (${reason}, length ${markdownParts[0].markdown.length})`,
+        );
+        await api.updateMessage({
           channelId: target.channelId,
-          threadTs: target.threadTs,
-          text: chunk,
+          ts,
+          text: markdownParts[0].markdown,
           signal,
         });
-        if (typeof result?.ts === 'string' && result.ts) providerMessageIds.push(result.ts);
+        for (const chunk of markdownParts.slice(1)) {
+          const result = await api.postMessage({
+            channelId: target.channelId,
+            threadTs: target.threadTs,
+            text: chunk.markdown,
+            format: 'markdown_text',
+            signal,
+          });
+          if (typeof result?.ts === 'string' && result.ts) providerMessageIds.push(result.ts);
+        }
       }
     },
     cancel() {
@@ -332,6 +363,41 @@ export class SlackBotClient {
     this.#logger = logger;
   }
 
+  #postMarkdown(target, text, format) {
+    return this.#api.postMessage({
+      channelId: target.channelId,
+      threadTs: target.threadTs,
+      text,
+      format,
+      signal: this.#signal,
+    });
+  }
+
+  async #recoverRejectedMarkdown(target, chunk, error) {
+    // Retry only a definite formatting rejection, never an ambiguous send.
+    if (this.#signal?.aborted || Number(error?.status) >= 500
+      || !SLACK_MARKDOWN_REJECTION.includes(error?.providerCode)) throw error;
+    if (SLACK_MARKDOWN_BLOCK_REJECTION.includes(error.providerCode)) {
+      this.#logger?.warn?.(
+        `[dsh-im:slack] Markdown block rejected (${error.providerCode}); retrying markdown_text, length ${chunk.markdown.length}`,
+      );
+      try {
+        const result = await this.#postMarkdown(target, chunk.markdown, 'markdown_text');
+        return typeof result?.ts === 'string' && result.ts ? [result.ts] : [];
+      } catch (retryError) {
+        if (this.#signal?.aborted || Number(retryError?.status) >= 500
+          || retryError?.providerCode !== 'invalid_markdown') throw retryError;
+        error = retryError;
+      }
+    }
+    this.#logger?.warn?.(
+      `[dsh-im:slack] Markdown rejected (${error.providerCode}); sending this chunk as literal text, length ${chunk.plain?.length ?? 0}`,
+    );
+    if (!chunk.plain) return [];
+    const result = await this.#postMarkdown(target, chunk.plain, 'literal');
+    return typeof result?.ts === 'string' && result.ts ? [result.ts] : [];
+  }
+
   async sendText(target, text) {
     const chunks = splitMessageText(text, SLACK_MESSAGE_LIMIT);
     const providerMessageIds = [];
@@ -343,6 +409,24 @@ export class SlackBotClient {
         signal: this.#signal,
       });
       if (typeof result?.ts === 'string' && result.ts) providerMessageIds.push(result.ts);
+    }
+    return { providerMessageIds };
+  }
+
+  async sendDelivery(target, value) {
+    const block = createTextDeliveryBlock(value);
+    if (block.format === 'plain') return this.sendText(target, block.text);
+    const providerMessageIds = [];
+    // Standard Markdown blocks have a 12,000-character payload limit.
+    for (const chunk of chunkMarkdownParts(block.text, SLACK_STREAM_CHUNK_LIMIT)) {
+      this.#signal?.throwIfAborted();
+      try {
+        const result = await this.#postMarkdown(target, chunk.markdown, 'markdown');
+        if (typeof result?.ts === 'string' && result.ts) providerMessageIds.push(result.ts);
+      } catch (error) {
+        const delivered = await this.#recoverRejectedMarkdown(target, chunk, error);
+        providerMessageIds.push(...delivered);
+      }
     }
     return { providerMessageIds };
   }
@@ -406,8 +490,10 @@ export class SlackRuntime {
   #harness;
   #state;
   #contextEnhancement;
+  #groupHistory;
   #accessPolicy;
   #logger;
+  #diagnostics;
   #replyTimeoutMs;
   #connectTimeoutMs;
   #createApi;
@@ -431,6 +517,7 @@ export class SlackRuntime {
     harness,
     state,
     contextEnhancement,
+    groupHistory,
     accessPolicy,
     logger = console,
     replyTimeoutMs = 600_000,
@@ -448,8 +535,9 @@ export class SlackRuntime {
     this.#harness = harness;
     this.#state = state;
     this.#contextEnhancement = contextEnhancement;
+    this.#groupHistory = groupHistory;
     this.#accessPolicy = accessPolicy;
-    this.#logger = logger;
+    this.#logger = logger; this.#diagnostics = createConnectionDiagnostics({ channel: 'slack', logger });
     this.#replyTimeoutMs = replyTimeoutMs;
     this.#connectTimeoutMs = connectTimeoutMs;
     this.#createApi = createApi;
@@ -467,6 +555,18 @@ export class SlackRuntime {
       throw error;
     }
     return this.#bridge.sendConnectionTest(text);
+  }
+
+  async presentSessionSyncApproval(target, interaction, options = {}) {
+    if (!this.#status.ready || !this.#bridge) return false;
+    const channelId = target?.route?.channelId;
+    const channel = await this.#api.conversationInfo({ channelId, signal: options.signal });
+    const actor = channel?.is_im === true && typeof channel.user === 'string' ? channel.user : '';
+    if (!actor) return false;
+    return this.#bridge.presentSessionSyncApproval(interaction, {
+      key: options.key, actor, validate: options.validate,
+      send: (text) => this.sendProactiveText(target, text),
+    }, options);
   }
 
   async sendProactiveText(target, text, options = {}) {
@@ -508,8 +608,8 @@ export class SlackRuntime {
     this.#reconnectAttempt = 0;
     this.#status.startedAt = new Date().toISOString();
     this.#status.connectionState = 'connecting';
-    this.#status.lastError = null;
-    await this.#harness.ensureRunning();
+    this.#status.lastError = null; this.#status.error = null; this.#diagnostics.clear();
+    await atConnectionStage('harness.check', () => this.#harness.ensureRunning());
     this.#status.harnessReachable = true;
     const controller = new AbortController();
     this.#abortController = controller;
@@ -538,7 +638,7 @@ export class SlackRuntime {
           this.#connect(),
           new Promise((_, reject) => {
             timer = setTimeout(
-              () => reject(new Error('Slack Socket Mode did not become ready in time')),
+              () => reject(Object.assign(new Error('Slack Socket Mode did not become ready in time'), { code: 'ETIMEDOUT', timeoutMs: this.#connectTimeoutMs })),
               this.#connectTimeoutMs,
             );
             timer?.unref?.();
@@ -551,7 +651,8 @@ export class SlackRuntime {
     } catch (error) {
       this.#status.ready = false;
       this.#status.connectionState = 'failed';
-      this.#status.lastError = error?.message ?? String(error);
+      this.#status.error = this.#diagnostics.report(error, { operation: 'connection.restore', reuse: true, botId: this.#config?.botId, automatic: true }).publicError;
+      this.#status.lastError = this.#status.error.message;
       await this.stop();
       throw error;
     }
@@ -580,7 +681,7 @@ export class SlackRuntime {
         this.#status.connectionState = 'connected';
         this.#status.lastCheckedAt = now;
         this.#status.lastConnectedAt = now;
-        this.#status.lastError = null;
+        this.#status.lastError = null; this.#status.error = null; this.#diagnostics.clear();
         resolve();
       };
 
@@ -618,11 +719,14 @@ export class SlackRuntime {
         });
         const bridge = this.#bridge;
         if (message && bridge) {
-          void bridge.accept(message).catch((error) => {
+          void captureGroupHistory(this.#groupHistory, message, groupHistoryEntry('slack', packet.payload, message, {
+            scope: this.#config.platformId.split(':')[0],
+          }), { logger: this.#logger })
+            .then(() => bridge.accept(message)).catch((error) => {
             if (generation !== this.#generation || this.#stopped) return;
             this.#logger.error?.(
               `[dsh-im:slack] bot ${this.#config.botId} message handling failed:`,
-              error,
+              extractConnectionEvidence(error).details,
             );
           });
         }
@@ -639,7 +743,8 @@ export class SlackRuntime {
         const error = new Error(`Slack Socket Mode closed (${code || 'unknown'})`);
         this.#status.ready = false;
         this.#status.connectionState = 'connecting';
-        this.#status.lastError = error.message;
+        this.#status.error = this.#diagnostics.report(error, { operation: 'connection.monitor', botId: this.#config?.botId, automatic: true }).publicError;
+        this.#status.lastError = this.#status.error.message;
         if (!settled) {
           settled = true;
           reject(error);
@@ -647,9 +752,11 @@ export class SlackRuntime {
         this.#scheduleReconnect();
       });
 
-      addSocketListener(socket, 'error', () => {
+      addSocketListener(socket, 'error', (event) => {
+        const error = event?.error ?? new Error('WebSocket error');
         if (generation !== this.#generation || this.#stopped) return;
-        this.#status.lastError = 'Slack Socket Mode WebSocket error';
+        this.#status.error = this.#diagnostics.report(error, { operation: 'connection.monitor', botId: this.#config?.botId, automatic: true }).publicError;
+        this.#status.lastError = this.#status.error.message;
       });
     });
   }
@@ -662,7 +769,7 @@ export class SlackRuntime {
       this.#reconnectTimer = null;
       void this.#connect().catch((error) => {
         if (this.#stopped) return;
-        this.#logger.warn?.('[dsh-im:slack] Socket Mode reconnect failed:', error);
+        this.#logger.warn?.('[dsh-im:slack] Socket Mode reconnect failed:', extractConnectionEvidence(error).details);
         this.#scheduleReconnect();
       });
     }, delay);
@@ -685,7 +792,7 @@ export class SlackRuntime {
     try {
       if (socket && socket.readyState < 2) socket.close(1000, 'Plugin stopped');
     } catch (error) {
-      this.#logger.warn?.(`[dsh-im:slack] bot ${this.#config.botId} failed to close Socket Mode:`, error);
+      this.#logger.warn?.(`[dsh-im:slack] bot ${this.#config.botId} failed to close Socket Mode:`, extractConnectionEvidence(error).details);
     }
     await Promise.race([
       bridge?.waitForIdle() ?? Promise.resolve(),

@@ -1,3 +1,4 @@
+import { loadDeferredImages } from '../../helpers/deferred-images.mjs';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -20,7 +21,7 @@ import {
 } from '../../../src/channels/shared/semantic/artifact.mjs';
 import {
   COMMAND_PERMISSION_DENIED_MESSAGE,
-  directAccessPolicy,
+  configuredAccessPolicy,
 } from '../access-policy-fixture.mjs';
 
 function deferred() {
@@ -33,8 +34,8 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-async function eventually(predicate, messageText = 'condition was not met') {
-  const deadline = Date.now() + 1_000;
+async function eventually(predicate, messageText = 'condition was not met', timeoutMs = 1_000) {
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 5));
@@ -434,7 +435,7 @@ test('Weixin starts a native-file download before an earlier queued turn finishe
   });
 
   const first = bridge.accept(message('weixin-prefetch-first', '先等待'));
-  await eventually(() => asks === 1);
+  await eventually(() => asks === 1, 'busy turn did not start before /batch assertion', 5_000);
   const second = bridge.accept(message('weixin-prefetch-second', '', {
     item_list: [{
       type: 4,
@@ -462,6 +463,10 @@ async function committedArtifact(t, fileName, content) {
       ],
     },
   };
+  t.after(registry.openConsumer(agent.session.header.id, 'artifact-rpc'));
+  for (const event of agent.session.events) {
+    registry.observeSessionEvent(agent.session, event);
+  }
   await writeFile(join(workspace, fileName), content);
   const tool = createOutboundArtifactTool({ registry });
   const exec = {
@@ -746,6 +751,52 @@ test('Weixin tells users to inspect the chat instead of retrying an uncertain fi
   }]);
 });
 
+test('Weixin explains that an upload timeout happened before the file was sent', async (t) => {
+  const artifact = await committedArtifact(t, 'large.zip', 'weixin-file');
+  const fixture = stateFixture();
+  fixture.sessions.set('p2p:owner-user', 'session-upload-timeout');
+  const sent = [];
+  const bridge = new WeixinHarnessBridge({
+    api: {
+      inboundImages: () => [],
+      sendText: async ({ text }) => {
+        sent.push(text);
+        return { messageId: `weixin-text-${sent.length}` };
+      },
+      sendFile: async () => {
+        throw Object.assign(new Error('private CDN URL and token'), { code: 'artifact-upload-timeout' });
+      },
+    },
+    baseUrl: 'https://ilinkai.weixin.qq.com/',
+    token: 'host-token',
+    ownerUserId: 'owner-user',
+    harness: {
+      sessionExists: async () => true,
+      ask: async (_sessionId, _text, options) => {
+        await options.onArtifact(artifact);
+        return '';
+      },
+    },
+    state: fixture.state,
+    logger: { warn() {}, error() {} },
+  });
+
+  const receipt = await bridge.accept(message('weixin-upload-timeout', '发文件'));
+  const failure = bridge.status.lastMessageError;
+  assert.match(sent.at(-1), /上传微信.*超时，文件尚未发送/);
+  assert.match(sent.at(-1), /检查网络/);
+  assert.doesNotMatch(sent.join('\n'), /private CDN URL and token/);
+  assert.equal(failure.code, 'CHANNEL_DELIVERY');
+  assert.equal(failure.reason, 'ARTIFACT_UPLOAD_TIMEOUT');
+  assert.equal(bridge.status.artifactsSent, 0);
+  assert.equal(bridge.status.artifactSendErrors, 1);
+  assert.deepEqual(receipt.artifacts, [{
+    artifactId: artifact.artifactId,
+    outcome: 'failed',
+    reason: 'artifact-upload-timeout',
+  }]);
+});
+
 test('Weixin sends image-only messages to Harness as structured content', async () => {
   const fixture = stateFixture();
   fixture.sessions.set('p2p:owner-user', 'session-image');
@@ -761,7 +812,8 @@ test('Weixin sends image-only messages to Harness as structured content', async 
     ownerUserId: 'owner-user',
     harness: {
       sessionExists: async () => true,
-      ask: async (sessionId, content) => {
+      ask: async (sessionId, content, options) => {
+        content = await loadDeferredImages(content, options);
         prompts.push({ sessionId, content });
         return '微信图片已识别';
       },
@@ -814,9 +866,9 @@ test('Weixin applies the unified access policy before attachments or Harness wor
   let imageExtractions = 0;
   const harnessCalls = [];
   const sent = [];
-  const accessPolicy = directAccessPolicy({
+  const accessPolicy = configuredAccessPolicy({
+    channel: 'weixin', config: { ownerUserId: 'owner-user' },
     users: [{ id: 'member-user', canExecuteCommands: false }],
-    privilegedIds: ['owner-user'],
   });
   const bridge = new WeixinHarnessBridge({
     api: {
@@ -884,7 +936,7 @@ test('Weixin returns a specific retry message when encrypted image loading fails
     ownerUserId: 'owner-user',
     harness: {
       sessionExists: async () => true,
-      ask: async () => assert.fail('a failed image must not reach Harness'),
+      ask: async (_sessionId, content, options) => { await loadDeferredImages(content, options); assert.fail('invalid images must not reach the model'); },
     },
     state: fixture.state,
     logger: { error() {} },
@@ -940,11 +992,14 @@ test('Weixin explains model image rejection and records only safe structured dia
     code: 'INPUT_INVALID',
     reason: 'MODEL_DOES_NOT_SUPPORT_IMAGES',
     message: '当前模型不支持图片，请用 /models 查看可用模型，再用 /model <序号> 切换后重发。',
+    details: status.lastMessageError.details,
     referenceId: status.lastMessageError.referenceId,
     at: status.lastMessageError.at,
   });
   assert.match(status.lastMessageError.referenceId, /^MF-[A-F0-9]{8}$/);
   assert.equal(Number.isFinite(status.lastMessageError.at), true);
+  assert.equal(status.lastMessageError.details.stage, 'operation');
+  assert.equal(status.lastMessageError.details.submissionState, 'unknown');
   assert.doesNotMatch(JSON.stringify(status.lastMessageError), /private|provider-token|providerDetail/);
 });
 
@@ -2256,17 +2311,20 @@ test('bridge commands are local and internal failures return a safe traceable me
   await bridge.accept(message('new', '/new'));
   assert.equal(fixture.sessions.has('p2p:owner-user'), false);
   await bridge.accept(message('failure', '触发失败'));
-  assert.match(sent.at(-1), /任务未完成，暂时无法确定原因/);
+  assert.match(sent.at(-1), /消息在提交前处理失败，尚未提交执行/);
   assert.match(sent.at(-1), /错误码：INTERNAL_UNKNOWN；参考号：MF-[A-F0-9]{8}$/);
   assert.doesNotMatch(sent.at(-1), /private path|secret|token-shaped/);
   assert.deepEqual(status.lastMessageError, {
+    details: status.lastMessageError.details,
     code: 'INTERNAL_UNKNOWN',
     reason: 'INTERNAL_UNKNOWN',
-    message: '任务未完成，暂时无法确定原因。请重试；若持续发生，请将参考号提供给管理员。',
+    message: '消息在提交前处理失败，尚未提交执行。请重试；若持续发生，请将参考号提供给管理员。',
     referenceId: status.lastMessageError.referenceId,
     at: status.lastMessageError.at,
   });
   assert.match(status.lastMessageError.referenceId, /^MF-[A-F0-9]{8}$/);
+  assert.equal(status.lastMessageError.details.stage, 'session.prepare');
+  assert.equal(status.lastMessageError.details.submissionState, 'not-submitted');
   assert.doesNotMatch(JSON.stringify(status.lastMessageError), /private path|secret|token-shaped/);
 });
 
@@ -2304,9 +2362,11 @@ test('Weixin reports a missing preset with recovery steps and the same reference
   assert.equal(sent.at(-1).endsWith(`参考号：${failure.referenceId}`), true);
   const log = logs.find(([text]) => text.includes(`[${failure.referenceId}]`));
   assert.ok(log, 'the reply reference must identify the logged failure');
-  assert.equal(log[1], error);
+  assert.equal(log[1].code, failure.code);
+  assert.equal(log[1].referenceId, failure.referenceId);
+  assert.equal(log[1].details.reason, 'unknown');
   assert.equal(error.code, 'agent-preset/not-found');
-  assert.doesNotMatch(JSON.stringify({ failure, sent }), /private|secret|removed-preset/u);
+  assert.doesNotMatch(JSON.stringify({ failure, sent, log }), /private|secret|removed-preset/u);
 });
 
 test('Weixin exposes a structured model rate limit without changing connection state', async () => {
@@ -2536,7 +2596,7 @@ test('Weixin refuses /batch while the existing conversation queue is running', a
   });
 
   const turn = bridge.accept(message('busy-turn', '正在运行'));
-  await eventually(() => asks === 1);
+  await eventually(() => asks === 1, 'busy turn did not start before /batch assertion', 5_000);
   await bridge.accept(message('busy-batch', '/batch'));
   assert.match(sent.at(-1), /正在运行的任务.*\/stop.*\/batch/s);
 
@@ -2545,3 +2605,260 @@ test('Weixin refuses /batch while the existing conversation queue is running', a
   await bridge.accept(message('busy-send', '/send'));
   assert.match(sent.at(-1), /没有待提交的批量内容/);
 });
+
+// 19-digit iLink message ids whose high bits encode a known instant, the same
+// shape and magnitude as a live id, so the fallback clock is exactly asserted.
+const SENT_AT_MESSAGE_ID = '7510231823155200000';        // 2026-09-28 15:00:00 +08:00
+const SENT_AT_LATER_MESSAGE_ID = '7510254661140480000';  // 2026-09-28 16:30:45 +08:00
+
+/**
+ * `sentAt` renders in the Host's local zone, so the expectation is derived in
+ * the zone the test runs in rather than hard-coded to UTC+8 (CI runs in UTC).
+ */
+function localStamp(ms) {
+  const date = new Date(ms);
+  const pad = (value) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+    + ` ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+/** Flatten a prompt, whether it reached `ask` as a string or as parts. */
+function promptText(content) {
+  return typeof content === 'string'
+    ? content
+    : content.map((part) => String(part.text ?? '')).join('\n');
+}
+
+test('Weixin enhancement injects the platform send time, and falls back to the message-id clock', async () => {
+  const fixture = stateFixture();
+  fixture.sessions.set('p2p:owner-user', 'session-sent-at');
+  const prompts = [];
+  // A plain text turn reaches `ask` as a string; a structured one as parts.
+  const textOf = (content) => (typeof content === 'string'
+    ? content
+    : content.map((part) => part.text ?? '').join('\n'));
+  const bridge = new WeixinHarnessBridge({
+    api: { sendText: async () => ({ messageId: 'sent-at-answer' }) },
+    baseUrl: 'https://ilinkai.weixin.qq.com/',
+    token: 'host-token',
+    ownerUserId: 'owner-user',
+    contextEnhancement: {
+      botId: 'wx_sent_at',
+      getSettings: () => ({
+        group: { enabled: false, fields: ['senderId'], guidance: '' },
+        direct: { enabled: true, fields: ['sentAt'], guidance: '' },
+      }),
+    },
+    harness: {
+      sessionExists: async () => true,
+      ask: async (_sessionId, content) => { prompts.push(content); return '已处理'; },
+    },
+    state: fixture.state,
+  });
+
+  // The platform's own field wins when the channel delivers one.
+  await bridge.accept(message(SENT_AT_MESSAGE_ID, '现在几点了？', {
+    create_time_ms: Date.parse('2026-09-28T14:03:07+08:00'),
+  }));
+  assert.equal(prompts.length, 1);
+  const first = textOf(prompts[0]);
+  const platformStamp = localStamp(Date.parse('2026-09-28T14:03:07+08:00'));
+  assert.equal(first.includes(`<dsh_im_source>{"sentAt":"${platformStamp}"}</dsh_im_source>`), true,
+    `platform send time was not injected: ${first}`);
+
+  // Without the platform field the iLink message id still yields the moment.
+  await bridge.accept(message(SENT_AT_LATER_MESSAGE_ID, '再问一次'));
+  assert.equal(prompts.length, 2);
+  const second = textOf(prompts[1]);
+  const idStamp = localStamp(Date.parse('2026-09-28T16:30:45+08:00'));
+  assert.equal(second.includes(`<dsh_im_source>{"sentAt":"${idStamp}"}</dsh_im_source>`), true,
+    `message-id clock was not used: ${second}`);
+  assert.equal(second.includes('senderId'), false, 'only the selected field may be sent');
+});
+
+test('Weixin enhancement stays off, and reads nothing, when the scope is disabled', async () => {
+  const fixture = stateFixture();
+  fixture.sessions.set('p2p:owner-user', 'session-sent-at-off');
+  let sourceReads = 0;
+  const prompts = [];
+  const bridge = new WeixinHarnessBridge({
+    api: { sendText: async () => ({ messageId: 'sent-at-off-answer' }) },
+    baseUrl: 'https://ilinkai.weixin.qq.com/',
+    token: 'host-token',
+    ownerUserId: 'owner-user',
+    contextEnhancement: {
+      botId: 'wx_sent_at_off',
+      getSettings: () => ({
+        group: { enabled: false, fields: [], guidance: '' },
+        direct: { enabled: false, fields: ['sentAt'], guidance: '' },
+      }),
+    },
+    harness: {
+      sessionExists: async () => true,
+      ask: async (_sessionId, content) => { prompts.push(content); return '已处理'; },
+    },
+    state: fixture.state,
+  });
+
+  const inbound = message(SENT_AT_MESSAGE_ID, '你好');
+  Object.defineProperty(inbound, 'create_time_ms', {
+    configurable: true,
+    get() { sourceReads += 1; return Date.now(); },
+  });
+  await bridge.accept(inbound);
+  assert.equal(prompts.length, 1);
+  assert.equal(sourceReads, 0, 'a disabled scope must not read inbound fields');
+  const content = typeof prompts[0] === 'string'
+    ? prompts[0]
+    : prompts[0].map((part) => String(part.text ?? '')).join('\n');
+  assert.equal(content.includes('dsh_im_source'), false, content);
+});
+
+/**
+ * One bridge whose inbound messages count every read of their send time. The
+ * count is compared against a bridge with no enhancement at all, so the test
+ * pins only what the enhancement itself reads.
+ */
+async function sentAtReads(contextEnhancement, texts) {
+  const fixture = stateFixture();
+  fixture.sessions.set('p2p:owner-user', 'session-sent-at-reads');
+  const prompts = [];
+  const bridge = new WeixinHarnessBridge({
+    api: { sendText: async () => ({ messageId: 'sent-at-reads-answer' }) },
+    baseUrl: 'https://ilinkai.weixin.qq.com/',
+    token: 'host-token',
+    ownerUserId: 'owner-user',
+    ...(contextEnhancement ? { contextEnhancement } : {}),
+    harness: {
+      sessionExists: async () => true,
+      ask: async (_sessionId, content) => { prompts.push(content); return '已处理'; },
+    },
+    state: fixture.state,
+  });
+  let reads = 0;
+  for (const [index, text] of texts.entries()) {
+    const inbound = message(`sent-at-reads-${index}`, text);
+    Object.defineProperty(inbound, 'create_time_ms', {
+      configurable: true,
+      get() { reads += 1; return Date.parse('2026-09-28T14:03:07+08:00'); },
+    });
+    await bridge.accept(inbound);
+  }
+  return { reads, prompts };
+}
+
+function sentAtProvider(direct) {
+  return {
+    botId: 'wx_sent_at_reads',
+    getSettings: () => ({ group: { enabled: false, fields: [], guidance: '' }, direct }),
+  };
+}
+
+test('Weixin reads the send time only when a rendered block selects sentAt', async () => {
+  const ordinary = ['你好'];
+  const commands = ['/help', '/new', '/steer 补充一句'];
+  const baseline = await sentAtReads(undefined, ordinary);
+  const commandBaseline = await sentAtReads(undefined, commands);
+
+  // Positive control: a selected field is read, exactly once per message.
+  const selected = await sentAtReads(sentAtProvider({ enabled: true, fields: ['sentAt'], guidance: '' }), ordinary);
+  assert.equal(selected.reads, baseline.reads + 1);
+  assert.match(promptText(selected.prompts[0]), /"sentAt":/);
+
+  // Another field selected: the clock stays untouched.
+  const other = await sentAtReads(sentAtProvider({ enabled: true, fields: ['senderId'], guidance: '' }), ordinary);
+  assert.equal(other.reads, baseline.reads, 'an unselected sentAt must not be read');
+  assert.doesNotMatch(promptText(other.prompts[0]), /sentAt/);
+
+  // Scope switched off.
+  const off = await sentAtReads(sentAtProvider({ enabled: false, fields: ['sentAt'], guidance: '' }), ordinary);
+  assert.equal(off.reads, baseline.reads, 'a disabled scope must not read the send time');
+
+  // Local commands never render a source block, with or without a provider.
+  const enabledCommands = await sentAtReads(
+    sentAtProvider({ enabled: true, fields: ['sentAt'], guidance: '' }), commands);
+  assert.equal(enabledCommands.reads, commandBaseline.reads, 'local commands must not read the send time');
+  const unconfiguredCommands = await sentAtReads(undefined, commands);
+  assert.equal(unconfiguredCommands.reads, commandBaseline.reads);
+});
+
+test('Weixin keeps delivering a message whose send time cannot be read', async () => {
+  const fixture = stateFixture();
+  fixture.sessions.set('p2p:owner-user', 'session-sent-at-throws');
+  const prompts = [];
+  const bridge = new WeixinHarnessBridge({
+    api: { sendText: async () => ({ messageId: 'sent-at-throws-answer' }) },
+    baseUrl: 'https://ilinkai.weixin.qq.com/',
+    token: 'host-token',
+    ownerUserId: 'owner-user',
+    contextEnhancement: sentAtProvider({ enabled: true, fields: ['senderId', 'sentAt'], guidance: '' }),
+    harness: {
+      sessionExists: async () => true,
+      ask: async (_sessionId, content) => { prompts.push(content); return '已处理'; },
+    },
+    state: fixture.state,
+  });
+  const inbound = message(SENT_AT_MESSAGE_ID, '时间读不到也要送达');
+  Object.defineProperty(inbound, 'create_time_ms', {
+    configurable: true,
+    get() { throw new Error('send time is unavailable'); },
+  });
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    await bridge.accept(inbound);
+  } finally {
+    console.warn = warn;
+  }
+  assert.equal(prompts.length, 1, 'the message itself must still be delivered');
+  const text = promptText(prompts[0]);
+  assert.match(text, /<dsh_im_source>\{"senderId":"owner-user"\}<\/dsh_im_source>/,
+    `only the unreadable field is dropped: ${text}`);
+  assert.ok(text.endsWith('时间读不到也要送达'));
+});
+
+for (const line of ['/plan', '/plan off', '/plan investigate the bug', '/goal', '/goal deliver the feature', '/goal pause', '/goal resume', '/goal clear']) {
+  test(`Weixin delegates ${line} without prompting the model`, async () => {
+    const fixture = stateFixture();
+    fixture.sessions.set('p2p:owner-user', 'session-review');
+    const calls = [];
+    const sent = [];
+    let asks = 0;
+    const bridge = new WeixinHarnessBridge({
+      api: { sendText: async request => { sent.push(request.text); return { messageId: 'reply' }; } },
+      baseUrl: 'https://ilinkai.weixin.qq.com/', token: 'test-token', ownerUserId: 'owner-user', state: fixture.state,
+      harness: {
+        workspaceSession: (id, key) => {
+          assert.equal(id, 'session-review'); assert.equal(key, 'p2p:owner-user');
+          return { executeCommand: async command => { calls.push(command); return { result: { kind: 'success', text: 'host-confirmation' } }; } };
+        },
+        ask: async () => { asks++; return 'unexpected'; },
+      },
+      logger: { warn() {}, error() {} },
+    });
+    await bridge.accept(message('delegate', line));
+    assert.deepEqual(calls, [line]);
+    assert.deepEqual(sent, ['host-confirmation']);
+    assert.equal(asks, 0);
+  });
+}
+
+for (const line of ['/plan', '/goal pause']) {
+  test(`Weixin denies ${line} for a sender without command permission`, async () => {
+    const fixture = stateFixture();
+    fixture.sessions.set('p2p:owner-user', 'session-review');
+    const { directAccessPolicy } = await import('../access-policy-fixture.mjs');
+    const sent = [];
+    let calls = 0;
+    const bridge = new WeixinHarnessBridge({
+      api: { sendText: async request => { sent.push(request.text); return { messageId: 'reply' }; } },
+      baseUrl: 'https://ilinkai.weixin.qq.com/', token: 'test-token', ownerUserId: 'different-owner', state: fixture.state,
+      accessPolicy: directAccessPolicy({ users: [{ id: 'owner-user', canExecuteCommands: false }] }),
+      harness: { executeCommand: async () => { calls++; }, ask: async () => { calls++; return 'unexpected'; } },
+      logger: { warn() {}, error() {} },
+    });
+    await bridge.accept(message('denied', line));
+    assert.equal(calls, 0);
+    assert.deepEqual(sent, [COMMAND_PERMISSION_DENIED_MESSAGE]);
+  });
+}

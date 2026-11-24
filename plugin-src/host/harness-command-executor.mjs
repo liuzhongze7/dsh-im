@@ -1,4 +1,4 @@
-import { hostPeer } from './in-process-peer.mjs';
+import { harnessPeer } from './harness-peer.mjs';
 
 /**
  * Adapt the Host's Typert command gateway to the channel Harness client.
@@ -14,13 +14,14 @@ export function createHarnessCommandExecutor(ctx, provided) {
   if (typeof gateway.invoke !== 'function') {
     throw new TypeError('dsh-im requires a callable ctx.typertGateway');
   }
-  const invoke = (request) => gateway.invoke({ ...request, peer: hostPeer(ctx) });
+  const peer = harnessPeer(ctx);
   return async (sessionId, line, options = {}) => {
     const request = {
       namespace: 'commands',
       method: 'execute',
       args: { agentId: sessionId, line, images: [] },
       signal: options.signal,
+      ...(peer === undefined ? {} : { peer }),
     };
     try {
       return await invoke(request);

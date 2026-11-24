@@ -44,7 +44,7 @@ test('Slack production has no per-bot result-file Gate', async (t) => {
   };
   const ctx = {
     credentials: {},
-    apiProxy: {},
+    typertGateway: { invoke() {}, stream() {} },
     logger: () => ({ error() {}, warn() {}, info() {}, debug() {} }),
   };
 

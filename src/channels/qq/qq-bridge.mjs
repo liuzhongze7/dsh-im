@@ -1,6 +1,12 @@
+import { captureGroupHistory } from '../shared/group-history.mjs';
+import { SESSION_NAV_HELP_LINES } from '../shared/command-catalog.mjs';
+import { BusyMessageDispatcher, canAutomaticallySteer } from '../shared/busy-message-dispatcher.mjs';
+import { isPermissionCommand, runPermissionCommand } from '../shared/permission-command.mjs';
 import { createDeferredDeliveryCoordinator, deferredOutcomeText } from '../shared/deferred-delivery-coordinator.mjs';
 import { runWorkspaceCommand } from '../shared/workspace-command.mjs';
 import { runCompactCommand } from '../shared/compact-command.mjs';
+import { isClearCommand, runClearCommand } from '../shared/clear-command.mjs';
+import { isResetCommand, runResetCommand } from '../shared/reset-command.mjs';
 import { isHistoryCommand, runHistoryCommand } from '../shared/history-command.mjs';
 import {
   isControlCommand,
@@ -22,7 +28,16 @@ import {
   runPresetCommand,
 } from '../shared/preset-command.mjs';
 import { askInWorkspaceSession } from '../shared/workspace-session.mjs';
-import { captureContextEnhancement, enhanceContextContent } from '../shared/context-enhancement.mjs';
+import {
+  isSessionNavCommand,
+  runSessionNavTextCommand,
+} from '../shared/session-nav-command.mjs';
+import { createConversationSession, isNewCommand, newCommandTitle } from '../shared/new-command.mjs';
+import {
+  captureContextEnhancement,
+  captureContextEnhancementSource,
+  enhanceContextContent,
+} from '../shared/context-enhancement.mjs';
 import {
   BatchInputManager,
   batchInputBusyMessage,
@@ -53,6 +68,7 @@ import {
   providerMessageIdsFor,
 } from '../shared/semantic/delivery.mjs';
 import {
+  messageFailureDiagnostic,
   channelDeliveryFailure,
   clearLastMessageFailure,
   messageFailureText,
@@ -62,6 +78,7 @@ import {
   COMMAND_PERMISSION_DENIED_MESSAGE,
   evaluateInboundAccess,
 } from '../shared/inbound-access.mjs';
+import { ApiError } from '@tencent-connect/qqbot-nodejs';
 import { sendMarkdownReply } from './markdown-reply.mjs';
 import {
   isQqMenuCommand, parseQqMenuCommand, QqMenuStore,
@@ -69,6 +86,7 @@ import {
 } from './qq-menu.mjs';
 import { withSessionBindingLock } from '../shared/session-binding-lock.mjs';
 import { t } from '../shared/i18n.mjs';
+import { isQqMessageAddressed, normalizeQqMentions } from './qq-mention.mjs';
 
 function interactionResolvedText() {
   return t('这个问题已在其他客户端处理，无需再次回答。');
@@ -86,6 +104,13 @@ export const QQ_IMAGE_HOSTS = Object.freeze([
 
 const QQ_IMAGE_FILENAME = /\.(?:gif|jpe?g|png|webp)$/i;
 
+/** Durable queue-entry id; the conversation key keeps ids unique across chats. */
+function pendingMessageId(key, messageId) {
+  return `${key}\u0000${messageId}`;
+}
+
+const PENDING_RESTART_NOTICE = '排队中的消息在服务重启时被中断。为避免重复执行，未自动重放；如果该消息尚未处理，请重新发送。';
+
 function helpText() {
   return [
     t('QQ 机器人已连接 DeepSeek Harness。'),
@@ -94,13 +119,16 @@ function helpText() {
     t('/menu 或 /m  打开可点击的功能菜单'),
     t('/new  开启一个全新会话'),
     t('/compact  压缩当前会话的较早上下文'),
+    t('/clear  清空当前会话上下文（保留 Session 绑定和历史记录）'),
     t('/history [数量]  查看最近历史消息（默认 3 条，最多 5 条）'),
     t('/workspace 工作区序号或绝对路径  切换工作区'),
     t('/workspacelist  列出工作区绝对路径'),
     t('/ws、/wsl、/workspaces  工作区命令别名'),
     t('/sessionlist 或 /sessions [工作区序号或绝对路径]  列出会话 ID 和标题'),
+    t('/sessionlist --all  跨工作区汇总会话（每个工作区默认显示 10 个，可用 --limit N 调整）'),
     t('/sessionlist --limit N  仅列出当前工作区前 N 个会话'),
-    t('/session Session ID 或当前工作区序号  将当前聊天绑定到指定会话'),
+    t('/session Session ID、当前工作区序号或标题关键词  将当前聊天绑定到指定会话'),
+    ...SESSION_NAV_HELP_LINES.map((line) => t(line)),
     t('/models  按序号列出所有可用模型'),
     t('/reasoninglist 或 /reasonings  按序号列出当前模型可用推理等级'),
     t('/reasoning [序号、等级ID或 --default]  查看或切换当前推理等级'),
@@ -110,6 +138,9 @@ function helpText() {
     t('/preset [序号或完整ID]  查看或设置当前机器人 Agent Preset'),
     t('纯数字 ID：/preset id:<ID>'),
     t('/preset --default  跟随 Host 默认'),
+    t('/permissionlist  按序号列出权限档位'),
+    t('/permission [序号或完整ID]  查看或切换当前会话权限'),
+    t('纯数字 ID：/permission id:<ID>'),
     t('/stop  停止当前任务'),
     t('/steer 补充指令  纠偏当前任务'),
     t('/batch  开始批量输入（仅私聊，最多 10 条文字）'),
@@ -246,6 +277,28 @@ export function qqInboundMessage(message, { fetchImpl = fetch } = {}) {
     files,
     ...(replyTo ? { replyTo } : {}),
   };
+}
+
+// QQ accepts passive replies to an inbound msg_id for a bounded window
+// (C2C 60 min, group 5 min). Proactive C2C/group sends are quota-limited and
+// are often refused, so a late result keeps the passive route while the
+// window is still open and only falls back to proactive delivery after it.
+const PASSIVE_REPLY_WINDOW_MS = Object.freeze({ c2c: 60 * 60_000, group: 5 * 60_000 });
+const PASSIVE_REPLY_MARGIN_MS = 30_000;
+
+function deferredQqTarget(message, target, acceptedAt) {
+  const route = { scope: target.scope, targetId: target.targetId };
+  const msgId = nonEmptyString(target.msgId);
+  if (!msgId || !PASSIVE_REPLY_WINDOW_MS[target.scope]) return route;
+  const sentAt = Date.parse(message?.timestamp ?? '');
+  return { ...route, msgId, receivedAt: Number.isFinite(sentAt) ? Math.min(sentAt, acceptedAt) : acceptedAt };
+}
+
+export function deferredDeliveryTarget(target, now = Date.now()) {
+  const route = { scope: target?.scope, targetId: target?.targetId };
+  const window = PASSIVE_REPLY_WINDOW_MS[target?.scope];
+  if (!nonEmptyString(target?.msgId) || !window || !Number.isFinite(target?.receivedAt)) return route;
+  return now - target.receivedAt < window - PASSIVE_REPLY_MARGIN_MS ? { ...route, msgId: target.msgId } : route;
 }
 
 function nonEmptyString(value) {
@@ -399,7 +452,7 @@ async function sendQqFile(
 function canClaimInteractionReply(message, pending) {
   return pending.questions[pending.index]
     && nonEmptyString(message?.senderId) === pending.actor
-    && (message.kind !== 'group' || message.rawEventType === 'GROUP_AT_MESSAGE_CREATE')
+    && isQqMessageAddressed(message)
     && !hasQqImageAttachments(message)
     && !hasQqFileAttachments(message)
     && nonEmptyString(safeText(message));
@@ -427,6 +480,7 @@ export class QqHarnessBridge {
   #state;
   #deferred;
   #contextEnhancement;
+  #groupHistory;
   #accessPolicy;
   #status;
   #logger;
@@ -435,6 +489,9 @@ export class QqHarnessBridge {
   #fetchImpl;
   #fileUploadTimeoutMs;
   #queues = new Map();
+  // Crash-recovery for #queues, started with the bridge; see recoverPendingMessages().
+  #pendingRecovery = null;
+  #busyMessages = new BusyMessageDispatcher();
   #pendingInteractions = new Map();
   #interactionKeys = new Map();
   // Keep the accepted configuration through the existing queue/reply lifecycle.
@@ -452,6 +509,7 @@ export class QqHarnessBridge {
     harness,
     state,
     contextEnhancement,
+    groupHistory,
     accessPolicy,
     status = createQqBridgeStatus(),
     logger = console,
@@ -472,17 +530,23 @@ export class QqHarnessBridge {
     this.#harness = harness;
     this.#state = state;
     this.#contextEnhancement = contextEnhancement;
+    this.#groupHistory = groupHistory;
     this.#accessPolicy = accessPolicy;
     this.#status = status;
     this.#logger = logger;
     this.#replyTimeoutMs = replyTimeoutMs;
     this.#signal = signal;
     this.#deferred = createDeferredDeliveryCoordinator({ harness, state, signal, logger,
+      finalAnswerOnly: true,
       deliver: (entry, outcome) => this.#deliverDeferredOutcome(entry, outcome),
     });
     this.#fetchImpl = fetchImpl;
     this.#fileUploadTimeoutMs = Math.min(fileUploadTimeoutMs, DEFAULT_FILE_UPLOAD_TIMEOUT_MS);
     this.#approvals = new HarnessApprovalQueue({ label: 'qq', logger });
+    // A queued message lives only in #queues. If the process dies before its
+    // turn runs the user has already been told it is queued, so the persisted
+    // entry must be replayed or reported as soon as the bridge starts.
+    this.recoverPendingMessages();
   }
 
   get status() {
@@ -490,6 +554,20 @@ export class QqHarnessBridge {
   }
 
   accept(message) {
+    if (!this.#groupHistory || message?.kind !== 'group') return this.#accept(message);
+    const normalized = { ...qqInboundMessage(message, { fetchImpl: this.#fetchImpl }), kind: 'group',
+      senderId: message.senderId, senderIsBot: message.senderIsBot, addressed: isQqMessageAddressed(message) };
+    return captureGroupHistory(this.#groupHistory, normalized, {
+      channel: 'qq', scope: `app:${this.#bot.appId}`, groupId: message.groupOpenid,
+      messageId: message.messageId, sentAt: message.timestamp, senderName: message.senderName,
+      text: message.raw?.content ?? message.content ?? '',
+      type: message.attachments?.length ? 'file' : 'text',
+      capability: '仅保存实际投递的消息；未 @ 能力及跨应用群身份尚需验证，当前按应用来源隔离。',
+    }, { logger: this.#logger })
+      .then(() => { message.groupHistory = normalized.groupHistory; return this.#accept(message); });
+  }
+
+  #accept(message) {
     if (this.#signal?.aborted) return Promise.resolve();
     const messageId = nonEmptyString(message?.messageId);
     const sender = nonEmptyString(message?.senderId);
@@ -497,9 +575,9 @@ export class QqHarnessBridge {
       || !['c2c', 'group'].includes(message?.kind)
       || this.#state.hasSeen(messageId)
       || this.#acceptedMessageIds.has(messageId)) return Promise.resolve();
+    message = normalizeQqMentions(message, new Set([this.#bot.appId]));
     const key = conversationKey(message);
-    const addressed = message.kind !== 'group'
-      || message.rawEventType === 'GROUP_AT_MESSAGE_CREATE';
+    const addressed = isQqMessageAddressed(message);
     const commandText = safeText(message);
     const menuTextOnly = !hasQqImageAttachments(message) && !hasQqFileAttachments(message)
       && !qqReplyReference(message);
@@ -518,7 +596,7 @@ export class QqHarnessBridge {
             text: commandText,
             hasImages: hasQqImageAttachments(message),
             hasFiles: hasQqFileAttachments(message),
-            ...(explicitMenu || numericMenu ? { isCommand: true } : {}),
+            ...(explicitMenu || numericMenu || isPermissionCommand(commandText) ? { isCommand: true } : {}),
           })
         : senderAllowed(message, this.#ownerUserOpenid)
           ? { allowed: true, reason: 'legacy-owner' }
@@ -570,7 +648,14 @@ export class QqHarnessBridge {
       if (result.handled) {
         if (result.kind === 'submit') {
           return this.#enqueueMessage(
-            { ...message, content: result.prompt, attachments: [] },
+            {
+              ...message,
+              content: result.prompt,
+              // The submission is exactly the collected text: the command
+              // message's own attachments and quoted message are not part of it.
+              attachments: [],
+              refMsgIdx: undefined,
+            },
             messageId,
             key,
             { batchSubmission: result },
@@ -581,7 +666,10 @@ export class QqHarnessBridge {
     }
     const commandRunner = explicitMenu || numericMenu
       ? () => this.#runMenuCommand(message, menuInput, key)
+      : isClearCommand(commandText) ? runClearCommand
+      : isResetCommand(commandText) ? runResetCommand
       : isHistoryCommand(commandText) ? runHistoryCommand
+      : isPermissionCommand(commandText) ? runPermissionCommand
       : hasQqFileAttachments(message) ? null : isControlCommand(commandText)
       ? runControlCommand
       : (isModelCommand(commandText)
@@ -601,7 +689,7 @@ export class QqHarnessBridge {
         const failure = setLastMessageFailure(this.#status, error);
         this.#logger.error?.(
           `[dsh-im:qq] failed to process a command [${failure.referenceId}]:`,
-          error,
+          messageFailureDiagnostic(error, failure),
         );
         return this.#bot.sendText(message.replyTarget, messageFailureText(failure))
           .catch(() => undefined);
@@ -617,7 +705,7 @@ export class QqHarnessBridge {
       actor: sender,
       messageId,
       text: hasQqImageAttachments(message) || hasQqFileAttachments(message) ? '' : safeText(message),
-      addressed: message.kind !== 'group' || message.rawEventType === 'GROUP_AT_MESSAGE_CREATE',
+      addressed,
       hasPendingQuestion: Boolean(pending),
       questionCompletion: pending?.submitting || pending?.claimedReplyMessageId
         ? pending.queue
@@ -664,7 +752,25 @@ export class QqHarnessBridge {
       pending.queue = current;
       return current;
     }
-    return this.#enqueueMessage(message, messageId, key);
+    return this.#busyMessages.dispatch({
+      key, messageId, text: commandText,
+      eligible: () => addressed && menuTextOnly && !explicitMenu && !numericMenu
+        && canAutomaticallySteer(this.#accessPolicy, message.kind === 'c2c' ? 'direct' : 'group', sender),
+      harness: this.#harness, state: this.#state, status: this.#status,
+      signal: this.#signal, control: { owner: this, key }, logger: this.#logger,
+      acceptedMessageIds: this.#acceptedMessageIds,
+      pendingInteraction: () => this.#pendingInteractions.has(key) || this.#approvals.hasPending(key),
+      enhancement: {
+        snapshot: this.#acceptedMessageIds.get(messageId),
+        source: () => ({ channel: 'qq', senderId: sender,
+          senderName: message.kind === 'group' ? message.senderName : undefined,
+          chatId: message.kind === 'group' ? message.groupOpenid : sender }),
+      },
+      isQueued: () => this.#queues.has(key),
+      enqueue: (options) => this.#enqueueMessage(message, messageId, key, options),
+      send: (reply) => addressed ? this.#bot.sendText(message.replyTarget, reply) : Promise.resolve(),
+      onError: (error) => this.#handleInteractionFailure(message, messageId, error),
+    });
   }
 
   #enqueueMessage(message, messageId, key, {
@@ -672,8 +778,10 @@ export class QqHarnessBridge {
     alreadyRecorded = false,
     batchSubmission = null,
   } = {}) {
-    const addressed = message.kind !== 'group'
-      || message.rawEventType === 'GROUP_AT_MESSAGE_CREATE';
+    // Persist before the message joins the in-memory chain: the chain may wait
+    // behind a long turn, and a restart in that window must not lose the input.
+    const pending = this.#recordPendingMessage(message, messageId, key);
+    const addressed = isQqMessageAddressed(message);
     const preparedMessage = addressed
       ? prefetchInboundFiles(
           qqInboundMessage(message, { fetchImpl: this.#fetchImpl }),
@@ -683,26 +791,168 @@ export class QqHarnessBridge {
     const previous = this.#queues.get(key) ?? Promise.resolve();
     const current = previous
       .catch(() => undefined)
+      .then(() => pending)
       .then(() => this.#process(message, key, {
         alreadyRecorded,
         preparedMessage,
         batchSubmission,
       }))
-      .finally(() => {
+      .finally(async () => {
         if (releaseMessageId) this.#acceptedMessageIds.delete(messageId);
         if (this.#queues.get(key) === current) this.#queues.delete(key);
+        await this.#removePendingMessage(pendingMessageId(key, messageId));
       });
     this.#queues.set(key, current);
     return current;
   }
 
+  /**
+   * Replay (submitted: false) or report (submitted: true) the messages this
+   * bridge persisted before a restart. Idempotent: each entry is removed as it
+   * is handled, and the returned promise is shared with waitForIdle().
+   */
+  recoverPendingMessages() {
+    this.#pendingRecovery ??= this.#recoverPendingMessages().catch((error) => {
+      this.#logger.warn?.('[dsh-im:qq] queued-message recovery failed:', error?.message ?? error);
+    });
+    return this.#pendingRecovery;
+  }
+
+  async #recoverPendingMessages() {
+    if (typeof this.#state?.pendingMessages !== 'function') return;
+    const entries = this.#state.pendingMessages();
+    if (!Array.isArray(entries) || entries.length === 0) return;
+    for (const entry of entries) {
+      if (!entry || this.#signal?.aborted) return;
+      try {
+        if (entry.submitted === true) {
+          await this.#notifyInterruptedPending(entry);
+          await this.#removePendingMessage(entry.id);
+          continue;
+        }
+        this.#logger.warn?.(
+          '[dsh-im:qq] replaying a queued message that a restart interrupted:',
+          entry.messageId,
+        );
+        // The turn never reached Harness, so any earlier mark-seen is an
+        // attempt, not a completed delivery; clear it so the replay can run.
+        if (typeof this.#state.unmarkSeen === 'function') {
+          await this.#state.unmarkSeen(entry.messageId).catch(() => undefined);
+        }
+        await this.#replayPendingMessage(entry);
+      } catch (error) {
+        this.#logger.warn?.(
+          '[dsh-im:qq] failed to recover a queued message:',
+          entry?.messageId,
+          error?.message ?? error,
+        );
+      }
+    }
+  }
+
+  #recordPendingMessage(message, messageId, key) {
+    if (typeof this.#state?.putPendingMessage !== 'function') return Promise.resolve();
+    const text = safeText(message);
+    if (!text) return Promise.resolve();
+    const senderId = nonEmptyString(message.senderId);
+    const entry = {
+      id: pendingMessageId(key, messageId),
+      key,
+      messageId,
+      kind: message.kind === 'group' ? 'group' : 'c2c',
+      text,
+      submitted: false,
+      createdAt: new Date().toISOString(),
+      ...(senderId ? { senderId } : {}),
+      ...(message.replyTarget !== undefined ? { target: message.replyTarget } : {}),
+    };
+    return this.#state.putPendingMessage(entry).catch((error) => {
+      this.#logger.warn?.('[dsh-im:qq] failed to persist a queued message:', error?.message ?? error);
+    });
+  }
+
+  async #markPendingSubmitted(key, messageId) {
+    if (typeof this.#state?.patchPendingMessage !== 'function') return;
+    await this.#state.patchPendingMessage(pendingMessageId(key, messageId), { submitted: true });
+  }
+
+  async #removePendingMessage(id) {
+    if (typeof this.#state?.removePendingMessage !== 'function') return;
+    try {
+      await this.#state.removePendingMessage(id);
+    } catch (error) {
+      this.#logger.warn?.('[dsh-im:qq] failed to clear a queued-message entry:', error?.message ?? error);
+    }
+  }
+
+  #replayPendingMessage(entry) {
+    const message = this.#pendingReplayMessage(entry);
+    if (!message) return Promise.resolve();
+    return this.#enqueueMessage(message, entry.messageId, entry.key);
+  }
+
+  #pendingReplayMessage(entry) {
+    const separator = String(entry.key).indexOf(':');
+    if (separator < 0) return null;
+    const kind = entry.key.slice(0, separator) === 'group' ? 'group' : 'c2c';
+    const conversationId = entry.key.slice(separator + 1);
+    if (!conversationId || !entry.messageId) return null;
+    // Rebuild exactly the turn fields the queue path reads, so the recovered
+    // text is dispatched as the user's own message with no added framing.
+    return {
+      kind,
+      rawEventType: kind === 'group' ? 'GROUP_AT_MESSAGE_CREATE' : 'C2C_MESSAGE_CREATE',
+      senderId: entry.senderId ?? '',
+      messageId: entry.messageId,
+      content: entry.text,
+      ...(kind === 'group' ? { groupOpenid: conversationId } : {}),
+      ...(entry.target !== undefined ? { replyTarget: entry.target } : {}),
+    };
+  }
+
+  async #notifyInterruptedPending(entry) {
+    if (entry.target === undefined || entry.target === null) {
+      this.#logger.warn?.(
+        '[dsh-im:qq] a queued message was interrupted by a restart but has no delivery target:',
+        entry.messageId,
+      );
+      return;
+    }
+    try {
+      await this.#bot.sendText(entry.target, t(PENDING_RESTART_NOTICE));
+    } catch (error) {
+      this.#logger.warn?.(
+        '[dsh-im:qq] failed to report an interrupted queued message:',
+        error?.message ?? error,
+      );
+    }
+  }
+
   async #deliverDeferredOutcome(entry, outcome) {
-    await sendMarkdownReply(this.#bot, entry.target, deferredOutcomeText(outcome), { logger: this.#logger });
+    const text = deferredOutcomeText(outcome);
+    const target = deferredDeliveryTarget(entry.target);
+    if (!target.msgId) {
+      await sendMarkdownReply(this.#bot, target, text, { logger: this.#logger });
+      return true;
+    }
+    try {
+      // The timeout notice already answered this msg_id once.
+      await sendMarkdownReply(this.#bot, target, text, { logger: this.#logger, passiveRepliesUsed: 1 });
+    } catch (error) {
+      // Nothing was sent and QQ definitely refused the passive reply (window
+      // closed early or budget spent), so the proactive route cannot duplicate it.
+      if (!(error instanceof ApiError) || !(error.httpStatus >= 400 && error.httpStatus < 500)) throw error;
+      this.#logger.warn?.('[dsh-im:qq] passive deferred reply was refused; retrying proactively:', error);
+      await sendMarkdownReply(this.#bot, { scope: target.scope, targetId: target.targetId }, text, { logger: this.#logger });
+    }
     return true;
   }
 
   #menuContext(key) {
-    return { workspace: this.#harness.currentWorkspace?.(), sessionId: this.#state.sessionFor(key) };
+    const workspace = this.#harness.currentWorkspace?.();
+    const sessionWorkspace = typeof this.#harness.currentConversationWorkspace === 'function'
+      ? this.#harness.currentConversationWorkspace(key) : workspace;
+    return { workspace, sessionWorkspace, sessionId: this.#state.sessionFor(key) };
   }
 
   async #showMenu(message, key, name, pageView = null) {
@@ -716,7 +966,8 @@ export class QqHarnessBridge {
     this.#signal?.throwIfAborted();
     this.#harness.assertWorkspaceScope?.();
     const current = this.#menuContext(key);
-    if (current.workspace !== context.workspace || current.sessionId !== context.sessionId) {
+    if (current.workspace !== context.workspace || current.sessionWorkspace !== context.sessionWorkspace
+      || current.sessionId !== context.sessionId) {
       return { message: t('会话或工作区已变化，请重新发送 /m。') };
     }
     if (!this.#menus.publish(key, actor, entry, view)) return { messages: [] };
@@ -743,17 +994,29 @@ export class QqHarnessBridge {
     const pendingInteraction = this.#pendingInteractions.has(key) || this.#approvals.hasPending(key);
     const isBusy = () => this.#queues.has(key) || this.#pendingInteractions.has(key)
       || this.#approvals.hasPending(key) || this.#batchInputs.status(key).phase !== 'idle';
-    const needsIdle = /^\/(?:new|session|workspace|compact)(?:\s|$)/u.test(command);
+    const needsIdle = /^\/(?:new|session|workspace|compact|clear)(?:\s|$)/u.test(command);
     if (isBusy() && needsIdle) {
       return { message: t('当前任务仍在运行，请先停止任务或等待任务完成后再执行此操作。') };
     }
     const options = { signal: this.#signal, isDirect: message.kind === 'c2c', pendingInteraction,
-      control: { owner: this, key }, deferredDelivery: this.#deferred };
+      control: { owner: this, key }, deferredDelivery: this.#deferred,
+      enhancement: captureContextEnhancementSource(
+        this.#contextEnhancement,
+        message.kind === 'c2c' ? 'direct' : 'group',
+        () => ({
+          channel: 'qq',
+          senderId: nonEmptyString(message.senderId),
+          senderName: message.kind === 'group' ? message.senderName : undefined,
+          chatId: message.kind === 'group' ? message.groupOpenid : message.senderId,
+        }),
+      ) };
     // Existing runners own all Host mutations and control authorization.
     const execute = async () => {
       this.#signal?.throwIfAborted();
       const current = this.#menuContext(key);
-      if (current.workspace !== choice.context.workspace || current.sessionId !== choice.context.sessionId) {
+      if (current.workspace !== choice.context.workspace
+        || current.sessionWorkspace !== choice.context.sessionWorkspace
+        || current.sessionId !== choice.context.sessionId) {
         return { message: t('会话或工作区已变化，请重新发送 /m。') };
       }
       // A prompt may have started while this action waited for a prior menu command.
@@ -764,12 +1027,16 @@ export class QqHarnessBridge {
       if (command === '/new') return withSessionBindingLock(this.#state, key, async () => {
         if (isBusy()) return { message: t('当前任务仍在运行，请先停止任务或等待任务完成后再执行此操作。') };
         const locked = this.#menuContext(key);
-        if (locked.workspace !== choice.context.workspace || locked.sessionId !== choice.context.sessionId) {
+        if (locked.workspace !== choice.context.workspace
+          || locked.sessionWorkspace !== choice.context.sessionWorkspace
+          || locked.sessionId !== choice.context.sessionId) {
           return { message: t('会话或工作区已变化，请重新发送 /m。') };
         }
-        await this.#state.clearSession(key);
-        return { message: t('已开启新会话。请发送你的问题。') };
+        const created = await createConversationSession({ state: this.#state, harness: this.#harness, key });
+        return { message: created.failed ? t('暂时无法创建新会话，请稍后重试。') : t('已开启新会话。请发送你的问题。') };
       });
+      if (isClearCommand(command)) return runClearCommand(command, this.#harness, this.#state, key, options);
+      if (isResetCommand(command)) return runResetCommand(command, this.#harness, this.#state, key, options);
       if (command === '/compact') return runCompactCommand(command, this.#harness, this.#state, key, options);
       return runWorkspaceCommand(command, this.#harness, key);
     };
@@ -783,6 +1050,8 @@ export class QqHarnessBridge {
   }
 
   async waitForIdle() {
+    await this.#pendingRecovery;
+    await this.#busyMessages.whenIdle();
     await Promise.allSettled([
       ...this.#queues.values(),
       ...[...this.#pendingInteractions.values()].flatMap((pending) => (
@@ -807,8 +1076,19 @@ export class QqHarnessBridge {
       hasFiles: hasQqFileAttachments(message),
       pendingInteraction: this.#pendingInteractions.has(key)
         || this.#approvals.hasPending(key),
+      busy: this.#queues.has(key),
       control: { owner: this, key },
       deferredDelivery: this.#deferred,
+      enhancement: captureContextEnhancementSource(
+        this.#contextEnhancement,
+        message.kind === 'c2c' ? 'direct' : 'group',
+        () => ({
+          channel: 'qq',
+          senderId: nonEmptyString(message.senderId),
+          senderName: message.kind === 'group' ? message.senderName : undefined,
+          chatId: message.kind === 'group' ? message.groupOpenid : message.senderId,
+        }),
+      ),
     });
     if (result?.stopped) {
       await Promise.allSettled([
@@ -837,7 +1117,7 @@ export class QqHarnessBridge {
       const failure = setLastMessageFailure(this.#status, error);
       this.#logger.error?.(
         `[dsh-im:qq] failed to process a batch input message [${failure.referenceId}]:`,
-        error,
+        messageFailureDiagnostic(error, failure),
       );
       await this.#bot.sendText(message.replyTarget, messageFailureText(failure))
         .catch(() => undefined);
@@ -924,6 +1204,7 @@ export class QqHarnessBridge {
     batchSubmission = null,
   } = {}) {
     if (this.#signal?.aborted) return;
+    const acceptedAt = Date.now();
     const messageId = nonEmptyString(message?.messageId);
     const sender = nonEmptyString(message?.senderId);
     if (!messageId || !sender || message.senderIsBot === true) return;
@@ -939,7 +1220,7 @@ export class QqHarnessBridge {
       await this.#state.markSeen(messageId);
       messageRecorded = true;
     };
-    if (message.kind === 'group' && message.rawEventType !== 'GROUP_AT_MESSAGE_CREATE') return;
+    if (!isQqMessageAddressed(message)) return;
 
     const target = message.replyTarget;
     const promptMessage = preparedMessage
@@ -968,9 +1249,56 @@ export class QqHarnessBridge {
         await markMessageSeen();
         return;
       }
-      if (!hasImages && !hasFiles && command === '/new') {
-        await this.#state.clearSession(key);
-        await this.#bot.sendText(target, t('已开启新会话。请发送你的问题。'));
+      if (!hasImages && !hasFiles && isNewCommand(text)) {
+        const created = await createConversationSession({ state: this.#state, harness: this.#harness, key, title: newCommandTitle(text) });
+        await this.#bot.sendText(target, created.failed ? t('暂时无法创建新会话，请稍后重试。') : t('已开启新会话。请发送你的问题。'));
+        await markMessageSeen();
+        return;
+      }
+      if (!hasImages && !hasFiles && isSessionNavCommand(text)) {
+        const nav = await runSessionNavTextCommand(text, this.#harness, this.#state, key, {
+          signal: this.#signal,
+        });
+        if (nav) {
+          for (const reply of nav.messages ?? [nav.message]) {
+            await this.#bot.sendText(target, reply);
+          }
+          if (nav.askText) {
+            const followUp = this.#enqueueMessage(
+              { ...message, content: nav.askText, attachments: [] },
+              `${messageId}-ask`,
+              key,
+            );
+            followUp.catch((error) => {
+              this.#logger.warn?.(`[dsh-im:qq] follow-up ask after a nav command failed:`, error?.message ?? error);
+              this.#bot.sendText(target, t('切换后的提问发送失败，请重试。')).catch(() => undefined);
+            });
+          }
+        }
+        await markMessageSeen();
+        return;
+      }
+      const clearCommand = await runClearCommand(text, this.#harness, this.#state, key, {
+        signal: this.#signal,
+        hasImages,
+        hasFiles,
+        pendingInteraction: this.#pendingInteractions.has(key) || this.#approvals.hasPending(key),
+        busy: this.#queues.has(key),
+      });
+      if (clearCommand) {
+        await this.#bot.sendText(target, clearCommand.message);
+        await markMessageSeen();
+        return;
+      }
+      const resetCommand = await runResetCommand(text, this.#harness, this.#state, key, {
+        signal: this.#signal,
+        hasImages,
+        hasFiles,
+        pendingInteraction: this.#pendingInteractions.has(key) || this.#approvals.hasPending(key),
+        busy: this.#queues.has(key),
+      });
+      if (resetCommand) {
+        await this.#bot.sendText(target, resetCommand.message);
         await markMessageSeen();
         return;
       }
@@ -1000,7 +1328,7 @@ export class QqHarnessBridge {
       }
 
       let content = hasImages || hasReply
-        ? await promptContentForInboundMessage(promptMessage, { signal: this.#signal })
+        ? await promptContentForInboundMessage(promptMessage, { signal: this.#signal, deferImages: true })
         : undefined;
       const snapshot = this.#acceptedMessageIds.get(messageId);
       let contextEnhanced = false;
@@ -1020,24 +1348,43 @@ export class QqHarnessBridge {
       let answer;
       let artifacts = [];
       try {
+        try {
+          await this.#state.rememberAuthor?.(key, {
+            senderId: sender,
+            senderName: message.kind === 'group' ? message.senderName : undefined,
+            isBot: message.senderIsBot === true,
+          });
+        } catch (error) {
+          this.#logger.warn?.('[dsh-im:qq] unable to remember the conversation author:', error?.message ?? error);
+        }
         // Persist consumption before handing the prompt to Harness. Provider
         // redelivery after a failed error notice must never execute it twice.
         await markMessageSeen();
+        // The prompt is about to enter the Harness inbox, which is itself
+        // durable. Marking the entry submitted first means a crash after this
+        // point reports the message instead of replaying a turn the Harness may
+        // already own.
+        await this.#markPendingSubmitted(key, messageId);
         ({ answer, artifacts = [] } = await askInWorkspaceSession({
-          deferredDelivery: () => ({ coordinator: this.#deferred, target: { scope: target.scope, targetId: target.targetId } }),
+          onNotice: (notice) => this.#bot.sendText(target, notice),
+          deferredDelivery: () => ({ coordinator: this.#deferred, target: deferredQqTarget(message, target, acceptedAt) }),
           harness: this.#harness,
           state: this.#state,
           key,
           text,
           content,
+          titleText: batchSubmission?.title,
+          sourceGuidance: snapshot?.config?.guidance,
           contextEnhanced,
           createOptions: { signal: this.#signal },
           existsOptions: { signal: this.#signal },
           askOptions: {
+            groupHistory: message.groupHistory,
             timeoutMs: this.#replyTimeoutMs,
             signal: this.#signal,
             control: { owner: this, key },
             progressMode: 'all',
+            finalAnswerOnly: true,
             onUpdate: (update) => {
               if (update.error) {
                 const name = (nonEmptyString(update.toolName) ?? t('工具'))
@@ -1057,6 +1404,7 @@ export class QqHarnessBridge {
             }),
             onInteractionResolved: (resolution) => this.#handleInteractionResolved(resolution),
             files: promptMessage.files,
+            images: promptMessage.images,
           },
         }));
         if (batchSubmission) {
@@ -1167,7 +1515,7 @@ export class QqHarnessBridge {
       });
       this.#logger.error?.(
         `[dsh-im:qq] failed to process an inbound message [${failure.referenceId}]:`,
-        error,
+        messageFailureDiagnostic(error, failure),
       );
       try {
         const errorMessage = messageFailureText(failure);
@@ -1197,7 +1545,7 @@ export class QqHarnessBridge {
     this.#status.messagesReceived += 1;
     this.#status.lastMessageAt = new Date().toISOString();
 
-    if (message.kind === 'group' && message.rawEventType !== 'GROUP_AT_MESSAGE_CREATE') return;
+    if (!isQqMessageAddressed(message)) return;
     const text = nonEmptyString(safeText(message));
     if (!text || hasQqImageAttachments(message) || hasQqFileAttachments(message)) {
       await this.#bot.sendText(message.replyTarget, t('请用文字回答当前问题。'));
@@ -1285,6 +1633,12 @@ export class QqHarnessBridge {
       await this.#bot.sendText(pending.target, t('回答提交失败，请重新发送当前问题的答案。'))
         .catch(() => undefined);
     }
+  }
+
+  async presentSessionSyncApproval(interaction, context, options = {}) {
+    return this.#approvals.handleSessionSyncRequested(interaction, context, {
+      ...options, runtimeSignal: this.#signal, accessPolicy: this.#accessPolicy,
+    });
   }
 
   async #handleInteraction(interaction, {
@@ -1453,7 +1807,7 @@ export class QqHarnessBridge {
     const failure = setLastMessageFailure(this.#status, error);
     this.#logger.error?.(
       `[dsh-im:qq] failed to process an interaction reply [${failure.referenceId}]:`,
-      error,
+      messageFailureDiagnostic(error, failure),
     );
     if (!this.#state.hasSeen(messageId)) {
       await this.#state.markSeen(messageId).catch(() => undefined);

@@ -1,6 +1,10 @@
 import { registerManagementRpc } from '../management-rpc.mjs';
 import { normalizeInboundTtlHours } from '../../src/channels/shared/inbound-ttl.mjs';
 import { getInboundTtlRuntime } from './inbound-ttl-runtime.mjs';
+import { getImageInputSettingsStore } from '../../src/channels/shared/image-input-settings-store.mjs';
+import { createImageInputRpcHandler, IMAGE_INPUT_ENDPOINTS } from './image-input-rpc.mjs';
+import { getGroupHistoryStore } from './group-history-runtime.mjs';
+import { createGroupHistoryRpcHandler, GROUP_HISTORY_ENDPOINTS } from './group-history-rpc.mjs';
 
 export const INBOUND_TTL_RPC_CHANNEL = '/dsh-im-settings';
 export const INBOUND_TTL_ENDPOINTS = Object.freeze({
@@ -73,9 +77,14 @@ export function installInboundTtlRpc(ctx, options = {}) {
   const runtime = options.runtime ?? getInboundTtlRuntime(ctx, options.config);
   const logger = typeof ctx?.logger === 'function'
     ? ctx.logger('dsh-im:inbound-ttl') : (ctx?.logger ?? null);
+  const ttl = createInboundTtlRpcHandler({ ...runtime, logger });
+  const image = createImageInputRpcHandler(getImageInputSettingsStore(options.config));
+  const history = createGroupHistoryRpcHandler(options.groupHistory ?? getGroupHistoryStore(ctx, options.config));
   return registerManagementRpc(ctx,
     INBOUND_TTL_RPC_CHANNEL,
-    createInboundTtlRpcHandler({ ...runtime, logger }),
-    { authority: 'loopback' },
+    (endpoint, payload, signal) => Object.values(GROUP_HISTORY_ENDPOINTS).includes(endpoint)
+      ? history(endpoint, payload, signal) : Object.values(IMAGE_INPUT_ENDPOINTS).includes(endpoint)
+        ? image(endpoint, payload, signal) : ttl(endpoint, payload, signal),
+    { authority: options.config?.rpcAuthority },
   );
 }

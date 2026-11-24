@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createCipheriv, randomBytes } from 'node:crypto';
+import { createServer } from 'node:http';
 import test from 'node:test';
 
 import {
@@ -23,6 +24,29 @@ function jsonResponse(value, init) {
     ...init,
   });
 }
+
+async function uploadBytes(body) {
+  const chunks = [];
+  for await (const chunk of body) chunks.push(chunk);
+  return Buffer.concat(chunks);
+}
+
+test('login lifecycle preserves business rejection codes without confusing numeric and string zero', async () => {
+  for (const operation of ['beginLogin', 'notifyStart', 'notifyStop']) {
+    for (const response of [{ ret: 0, errcode: '0' }, { ret: '0', errcode: 0 }, { ret: 0, errcode: -14 }, { ret: '23', errcode: '0' }]) {
+      const api = createWeixinApi({ fetchImpl: async () => jsonResponse({ qrcode: 'test', qrcode_img_content: 'https://liteapp.weixin.qq.com/q/test', ...response }) });
+      const request = () => api[operation]({ baseUrl: 'https://ilinkai.weixin.qq.com/', token: 'test-login' });
+      const provider = response.errcode === -14 ? '-14' : response.ret === '23' ? '23' : null;
+      if (!provider) await request();
+      else await assert.rejects(request(), error => {
+        assert.equal(error.providerCode, provider);
+        assert.equal(error.code, operation === 'beginLogin' ? 'qr-request-rejected'
+          : operation === 'notifyStop' ? 'stop-rejected' : provider === '-14' ? 'stale-token' : 'start-rejected');
+        return true;
+      });
+    }
+  }
+});
 
 function encryptImage(plaintext, key) {
   const cipher = createCipheriv('aes-128-ecb', key, null);
@@ -237,6 +261,101 @@ test('sendText preserves safe iLink business rejection codes', async (t) => {
   }
 });
 
+test('sendText retries a connection-level failure with the same client id', async () => {
+  const bodies = [];
+  const api = createWeixinApi({
+    fetchImpl: async (url, init) => {
+      bodies.push(JSON.parse(init.body));
+      if (bodies.length === 1) throw new TypeError('fetch failed');
+      return jsonResponse({ ret: 0 });
+    },
+  });
+
+  const result = await api.sendText({
+    baseUrl: 'https://ilinkai.weixin.qq.com',
+    token: 'host-only-token',
+    toUserId: 'wx-user',
+    text: 'Harness reply',
+    contextToken: 'message-context',
+  });
+
+  assert.equal(bodies.length, 2);
+  assert.equal(bodies[0].msg.client_id, bodies[1].msg.client_id);
+  assert.deepEqual(result.providerMessageIds, [bodies[0].msg.client_id]);
+});
+
+test('sendText gives up after three attempts when the connection keeps failing', async () => {
+  let attempts = 0;
+  const api = createWeixinApi({
+    fetchImpl: async () => {
+      attempts += 1;
+      throw new TypeError('fetch failed');
+    },
+  });
+
+  await assert.rejects(
+    api.sendText({
+      baseUrl: 'https://ilinkai.weixin.qq.com',
+      token: 'host-only-token',
+      toUserId: 'wx-user',
+      text: 'Harness reply',
+    }),
+    (error) => error instanceof WeixinApiError && error.code === 'network-error',
+  );
+  assert.equal(attempts, 3);
+});
+
+test('sendText does not retry failures that may already have been delivered', async (t) => {
+  for (const scenario of [
+    { name: 'provider rejection', response: () => jsonResponse({ ret: -2 }), code: 'send-rejected' },
+    { name: 'http error', response: () => jsonResponse({}, { status: 500 }), code: 'http-error' },
+  ]) {
+    await t.test(scenario.name, async () => {
+      let attempts = 0;
+      const api = createWeixinApi({
+        fetchImpl: async () => {
+          attempts += 1;
+          return scenario.response();
+        },
+      });
+
+      await assert.rejects(
+        api.sendText({
+          baseUrl: 'https://ilinkai.weixin.qq.com',
+          token: 'host-only-token',
+          toUserId: 'wx-user',
+          text: 'Harness reply',
+        }),
+        (error) => error instanceof WeixinApiError && error.code === scenario.code,
+      );
+      assert.equal(attempts, 1);
+    });
+  }
+});
+
+test('sendText stops retrying when the caller aborts during the back-off', async () => {
+  const controller = new AbortController();
+  let attempts = 0;
+  const api = createWeixinApi({
+    fetchImpl: async () => {
+      attempts += 1;
+      throw new TypeError('fetch failed');
+    },
+  });
+
+  const pending = api.sendText({
+    baseUrl: 'https://ilinkai.weixin.qq.com',
+    token: 'host-only-token',
+    toUserId: 'wx-user',
+    text: 'Harness reply',
+    signal: controller.signal,
+  });
+  setTimeout(() => controller.abort(new Error('cancelled')), 100);
+
+  await assert.rejects(pending, (error) => error.message === 'cancelled');
+  assert.equal(attempts, 1);
+});
+
 test('getConfig requests a typing ticket for the current Weixin conversation', async () => {
   const calls = [];
   const api = createWeixinApi({
@@ -346,6 +465,7 @@ test('sendFile uses the iLink 2.4.6 encrypted CDN flow and sends a native file i
         });
       }
       if (url.pathname === '/c2c/upload') {
+        calls.at(-1).ciphertext = await uploadBytes(init.body);
         return new Response(null, {
           status: 200,
           headers: { 'x-encrypted-param': 'download-ticket' },
@@ -382,9 +502,11 @@ test('sendFile uses the iLink 2.4.6 encrypted CDN flow and sends a native file i
 
   assert.equal(calls[1].init.headers.Authorization, undefined);
   assert.equal(calls[1].init.headers['content-type'], 'application/octet-stream');
-  assert.equal(calls[1].init.body.byteLength, 32);
+  assert.equal(calls[1].ciphertext.byteLength, 32);
+  assert.equal(calls[1].init.headers['content-length'], '32');
+  assert.equal(calls[1].init.duplex, 'half');
   assert.equal(
-    decryptWeixinImage(calls[1].init.body, Buffer.from(ticket.aeskey, 'hex')).equals(plaintext),
+    decryptWeixinImage(calls[1].ciphertext, Buffer.from(ticket.aeskey, 'hex')).equals(plaintext),
     true,
   );
 
@@ -419,6 +541,7 @@ test('sendImage uses the encrypted CDN flow and sends a native image item', asyn
         });
       }
       if (url.pathname === '/c2c/upload') {
+        calls.at(-1).ciphertext = await uploadBytes(init.body);
         return new Response(null, {
           status: 200,
           headers: { 'x-encrypted-param': 'download-image-ticket' },
@@ -455,7 +578,7 @@ test('sendImage uses the encrypted CDN flow and sends a native image item', asyn
   assert.equal(ticket.no_need_thumb, true);
   assert.match(ticket.aeskey, /^[0-9a-f]{32}$/);
   assert.equal(
-    decryptWeixinImage(calls[1].init.body, Buffer.from(ticket.aeskey, 'hex')).equals(plaintext),
+    decryptWeixinImage(calls[1].ciphertext, Buffer.from(ticket.aeskey, 'hex')).equals(plaintext),
     true,
   );
 
@@ -510,6 +633,201 @@ function weixinFileFetch(finalResponse) {
     return finalResponse(url, init);
   };
 }
+
+test('images and files use the injected CDN fetch while JSON requests keep their existing fetch', async () => {
+  for (const operation of ['sendImage', 'sendFile']) {
+    const jsonCalls = [];
+    const uploads = [];
+    const api = createWeixinApi({
+      fetchImpl: async (url, init) => {
+        assert.notEqual(url.pathname, '/c2c/upload');
+        jsonCalls.push({ path: url.pathname, body: JSON.parse(init.body) });
+        return jsonResponse(url.pathname.endsWith('/getuploadurl')
+          ? { ret: 0, upload_param: 'upload-ticket' } : { ret: 0 });
+      },
+      uploadFetchImpl: async (url, init) => {
+        assert.equal(url.hostname, 'novac2c.cdn.weixin.qq.com');
+        assert.equal(url.pathname, '/c2c/upload');
+        assert.equal(init.headers.Authorization, undefined);
+        uploads.push(await uploadBytes(init.body));
+        return new Response(null, { headers: { 'x-encrypted-param': 'private-download' } });
+      },
+    });
+    const request = weixinFileRequest({ file: {
+      fileName: 'test.png', mediaType: 'image/png', bytes: Buffer.from('test-image'),
+    } });
+    await api[operation](request);
+    assert.deepEqual(jsonCalls.map(call => call.path), [
+      '/ilink/bot/getuploadurl', '/ilink/bot/sendmessage',
+    ]);
+    assert.equal(uploads.length, 1);
+    assert.deepEqual(
+      decryptWeixinImage(uploads[0], Buffer.from(jsonCalls[0].body.aeskey, 'hex')),
+      request.file.bytes,
+    );
+    const item = jsonCalls[1].body.msg.item_list[0];
+    assert.equal((item.image_item ?? item.file_item).media.encrypt_query_param, 'private-download');
+  }
+});
+
+test('sendFile allows an upload lasting over 60 seconds while chunks keep progressing', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const plaintext = Buffer.alloc(4 * 64 * 1024 + 7, 0xab);
+  let ticket;
+  let uploadCount = 0;
+  let sendCount = 0;
+  let elapsed = 0;
+  const api = createWeixinApi({
+    fetchImpl: async (url, init) => {
+      if (url.pathname.endsWith('/getuploadurl')) {
+        ticket = JSON.parse(init.body);
+        return jsonResponse({ ret: 0, upload_param: 'slow-upload' });
+      }
+      if (url.pathname === '/c2c/upload') {
+        uploadCount += 1;
+        const chunks = [];
+        for await (const chunk of init.body) {
+          assert.ok(chunk.length <= 64 * 1024);
+          chunks.push(chunk);
+          t.mock.timers.tick(40_000);
+          elapsed += 40_000;
+          assert.equal(init.signal.aborted, false);
+        }
+        const ciphertext = Buffer.concat(chunks);
+        assert.equal(ciphertext.length, Number(init.headers['content-length']));
+        assert.deepEqual(decryptWeixinImage(ciphertext, Buffer.from(ticket.aeskey, 'hex')), plaintext);
+        return new Response(null, { headers: { 'x-encrypted-param': 'slow-download' } });
+      }
+      sendCount += 1;
+      return jsonResponse({ ret: 0 });
+    },
+  });
+  await api.sendFile(weixinFileRequest({ file: { fileName: 'large.zip', bytes: plaintext } }));
+  assert.ok(elapsed > 60_000);
+  assert.equal(uploadCount, 1);
+  assert.equal(sendCount, 1);
+});
+
+test('sendFile reports stalled uploads and response waits as unsent after bounded retries', async (t) => {
+  for (const consumeBody of [false, true]) {
+    await t.test(consumeBody ? 'waiting for response' : 'waiting to upload', async (st) => {
+      st.mock.timers.enable({ apis: ['setTimeout'] });
+      let attempts = 0;
+      const api = createWeixinApi({
+        fetchImpl: async (url, init) => {
+          if (url.pathname.endsWith('/getuploadurl')) {
+            return jsonResponse({ ret: 0, upload_param: 'stalled-upload' });
+          }
+          assert.equal(url.pathname, '/c2c/upload', 'must never send a file message after upload failure');
+          attempts += 1;
+          if (consumeBody) await uploadBytes(init.body);
+          return new Promise((_resolve, reject) => {
+            init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true });
+            st.mock.timers.tick(60_000);
+          });
+        },
+      });
+      await assert.rejects(api.sendFile(weixinFileRequest()), error => (
+        error.code === 'artifact-upload-timeout' && error.cause.code === 'upload-timeout'
+      ));
+      assert.equal(attempts, 3);
+    });
+  }
+});
+
+test('sendFile rebuilds the encrypted stream for retries and stops on definitive rejection', async (t) => {
+  for (const status of [503, 413]) {
+    await t.test(String(status), async () => {
+      const uploads = [];
+      let responsesCancelled = 0;
+      let sends = 0;
+      const api = createWeixinApi({
+        fetchImpl: async (url, init) => {
+          if (url.pathname.endsWith('/getuploadurl')) {
+            return jsonResponse({ ret: 0, upload_param: 'retry-upload' });
+          }
+          if (url.pathname === '/c2c/upload') {
+            uploads.push(await uploadBytes(init.body));
+            return {
+              status: uploads.length === 1 ? status : 200,
+              headers: new Headers({ 'x-encrypted-param': 'retry-download' }),
+              body: { async cancel() { responsesCancelled += 1; } },
+            };
+          }
+          sends += 1;
+          return jsonResponse({ ret: 0 });
+        },
+      });
+      if (status === 413) {
+        await assert.rejects(api.sendFile(weixinFileRequest()), { code: 'artifact-too-large' });
+        assert.equal(uploads.length, 1);
+        assert.equal(sends, 0);
+      } else {
+        await api.sendFile(weixinFileRequest());
+        assert.equal(uploads.length, 2);
+        assert.deepEqual(uploads[0], uploads[1]);
+        assert.equal(sends, 1);
+      }
+      assert.equal(responsesCancelled, uploads.length);
+    });
+  }
+});
+
+test('sendFile honours caller cancellation during upload without retrying or sending', async () => {
+  const controller = new AbortController();
+  const reason = new Error('caller cancelled upload');
+  let attempts = 0;
+  const api = createWeixinApi({
+    fetchImpl: async (url, init) => {
+      if (url.pathname.endsWith('/getuploadurl')) {
+        return jsonResponse({ ret: 0, upload_param: 'cancel-upload' });
+      }
+      assert.equal(url.pathname, '/c2c/upload');
+      attempts += 1;
+      await init.body.next();
+      controller.abort(reason);
+      await init.body.next();
+      assert.fail('the upload stream must stop');
+    },
+  });
+  await assert.rejects(api.sendFile(weixinFileRequest({ signal: controller.signal })), error => error === reason);
+  assert.equal(attempts, 1);
+});
+
+test('sendFile streams valid ciphertext and Content-Length through native fetch', async (t) => {
+  let received;
+  let headers;
+  const server = createServer(async (request, response) => {
+    headers = request.headers;
+    received = await uploadBytes(request);
+    response.writeHead(200, { 'x-encrypted-param': 'native-fetch-download' });
+    response.end();
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => {
+    server.close(resolve);
+    server.closeAllConnections();
+  }));
+  const plaintext = randomBytes(3 * 64 * 1024 + 3);
+  let ticket;
+  const api = createWeixinApi({
+    fetchImpl: async (url, init) => {
+      if (url.pathname.endsWith('/getuploadurl')) {
+        ticket = JSON.parse(init.body);
+        return jsonResponse({ ret: 0, upload_param: 'native-fetch-upload' });
+      }
+      if (url.pathname === '/c2c/upload') {
+        return fetch(`http://127.0.0.1:${server.address().port}/upload`, init);
+      }
+      assert.equal(JSON.parse(init.body).msg.item_list[0].file_item.len, String(plaintext.length));
+      return jsonResponse({ ret: 0 });
+    },
+  });
+  await api.sendFile(weixinFileRequest({ file: { fileName: 'stream.zip', bytes: plaintext } }));
+  assert.equal(Number(headers['content-length']), received.length);
+  assert.equal(headers.authorization, undefined);
+  assert.deepEqual(decryptWeixinImage(received, Buffer.from(ticket.aeskey, 'hex')), plaintext);
+});
 
 test('sendFile marks every ambiguous sendmessage result as uncertain', async (t) => {
   const cases = [

@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import { createProductionController } from '../../../plugin-src/host/channels/dingtalk/production.mjs';
+import { assertPathMatches } from '../../support/filesystem.mjs';
 
 test('production assembly keeps secrets in credentials and creates per-bot runtimes', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'dsh-dingtalk-production-'));
@@ -41,10 +42,10 @@ test('production assembly keeps secrets in credentials and creates per-bot runti
     async close() { seen.supervisorClosed = true; },
   };
   const credentials = {};
-  const apiProxy = {};
+  const typertGateway = { invoke() {}, stream() {} };
   const production = await createProductionController({
     credentials,
-    apiProxy,
+    typertGateway,
     logger: () => console,
   }, { dataDir: directory }, {
     ConfigStore,
@@ -57,7 +58,7 @@ test('production assembly keeps secrets in credentials and creates per-bot runti
   });
 
   assert.equal(seen.controllerOptions.credentials, credentials);
-  assert.equal(seen.harnessOptions.apiProxy, apiProxy);
+  assert.equal(typeof seen.harnessOptions.apiProxy.sessions.prompt, 'function');
   assert.equal(Object.hasOwn(seen.harnessOptions, 'baseUrl'), false);
   assert.equal(seen.harnessOptions.autostart, false);
   assert.equal(Object.hasOwn(seen.harnessOptions, 'agentPreset'), false);
@@ -69,7 +70,7 @@ test('production assembly keeps secrets in credentials and creates per-bot runti
   assert.ok(runtime instanceof Runtime);
   assert.equal(seen.runtimeOptions.clientSecret, 'host-only-secret');
   assert.equal(Object.hasOwn(seen.runtimeOptions, 'outboundArtifactsEnabled'), false);
-  assert.match(seen.statePath, /dt_abc\/state\.json$/);
+  assertPathMatches(seen.statePath, /dt_abc\/state\.json$/);
   await seen.controllerOptions.createRuntime({
     botId: 'dt_disabled',
     config: { botId: 'dt_disabled', clientId: 'dingdisabled' },
@@ -84,7 +85,7 @@ test('production assembly keeps secrets in credentials and creates per-bot runti
 
   const productionWithPreset = await createProductionController({
     credentials,
-    apiProxy,
+    typertGateway,
     logger: () => console,
   }, { dataDir: directory, agentPreset: 'router-standard' }, {
     ConfigStore,

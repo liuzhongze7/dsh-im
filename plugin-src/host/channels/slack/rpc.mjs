@@ -1,3 +1,5 @@
+import { SET_MESSAGE_MODE_ENDPOINT, validMessageModePayload } from '../../../../src/channels/shared/message-mode.mjs';
+import { createConnectionDiagnostics, diagnosticRpcResult } from '../../../../src/channels/shared/connection-error.mjs';
 import { SET_ALIAS_ENDPOINT, validAliasPayload } from '../shared/bot-alias-rpc.mjs';
 import { registerManagementRpc } from '../../../management-rpc.mjs';
 import { SET_CONTEXT_ENHANCEMENT_ENDPOINT, validContextEnhancementPayload } from '../shared/context-enhancement-rpc.mjs';
@@ -25,6 +27,7 @@ export const SLACK_ENDPOINTS = Object.freeze({
   setModel: SET_MODEL_ENDPOINT,
   setAgentPreset: SET_AGENT_PRESET_ENDPOINT,
   setContextEnhancement: SET_CONTEXT_ENHANCEMENT_ENDPOINT,
+  setBusyMessageMode: SET_MESSAGE_MODE_ENDPOINT,
   setAccessPolicy: SET_ACCESS_POLICY_ENDPOINT,
   setAlias: SET_ALIAS_ENDPOINT,
 });
@@ -87,6 +90,10 @@ function payloadFailure(endpoint, payload) {
     return validAgentPresetPayload(payload)
       ? null : '请选择 Agent Preset。';
   }
+  if (endpoint === SLACK_ENDPOINTS.setBusyMessageMode) {
+    return validMessageModePayload(payload)
+      ? null : '请提交有效的消息处理方式。';
+  }
   if (endpoint === SLACK_ENDPOINTS.setContextEnhancement) {
     return validContextEnhancementPayload(payload)
       ? null : '请提交有效的上下文增强设置。';
@@ -131,6 +138,7 @@ function operationError(error) {
 }
 
 export function createSlackRpcHandler(controller) {
+  const diagnostics = controller.diagnostics ?? createConnectionDiagnostics({ channel: 'slack' });
   for (const method of ['status', 'bindCredentials', 'reconnectBot', 'deleteBot']) {
     if (typeof controller?.[method] !== 'function') {
       throw new TypeError(`A complete Slack controller is required (${method})`);
@@ -171,7 +179,7 @@ export function createSlackRpcHandler(controller) {
           } catch (error) {
             testError = error;
           }
-          value = { ...value, testMessage: publicConnectionTestResult(testError) };
+          value = { ...value, testMessage: publicConnectionTestResult(testError, { diagnostics, botId: payload.botId }) };
         }
       }
       else if (endpoint === SLACK_ENDPOINTS.setWorkspace) {
@@ -181,6 +189,10 @@ export function createSlackRpcHandler(controller) {
       else if (endpoint === SLACK_ENDPOINTS.setModel) {
         if (typeof controller.updateModel !== 'function') throw new Error('Model update is unavailable');
         value = await controller.updateModel(payload.botId, payload.model);
+      }
+      else if (endpoint === SLACK_ENDPOINTS.setBusyMessageMode) {
+        if (typeof controller.updateBusyMessageMode !== 'function') throw new Error('Message mode update is unavailable');
+        value = await controller.updateBusyMessageMode(payload.botId, payload.busyMessageMode);
       }
       else if (endpoint === SLACK_ENDPOINTS.setContextEnhancement) {
         if (typeof controller.updateContextEnhancement !== 'function') throw new Error('Context enhancement update is unavailable');
@@ -203,9 +215,9 @@ export function createSlackRpcHandler(controller) {
         ? { ok: false, error: { code: 'cancelled', message: 'The request was cancelled.' } }
         : { ok: true, value: sanitizePublic(value) };
     } catch (error) {
-      return signal?.aborted
+      return diagnosticRpcResult(diagnostics, error, signal?.aborted
         ? { ok: false, error: { code: 'cancelled', message: 'The request was cancelled.' } }
-        : { ok: false, error: operationError(error) };
+        : { ok: false, error: operationError(error) }, { operation: endpoint, botId: payload?.botId });
     }
   };
 }

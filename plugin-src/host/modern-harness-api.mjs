@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
 
-import { hasActiveHarnessInteractionOwner } from '../../src/channels/shared/harness-client.mjs';
-import { hostPeer } from './in-process-peer.mjs';
+import { activeHarnessInteractionOwner, clearModelCatalogCache, hasActiveHarnessInteractionOwner, harnessToolCallFromEvent, HarnessInteractionError } from '../../src/channels/shared/harness-client.mjs';
+import { extractConnectionEvidence } from '../../src/channels/shared/connection-error.mjs';
+import { harnessPeer } from './harness-peer.mjs';
+import { sameWorkspacePath } from '../../src/channels/shared/default-workspace.mjs';
 
 const modernApis = new WeakMap();
 
@@ -26,7 +28,7 @@ function failureOf(error) {
   return {
     code: 'internal',
     message: error instanceof Error ? error.message : String(error),
-    details: {},
+    details: extractConnectionEvidence(error).details,
   };
 }
 
@@ -44,6 +46,7 @@ function remoteRequest(namespace, method, args, signal, peer) {
     args,
     peer,
     ...(signal === undefined ? {} : { signal }),
+    ...(peer === undefined ? {} : { peer }),
   };
 }
 
@@ -51,6 +54,12 @@ function questionError(message, code) {
   const error = new Error(message);
   error.name = 'UserQuestionError';
   error.code = code;
+  return error;
+}
+
+function adoptionError(code, message) {
+  const error = new Error(message);
+  error.failure = { code, message, details: {} };
   return error;
 }
 
@@ -198,6 +207,8 @@ class MuxSubscription {
 class ModernHarnessApi {
   #ctx;
   #gateway;
+  #peer;
+  #deliveryService;
   #scope;
   #mux = new Set();
   #pendingQuestions = new Map();
@@ -211,11 +222,15 @@ class ModernHarnessApi {
     this.#ctx = ctx;
     this.#gateway = gateway;
     this.#scope = scope;
+    this.#peer = harnessPeer(ctx);
 
     this.host = Object.freeze({
       describe: (request) => rpcResult(request, () => ({ ready: true, transport: 'typert' })),
     });
     this.workspace = Object.freeze({
+      rename: (request, signal) => rpcResult(request, () => this.#invoke(
+        'workspace', 'rename', { request: request.payload }, signal,
+      )),
       list: (request, signal) => rpcResult(request, () => this.#workspaceList(signal)),
       create: (request, signal) => rpcResult(request, () => this.#invoke(
         'workspace', 'create', { request: request.payload }, signal,
@@ -228,6 +243,7 @@ class ModernHarnessApi {
       create: (request, signal) => rpcResult(request, () => this.#invoke(
         'session', 'create', { request: request.payload }, signal,
       )),
+      adopt: (request, signal) => rpcResult(request, () => this.#adoptSession(request.payload, signal)),
       history: (request, signal) => rpcResult(request, () => this.#history(request.payload, signal)),
       prompt: (request, signal) => rpcResult(request, () => this.#invoke(
         'session',
@@ -238,10 +254,16 @@ class ModernHarnessApi {
       rename: (request, signal) => rpcResult(request, () => this.#invoke(
         'session', 'rename', { request: request.payload }, signal,
       )),
+      fork: (request, signal) => rpcResult(request, () => this.#invoke(
+        'session', 'fork', { request: request.payload }, signal,
+      )),
       cancel: (request, signal) => rpcResult(request, () => this.#invoke(
         'session', 'cancel', { request: { sessionId: request.payload.sessionId } }, signal,
       )),
       models: (request, signal) => rpcResult(request, () => this.#sessionModels(
+        request.payload.sessionId, signal,
+      )),
+      permissions: (request, signal) => rpcResult(request, () => this.#sessionPermissions(
         request.payload.sessionId, signal,
       )),
       selectModel: (request, signal) => rpcResult(request, () => this.#invoke(
@@ -286,18 +308,12 @@ class ModernHarnessApi {
     }
   }
 
-  /**
-   * The in-process Peer every gateway call speaks through. The Host's gateway
-   * requires one on each request (`InvokeRemoteRequest.peer`) and reads its
-   * lifetime signal, so a request without it fails inside the Host with
-   * `Cannot read properties of undefined (reading 'signal')`.
-   */
-  #requestPeer() {
-    return hostPeer(this.#ctx);
+  setDeliveryService(service) {
+    if (service) this.#deliveryService = service;
   }
 
   async #invoke(namespace, method, args, signal) {
-    return this.#gateway.invoke(remoteRequest(namespace, method, args, signal, this.#requestPeer()));
+    return this.#gateway.invoke(remoteRequest(namespace, method, args, signal, this.#peer));
   }
 
   async #streamFirst(namespace, method, args, signal) {
@@ -308,7 +324,7 @@ class ModernHarnessApi {
     let iterator;
     try {
       const source = await this.#gateway.stream(remoteRequest(
-        namespace, method, args, streamSignal, this.#requestPeer(),
+        namespace, method, args, streamSignal, this.#peer,
       ));
       iterator = source[Symbol.asyncIterator]();
       const first = await iterator.next();
@@ -340,6 +356,33 @@ class ModernHarnessApi {
     }
     this.#rememberCursor(sessionId, frame.cursor);
     return frame;
+  }
+
+  async #adoptSession({ sessionId, workspaceId, cwd }, signal) {
+    // Since DSH 0.2.1, create only reuses blank Sessions and can replace their
+    // preset. Binding must observe the exact existing identity instead; the
+    // next prompt resumes its Agent with the persisted configuration.
+    const { header } = await this.#sessionSnapshot(sessionId, 1, signal);
+    if (header?.id !== sessionId || typeof header.cwd !== 'string') {
+      throw new Error('Harness returned an invalid Session header for adoption');
+    }
+    if (header.origin !== undefined) {
+      throw adoptionError('session-subagent-unsupported', 'Only ordinary Sessions can be adopted');
+    }
+    let expectedCwd = cwd;
+    if (workspaceId !== undefined) {
+      const baseline = await this.#workspaceList(signal);
+      const workspace = baseline.items?.find(item => item.workspaceId === workspaceId);
+      if (cwd !== undefined || !workspace?.sessionIds?.includes(sessionId)) {
+        throw adoptionError('session-workspace-ambiguous', 'Session workspace membership changed during adoption');
+      }
+      expectedCwd = workspace.path;
+    }
+    if (!await sameWorkspacePath(header.cwd, expectedCwd)) {
+      throw adoptionError('session-workspace-ambiguous', 'Session directory does not match its workspace');
+    }
+    signal?.throwIfAborted();
+    return { sessionId };
   }
 
   async #history(payload, signal) {
@@ -396,7 +439,7 @@ class ModernHarnessApi {
       return;
     }
     if (frame.type !== 'chunk' || frame.index !== stream.entries.length) return;
-    stream.entries.push({
+    const entry = {
       type: 'transient',
       event: {
         type: 'assistant/chunk',
@@ -406,7 +449,12 @@ class ModernHarnessApi {
         time: frame.time,
         data: { turn: stream.turn, step: stream.step, chunk: frame.chunk },
       },
-    });
+    };
+    stream.entries.push(entry);
+    // History only exposes these transient chunks while the attempt is open.
+    // Broadcast each one as it arrives so live IM renderers cannot miss a
+    // short reasoning phase that starts and commits between two history polls.
+    this.#broadcast({ type: 'session/event', sessionId, event: entry.event });
   }
 
   #withAssistantStream(sessionId, entries) {
@@ -421,6 +469,25 @@ class ModernHarnessApi {
 
   #modelCatalog(signal) {
     return this.#invoke('session', 'modelCatalog', {}, signal);
+  }
+
+  async #sessionPermissions(sessionId, signal) {
+    const [catalog, projection] = await Promise.all([
+      this.#invoke('permissionPresets', 'catalog', {}, signal),
+      this.#invoke('session', 'projections', { request: { sessionId } }, signal),
+    ]);
+    if (projection === null) {
+      const error = new Error('Session not found');
+      error.failure = { code: 'session-not-found', message: error.message, details: {} };
+      throw error;
+    }
+    const currentValue = projection?.values?.permissions?.currentValue;
+    if (typeof currentValue !== 'string' || !Array.isArray(catalog?.options)) {
+      const error = new Error('Host permission presets are unavailable');
+      error.failure = { code: 'permissions-unavailable', message: error.message, details: {} };
+      throw error;
+    }
+    return { currentValue, options: catalog.options };
   }
 
   async #sessionModels(sessionId, signal) {
@@ -452,8 +519,12 @@ class ModernHarnessApi {
     let subscription;
     subscription = new MuxSubscription(signal, () => this.#mux.delete(subscription));
     this.#mux.add(subscription);
-    for (const pending of this.#pendingQuestions.values()) subscription.push(this.#questionFrame(pending));
-    for (const pending of this.#pendingApprovals.values()) subscription.push(this.#approvalFrame(pending));
+    for (const pending of this.#pendingQuestions.values()) {
+      if (pending.broadcast) subscription.push(this.#questionFrame(pending));
+    }
+    for (const pending of this.#pendingApprovals.values()) {
+      if (pending.broadcast !== false && pending.imAvailable !== false) subscription.push(this.#approvalFrame(pending));
+    }
     return subscription;
   }
 
@@ -487,22 +558,137 @@ class ModernHarnessApi {
 
   #requestQuestion(request, next) {
     const owner = this.#claimableAgent(request?.agent);
-    if (!owner) return next();
-    if (request.signal?.aborted) {
+    const sessionId = owner?.sessionId ?? request?.agent?.session?.id ?? request?.agent?.id;
+    if (typeof sessionId !== 'string'
+      || (!owner && typeof this.#deliveryService?.presentSessionSyncQuestion !== 'function')) return next();
+    const turnSignal = request.signal;
+    if (turnSignal?.aborted) {
       return Promise.reject(questionError(
         'ask_user_question was aborted before the user answered', 'ASK_ABORTED',
       ));
     }
-    return new Promise((resolve, reject) => {
-      const pending = {
+    // Give this question a lifetime of its own instead of lending it the enclosing
+    // turn's. `dsh-agent-loop` mints one abort controller per turn and every tool
+    // call in that turn shares the one signal, and under PTC two consumers of it
+    // react to the abort EVENT rather than to `signal.aborted`: `run_code` flips its
+    // own program controller from an abort listener (dsh-tools `onOuterAbort`) and
+    // the worker code runtime retires the worker the same way
+    // (dsh-code-runtime-worker-thread `onAbort`). Retiring the Web card by firing
+    // that event therefore also killed the program that was merely waiting for this
+    // answer — `code run failed (abort)`. A private controller keeps the retirement
+    // below local: real upstream cancellation is forwarded into it, and every
+    // listener on this waterfall — the Remote/Web forwarder that renders the card,
+    // and our own IM pending — sees a lifetime that ends with this question rather
+    // than with the turn.
+    //
+    // Handing it downstream means replacing `request.signal`, because the Cordis
+    // waterfall passes the same request object to every remaining listener and
+    // `next()` takes no replacement arguments. The object is a per-call copy made by
+    // `UserQuestionService.ask`, and the signal it carried stays reachable here as
+    // `turnSignal`, so the caller's own view of the request is untouched.
+    const question = new AbortController();
+    const forwardTurnAbort = () => question.abort(turnSignal?.reason);
+    turnSignal?.addEventListener('abort', forwardTurnAbort, { once: true });
+    request.signal = question.signal;
+    // Race the IM answer against the host's own answerers (Web/CLI). Claiming the
+    // request exclusively used to keep the question out of Web entirely, leaving
+    // whoever happened to be looking at that Session with a card they could not
+    // answer. Racing keeps both surfaces usable: the first answer wins.
+    const im = this.#askThroughIm(request, { sessionId }, { broadcast: Boolean(owner) });
+    let imAvailable = true;
+    let nativeError;
+    const withdraw = () => {
+      imAvailable = false;
+      im.withdraw();
+      // No binding/provider must preserve the native error, not leave the tool waiting forever.
+      if (nativeError) im.dismiss(nativeError);
+    };
+    let answeredByIm = false;
+    const native = Promise.resolve()
+      .then(() => next())
+      .catch((error) => {
+        nativeError = error;
+        if (!imAvailable) throw error;
+        // A pure-IM session has no client connected, so the host rejects with
+        // NO_PROVIDER — an expected state rather than a failure — and ASK_ABORTED
+        // is this adapter's own retire signal below. Any other error is real, so
+        // log it instead of swallowing it silently; the question still stays open
+        // for IM rather than being failed outright.
+        if (error?.code !== 'NO_PROVIDER' && error?.code !== 'ASK_ABORTED') {
+          console.warn(
+            '[dsh-im] the host user-question answerer failed; waiting for the IM answer:',
+            error?.message ?? error,
+          );
+        }
+        return new Promise(() => {});
+      });
+    const result = Promise.race([
+      native,
+      im.promise.then((value) => {
+        answeredByIm = true;
+        return value;
+      }),
+    ]).finally(() => {
+      // Losing side cleanup. A host answer already settled this request, so drop
+      // the IM pending: leaving it registered would let a late press answer a
+      // question the model has moved past. Settling is idempotent.
+      im.dismiss(new Error('another client answered this question'));
+      turnSignal?.removeEventListener('abort', forwardTurnAbort);
+      if (answeredByIm) {
+        // The host's own answerer (DSH Web) keeps its question card until its own
+        // pending settles, and a host-side adapter has no other handle on it. A Web
+        // client holds that pending through the lifetime this question handed
+        // downstream, so ending that lifetime makes the client drop a card whose
+        // answer was already given on IM — otherwise it keeps offering choices for a
+        // question the model has moved past.
+        //
+        // Ending it is `abort`, not a dispatched `abort` event: a listener that
+        // reads `signal.aborted` must see the same thing one that listens for the
+        // event does. Either way it reaches only this question's controller, so the
+        // turn and every other tool call in it — a waiting `run_code` program above
+        // all — keep running. The reason carries `ASK_ABORTED` so the host answerer
+        // rejecting alongside us stays an expected retirement rather than a logged
+        // failure.
+        question.abort(questionError('the question was answered on IM', 'ASK_ABORTED'));
+      } else if (!owner) {
+        // Also stop a bound-chat lookup/delivery still in flight when the Host wins.
+        question.abort(questionError('the question ended', 'ASK_ABORTED'));
+      }
+    });
+    if (!owner) {
+      Promise.resolve().then(() => {
+        if (question.signal.aborted) return false;
+        return this.#deliveryService.presentSessionSyncQuestion(sessionId, {
+          ...im.interaction, withdraw,
+        }, { signal: question.signal, completion: result });
+      }).then((available) => {
+        if (!available) withdraw();
+      }, (error) => {
+        if (!question.signal.aborted) console.warn('[dsh-im] synced question delivery unavailable:', error?.code ?? error?.name);
+        withdraw();
+      });
+    }
+    return result;
+  }
+
+  /**
+   * Present one question to IM clients. Returns the answer promise plus a
+   * `dismiss` used to retire the pending when the host answers first.
+   */
+  #askThroughIm(request, owner, { broadcast = true } = {}) {
+    let pending = null;
+    const promise = new Promise((resolve, reject) => {
+      pending = {
         rpcId: randomUUID(),
         sessionId: owner.sessionId,
         questions: request.questions,
+        broadcast,
+        imAvailable: true,
         signal: request.signal,
         settle: (outcome, value) => {
           if (!this.#pendingQuestions.delete(pending.rpcId)) return;
           request.signal?.removeEventListener('abort', onAbort);
-          this.#broadcast({
+          if (broadcast) this.#broadcast({
             type: 'question/resolved',
             sessionId: pending.sessionId,
             questionRpcId: pending.rpcId,
@@ -517,8 +703,24 @@ class ModernHarnessApi {
       ));
       this.#pendingQuestions.set(pending.rpcId, pending);
       request.signal?.addEventListener('abort', onAbort, { once: true });
-      this.#broadcast(this.#questionFrame(pending).payload, pending.rpcId);
+      if (broadcast) this.#broadcast(this.#questionFrame(pending).payload, pending.rpcId);
     });
+    return {
+      promise,
+      dismiss: (reason) => pending?.settle('cancelled', reason),
+      withdraw: () => { pending.imAvailable = false; },
+      interaction: {
+        kind: 'question', interactionId: pending.rpcId, rpcId: pending.rpcId,
+        sessionId: pending.sessionId, payload: this.#questionFrame(pending).payload,
+        respond: async (response) => {
+          const receipt = this.#respond({ rpcId: pending.rpcId, result: response });
+          if (!receipt.accepted) throw new HarnessInteractionError(
+            `interaction-${receipt.reason}`, 'This question is no longer answerable',
+          );
+          return receipt;
+        },
+      },
+    };
   }
 
   #approvalFrame(pending) {
@@ -528,6 +730,7 @@ class ModernHarnessApi {
         type: 'approval/requested',
         sessionId: pending.sessionId,
         approvalId: pending.approvalId,
+        ...(pending.competitive ? { competitive: true } : {}),
         toolName: pending.toolName,
         ...(pending.callId === undefined ? {} : { callId: pending.callId }),
         ...(pending.reason === undefined ? {} : { reason: pending.reason }),
@@ -536,6 +739,123 @@ class ModernHarnessApi {
   }
 
   #requestApproval(request, next) {
+    const session = request?.agent?.session;
+    const sessionId = session?.id ?? request?.agent?.id;
+    const events = sessionEvents(session);
+    if (typeof sessionId !== 'string' || !events) return next();
+    const owner = activeHarnessInteractionOwner(this.#scope, sessionId, events);
+    if (owner && !owner.competitiveApprovals) return this.#requestExclusiveApproval(request, next);
+    if (!owner && typeof this.#deliveryService?.presentSessionSyncApproval !== 'function') return next();
+    const turnSignal = request.signal;
+    if (turnSignal?.aborted) return Promise.resolve('cancelled');
+    const claimed = new Set([...this.#pendingApprovals.values()].map((entry) => entry.approvalId));
+    const decided = new Set();
+    let approvalId;
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index];
+      if (event.type === 'approval/decided') decided.add(event.data?.id);
+      if (event.type !== 'approval/asked') continue;
+      const id = event.data?.id;
+      if (!id || decided.has(id) || claimed.has(id)
+        || (request.callId ?? null) !== (event.data?.callId ?? null)) continue;
+      approvalId = id;
+      break;
+    }
+    if (!approvalId) return next();
+    let toolCall = owner?.toolCalls.get(request.callId);
+    if (!toolCall) {
+      for (let index = events.length - 1; index >= 0; index -= 1) {
+        const event = events[index];
+        if (event.type === 'turn/start') break;
+        const call = harnessToolCallFromEvent(event);
+        if (call?.callId === request.callId && call.name === request.toolName) {
+          toolCall = call;
+          break;
+        }
+      }
+    }
+    // This controller retires only this approval; the caller keeps its turn signal.
+    const lifetime = new AbortController();
+    request.signal = lifetime.signal;
+    let nativeAvailable = true;
+    let resolveResult;
+    const result = new Promise((resolve) => { resolveResult = resolve; });
+    const pending = {
+      rpcId: randomUUID(), sessionId, approvalId,
+      toolName: request.toolName, callId: request.callId, reason: request.reason,
+      competitive: true, broadcast: Boolean(owner), imAvailable: true,
+      settle: (outcome) => {
+        if (!this.#pendingApprovals.delete(pending.rpcId)) return false;
+        turnSignal?.removeEventListener('abort', onAbort);
+        if (pending.broadcast) this.#broadcast({
+          type: 'approval/resolved', sessionId, approvalId, outcome,
+        });
+        // Reserve the result before aborting the losing native presentation.
+        resolveResult(outcome);
+        lifetime.abort(new Error('approval settled'));
+        if (request.signal === lifetime.signal) request.signal = turnSignal;
+        return true;
+      },
+      withdraw: () => {
+        if (!this.#pendingApprovals.has(pending.rpcId) || !pending.imAvailable) return false;
+        pending.imAvailable = false;
+        if (pending.broadcast) this.#broadcast({
+          type: 'approval/resolved', sessionId, approvalId, outcome: 'unavailable',
+        });
+        if (!nativeAvailable) pending.settle('unavailable');
+        return true;
+      },
+    };
+    const onAbort = () => pending.settle('cancelled');
+    this.#pendingApprovals.set(pending.rpcId, pending);
+    turnSignal?.addEventListener('abort', onAbort, { once: true });
+    if (turnSignal?.aborted) onAbort();
+    // Start both providers without waiting for target lookup or platform delivery.
+    Promise.resolve().then(() => {
+      if (lifetime.signal.aborted) return 'cancelled';
+      return next();
+    }).then((outcome) => {
+      if (outcome === 'allowed-once' || outcome === 'rejected') pending.settle(outcome);
+      else {
+        nativeAvailable = false;
+        if (!pending.imAvailable) pending.settle('unavailable');
+      }
+    }, (error) => {
+      nativeAvailable = false;
+      if (!lifetime.signal.aborted) console.warn('[dsh-im] native approval provider unavailable:', error?.code ?? error?.name);
+      if (!pending.imAvailable) pending.settle('unavailable');
+    });
+    if (!lifetime.signal.aborted && owner) {
+      this.#broadcast(this.#approvalFrame(pending).payload, pending.rpcId);
+    } else if (!lifetime.signal.aborted) {
+      const respond = async (response) => {
+        const receipt = this.#respond({ rpcId: pending.rpcId, result: response });
+        if (!receipt.accepted) throw new HarnessInteractionError(
+          `interaction-${receipt.reason}`, 'This approval is no longer answerable',
+        );
+        return receipt;
+      };
+      const interaction = {
+        kind: 'approval', interactionId: approvalId, rpcId: pending.rpcId, sessionId,
+        payload: this.#approvalFrame(pending).payload, toolCall, respond,
+        withdraw: async () => pending.withdraw(),
+      };
+      Promise.resolve().then(() => {
+        if (lifetime.signal.aborted) return false;
+        return this.#deliveryService.presentSessionSyncApproval(sessionId, interaction, {
+          signal: lifetime.signal, completion: result,
+        });
+      }).then((available) => {
+        if (!available) pending.withdraw();
+      }, (error) => {
+        if (!lifetime.signal.aborted) console.warn('[dsh-im] synced approval delivery unavailable:', error?.code ?? error?.name);
+        pending.withdraw();
+      });
+    }
+    return result;
+  }
+
+  #requestExclusiveApproval(request, next) {
     const owner = this.#claimableAgent(request?.agent);
     if (!owner) return next();
     if (request.signal?.aborted) return Promise.resolve('cancelled');
@@ -585,6 +905,12 @@ class ModernHarnessApi {
   #respond(message) {
     const approval = this.#pendingApprovals.get(message?.rpcId);
     if (approval) {
+      if (approval.imAvailable === false) return { accepted: false, reason: 'not-pending' };
+      if (approval.competitive && message?.result?.ok === false
+        && message?.result?.error?.code === 'unavailable') {
+        return approval.withdraw()
+          ? { accepted: true } : { accepted: false, reason: 'not-pending' };
+      }
       const value = message?.result?.value;
       if (message?.result?.ok !== true
         || !value || typeof value !== 'object'
@@ -597,7 +923,7 @@ class ModernHarnessApi {
       return { accepted: true };
     }
     const question = this.#pendingQuestions.get(message?.rpcId);
-    if (!question) return { accepted: false, reason: 'not-pending' };
+    if (!question || !question.imAvailable) return { accepted: false, reason: 'not-pending' };
     if (message?.result?.ok !== true) {
       if (message?.result?.error?.code !== 'cancelled') {
         return { accepted: false, reason: 'bad-response' };
@@ -624,6 +950,7 @@ class ModernHarnessApi {
   dispose() {
     if (this.#disposed) return;
     this.#disposed = true;
+    clearModelCatalogCache(this);
     for (const subscription of [...this.#mux]) subscription.close();
     this.#assistantStreams.clear();
     for (const pending of [...this.#pendingApprovals.values()]) pending.settle('cancelled');
@@ -636,23 +963,27 @@ class ModernHarnessApi {
 }
 
 /** Create one modern compatibility API per Cordis Host root. */
-export function modernHarnessApi(ctx) {
+export function modernHarnessApi(ctx, { deliveryService } = {}) {
   const scope = ctx?.root ?? ctx;
   if (!scope || !['object', 'function'].includes(typeof scope)) {
     throw new TypeError('dsh-im requires a Cordis Host context');
   }
   const cached = modernApis.get(scope);
-  if (cached) return cached;
+  if (cached) {
+    cached.setDeliveryService(deliveryService);
+    return cached;
+  }
   const gateway = ctx?.typertGateway;
   if (!gateway || typeof gateway.invoke !== 'function' || typeof gateway.stream !== 'function') {
     throw new TypeError('dsh-im requires the modern Host Typert gateway');
   }
   const api = new ModernHarnessApi(ctx, gateway, scope);
+  api.setDeliveryService(deliveryService);
   modernApis.set(scope, api);
   if (typeof ctx.effect === 'function') {
     ctx.effect(() => () => {
       if (modernApis.get(scope) === api) modernApis.delete(scope);
-      api.dispose();
+      return api.dispose();
     }, 'dsh-im: modern Harness compatibility API');
   }
   return api;

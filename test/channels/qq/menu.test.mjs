@@ -65,6 +65,7 @@ async function fixture(t, { rejection, policy, group = false } = {}) {
     executeCommand: async (id, cmd) => { calls.push(['compact', id, cmd]); return { result: { kind: 'success', text: 'Compacted 4 history items (~500 tokens).' } }; },
     workspaceSession: (id) => ({
       ask: (text, options) => harness.ask(id, text, options),
+      executeCommand: (command, options) => harness.executeCommand(id, command, options),
       sessionExists: async () => true, models: async () => catalog(), isRunning: async () => false, hasActiveTurn: async () => false,
       selectModel: async (selection) => { calls.push(['model', selection]); selected = selection; return { selected }; },
       stopActiveTurn: async (control) => { calls.push(['stop', control.key]); return true; },
@@ -92,12 +93,12 @@ async function fixture(t, { rejection, policy, group = false } = {}) {
   return { dir, other, route, state, calls, sent, harness, bridge, bot, send, message, pick, latestMenu, sessions };
 }
 
-test('QQ main menu contains the agreed twelve actions without watches or reasoning selection', async (t) => {
+test('QQ main menu contains the agreed thirteen actions without watches or reasoning selection', async (t) => {
   const f = await fixture(t);
   await f.send('/m');
   const menu = f.latestMenu();
   const buttons = menu.keyboard.content.rows.flatMap((r) => r.buttons);
-  assert.equal(buttons.length, 12);
+  assert.equal(buttons.length, 13);
   assert.ok(menu.keyboard.content.rows.length <= 5);
   assert.ok(menu.keyboard.content.rows.every((r) => r.buttons.length <= 5));
   assert.doesNotMatch(menu.text, /关注|推理等级/);
@@ -108,6 +109,17 @@ test('QQ main menu contains the agreed twelve actions without watches or reasoni
     assert.ok(parseQqMenuCommand(button.action.data).token);
   }
   assert.equal(f.calls.length, 0);
+});
+
+test('QQ all-message events retain menu commands and numeric selection after self mention cleanup', async (t) => {
+  const f = await fixture(t, { group: true });
+  const mentioned = { rawEventType: 'GROUP_MESSAGE_CREATE', mentions: [{ is_you: true, id: 'self-openid' }] };
+  await f.send('<@self-openid> /m sessions', mentioned);
+  assert.ok(f.latestMenu());
+  await f.send('1', { rawEventType: 'GROUP_MESSAGE_CREATE' });
+  assert.equal(f.calls.length, 0, 'an unmentioned selection stays silent');
+  await f.send('<@!self-openid> 1', mentioned);
+  assert.deepEqual(f.calls, [['bind', f.route, 'session-0']]);
 });
 
 test('QQ numbered session pages select the displayed ID even after the catalog is reordered', async (t) => {
@@ -153,12 +165,12 @@ test('QQ workspace, new session, compact, stop, quick steer and custom steer wor
   await f.send('/steer 自定义测试');
   assert.ok(f.calls.some(([op, text]) => op === 'steer' && text === '自定义测试'));
   await f.send('/m'); await f.pick(5);
-  assert.equal(f.state.sessionFor(key), null);
+  assert.equal(f.state.sessionFor(key), 'session-new', '/new eagerly creates and binds the next session');
 });
 
 test('QQ archive visibility survives reload and never archives a session', async (t) => {
   const f = await fixture(t);
-  await f.send('/m'); await f.pick(10);
+  await f.send('/m'); await f.pick(11);
   assert.equal(f.state.includesArchivedSessions(), true);
   const restored = await new QqStateStore(join(f.dir, 'state.json')).load();
   assert.equal(restored.includesArchivedSessions(), true);
@@ -166,7 +178,7 @@ test('QQ archive visibility survives reload and never archives a session', async
   await f.send('/m sessions'); await f.pick(7);
   assert.match(f.latestMenu().text, /已归档/);
   assert.equal(f.calls.length, 0);
-  await f.send('/m'); await f.pick(10);
+  await f.send('/m'); await f.pick(11);
   assert.equal(f.state.includesArchivedSessions(), false);
 });
 
@@ -208,7 +220,7 @@ test('QQ stale context, repeated clicks, and other group members cannot apply an
   await f.send('/m');
   const fresh = f.latestMenu();
   await Promise.all([f.pick(5, fresh), f.pick(5, fresh)]);
-  assert.equal(f.state.sessionFor(f.route), null);
+  assert.equal(f.state.sessionFor(f.route), 'session-new', '/new eagerly creates and binds the next session');
   assert.equal(f.sent.filter((item) => item.text === '已开启新会话。请发送你的问题。').length, 1);
 });
 
@@ -325,7 +337,7 @@ test('QQ status, help and partial catalogs retain usable navigation and escape M
   f.harness.listModels = async () => { throw new Error('catalog down'); };
   f.harness.workspaceSession = () => ({ models: f.harness.listModels });
   await f.send('/m');
-  assert.equal(f.latestMenu().keyboard.content.rows.flatMap((r) => r.buttons).length, 12);
+  assert.equal(f.latestMenu().keyboard.content.rows.flatMap((r) => r.buttons).length, 13);
   assert.match(f.latestMenu().text, /部分设置暂未加载/);
   const view = { title: '菜单', entries: [{ label: '[标题](https://example.invalid)', action: { kind: 'command', text: '/new' } }] };
   assert.ok(qqMenuText(view).includes('[标题]'));

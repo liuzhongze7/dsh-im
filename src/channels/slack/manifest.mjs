@@ -21,6 +21,7 @@ oauth_config:
       - files:read
       - files:write
       - groups:history
+      - im:read
       - im:history
       - mpim:history
       - reactions:write
@@ -28,6 +29,8 @@ settings:
   event_subscriptions:
     bot_events:
       - app_mention
+      - message.channels
+      - message.groups
       - message.im
   org_deploy_enabled: false
   socket_mode_enabled: true

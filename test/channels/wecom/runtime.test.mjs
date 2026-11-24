@@ -50,6 +50,23 @@ test('Enterprise WeChat runtime sends a connection test only to the remembered p
     chatId: 'group-target',
     body: { msgtype: 'markdown', markdown: { content: '主动投递' } },
   });
+  await runtime.sendProactiveText({ kind: 'user', route: { chatId: 'member-private' } },
+    '**同步回答**', { format: 'markdown' });
+  assert.deepEqual(client.sent[2], {
+    chatId: 'member-private', body: { msgtype: 'markdown', markdown: { content: '**同步回答**' } },
+  });
+  const rows = Array.from({ length: 500 }, (_, i) => `row_${i} = "中文😀";`);
+  await runtime.sendProactiveText({ kind: 'user', route: { chatId: 'member-private' } },
+    '```js\n' + rows.join('\n') + '\n```', { format: 'markdown' });
+  const chunks = client.sent.slice(3).map(call => call.body.markdown.content);
+  assert.ok(chunks.length > 1);
+  assert.ok(chunks.every(chunk => Buffer.byteLength(chunk) <= 18_000));
+  for (const row of rows) assert.equal(chunks.join('\n').split(row).length - 1, 1);
+  let failedCalls = 0;
+  client.sendMessage = async () => { failedCalls++; throw new Error('send failed'); };
+  await assert.rejects(runtime.sendProactiveText({ kind: 'user', route: { chatId: 'member-private' } },
+    '**失败**', { format: 'markdown' }), /send failed/);
+  assert.equal(failedCalls, 1);
   await runtime.stop();
 });
 
@@ -207,4 +224,32 @@ test('Enterprise WeChat runtime enables result-file delivery without per-bot con
   await askObserved.promise;
   assert.equal(typeof onArtifact, 'function');
   await runtime.stop();
+});
+
+test('Enterprise WeChat runtime forwards stream supervision options to the bridge', async () => {
+  const client = new FakeClient();
+  const bridgeOptionsSeen = [];
+  const runtime = new WecomRuntime({
+    config: { botId: 'wecom_bot', remoteBotId: 'remote-bot' },
+    secret: 'private-secret',
+    harness: { ensureRunning: async () => true },
+    state: {},
+    createClient: () => client,
+    streamRotateAfterMs: 1234,
+    streamSilentProbeMs: 567,
+    createBridge: (options) => {
+      bridgeOptionsSeen.push(options);
+      return { accept() {}, stop() {}, waitForIdle: async () => {} };
+    },
+  });
+  await runtime.start();
+  try {
+    assert.equal(bridgeOptionsSeen.length, 1);
+    const options = bridgeOptionsSeen[0];
+    assert.equal(options.streamRotateAfterMs, 1234);
+    assert.equal(options.streamSilentProbeMs, 567);
+    assert.equal(typeof options.replyTimeoutMs, 'number');
+  } finally {
+    await runtime.stop();
+  }
 });

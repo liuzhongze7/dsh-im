@@ -44,12 +44,12 @@ test('Discord production has no per-bot result-file Gate', async (t) => {
   };
   const ctx = {
     credentials: {},
-    apiProxy: {},
+    typertGateway: { invoke() {}, stream() {} },
     logger: () => ({ error() {}, warn() {}, info() {}, debug() {} }),
   };
   const createRuntime = (botId) => controllerOptions.createRuntime({
     botId,
-    config: { botId },
+    config: { botId, ownerUserId: '234567890123456789' },
     token: 'host-only',
   });
 
@@ -60,5 +60,8 @@ test('Discord production has no per-bot result-file Gate', async (t) => {
   await createRuntime('discord_not_listed');
   assert.equal(Object.hasOwn(runtimes[0], 'outboundArtifactsEnabled'), false);
   assert.equal(Object.hasOwn(runtimes[1], 'outboundArtifactsEnabled'), false);
+  assert.equal(runtimes[0].accessPolicy.isPrivileged('234567890123456789', 'direct'), true);
+  assert.equal(runtimes[0].accessPolicy.isPrivileged('234567890123456789', 'group'), true);
+  assert.equal(runtimes[0].accessPolicy.isPrivileged('345678901234567890', 'direct'), false);
   await production.close();
 });

@@ -7,10 +7,13 @@ import {
   DEFAULT_CONTEXT_ENHANCEMENT_CONFIG,
   DEFAULT_CONTEXT_GUIDANCE,
   captureContextEnhancement,
+  captureContextEnhancementSource,
   enhanceContextContent,
   normalizeContextEnhancementConfig,
   validateContextEnhancementConfig,
+  withSentAt,
 } from '../src/channels/shared/context-enhancement.mjs';
+import { execFileSync } from 'node:child_process';
 
 function config(overrides = {}) {
   const {
@@ -309,4 +312,87 @@ test('enhancement-only source failures leave the original message processable', 
   const content = [{ type: 'text', text: 'still send me' }];
   assert.equal(enhanceContextContent(content, snapshot(), () => { throw new Error('broken source'); }), content);
   assert.equal(enhanceContextContent(content, snapshot(), () => ({ get channel() { throw new Error('broken getter'); } })), content);
+});
+
+function sentAtProvider(fields, enabled = true) {
+  return {
+    botId: 'bot_sent_at',
+    getSettings: () => ({
+      group: { enabled: false, fields: [], guidance: '' },
+      direct: { enabled, fields, guidance: '' },
+    }),
+  };
+}
+
+/** A published moment that counts how often it is evaluated. */
+function countedSource(value = Date.parse('2026-09-28T14:03:07+08:00')) {
+  const counter = { reads: 0 };
+  const factory = withSentAt(() => ({ channel: 'weixin', senderId: 'u-1' }), () => {
+    counter.reads += 1;
+    return typeof value === 'function' ? value() : value;
+  });
+  return { counter, factory };
+}
+
+test('sentAt is never evaluated at capture time, only by a render that selects it', () => {
+  const selected = countedSource();
+  const captured = captureContextEnhancementSource(sentAtProvider(['sentAt']), 'direct', selected.factory);
+  assert.equal(selected.counter.reads, 0, 'capture must not read the moment');
+  assert.match(enhanceContextContent('hi', captured), /"sentAt":"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d"/);
+  assert.equal(selected.counter.reads, 1);
+
+  const other = countedSource();
+  const otherCapture = captureContextEnhancementSource(sentAtProvider(['senderId']), 'direct', other.factory);
+  assert.equal(enhanceContextContent('hi', otherCapture).includes('sentAt'), false);
+  assert.equal(other.counter.reads, 0, 'an unselected sentAt must not be read');
+
+  const off = countedSource();
+  assert.equal(captureContextEnhancementSource(sentAtProvider(['sentAt'], false), 'direct', off.factory), null);
+  assert.equal(captureContextEnhancementSource(undefined, 'direct', off.factory), null);
+  assert.equal(off.counter.reads, 0, 'a disabled or unconfigured scope must not read the moment');
+});
+
+test('an unreadable sentAt drops only that field, never the message', () => {
+  const throwing = countedSource(() => { throw new Error('clock unavailable'); });
+  const captured = captureContextEnhancementSource(
+    sentAtProvider(['senderId', 'sentAt']), 'direct', throwing.factory);
+  const warn = console.warn;
+  console.warn = () => {};
+  let rendered;
+  try {
+    rendered = enhanceContextContent('hi', captured);
+  } finally {
+    console.warn = warn;
+  }
+  assert.equal(rendered, '<dsh_im_source>{"senderId":"u-1"}</dsh_im_source>\n\nhi');
+
+  for (const unusable of ['', 'not a date', Number.NaN, 1.5]) {
+    const { factory } = countedSource(unusable);
+    const capture = captureContextEnhancementSource(sentAtProvider(['sentAt']), 'direct', factory);
+    assert.equal(enhanceContextContent('hi', capture), 'hi', String(unusable));
+  }
+});
+
+test('a channel that published no moment omits sentAt instead of using the local clock', () => {
+  const captured = captureContextEnhancementSource(
+    sentAtProvider(['senderId', 'sentAt']), 'direct', () => ({ senderId: 'u-1', sentAt: '2026-01-01 00:00:00' }));
+  assert.equal(enhanceContextContent('hi', captured), '<dsh_im_source>{"senderId":"u-1"}</dsh_im_source>\n\nhi');
+});
+
+test('sentAt renders in the Host time zone, in UTC and in UTC+8 alike', () => {
+  const moduleUrl = new URL('../src/channels/shared/context-enhancement.mjs', import.meta.url).href;
+  const script = `
+    const { captureContextEnhancementSource, enhanceContextContent, withSentAt } = await import(${JSON.stringify(moduleUrl)});
+    const provider = { botId: 'b', getSettings: () => ({
+      group: { enabled: false, fields: [], guidance: '' },
+      direct: { enabled: true, fields: ['sentAt'], guidance: '' } }) };
+    const factory = withSentAt(() => ({}), () => Date.parse('2026-09-28T14:03:07+08:00'));
+    process.stdout.write(enhanceContextContent('', captureContextEnhancementSource(provider, 'direct', factory)));
+  `;
+  const renderIn = (tz) => execFileSync(process.execPath, ['--input-type=module', '-e', script], {
+    env: { ...process.env, TZ: tz },
+    encoding: 'utf8',
+  });
+  assert.match(renderIn('UTC'), /"sentAt":"2026-09-28 06:03:07"/);
+  assert.match(renderIn('Asia/Shanghai'), /"sentAt":"2026-09-28 14:03:07"/);
 });

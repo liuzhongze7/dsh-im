@@ -1,9 +1,12 @@
+import { captureGroupHistory, groupHistoryEntry } from '../shared/group-history.mjs';
+import { createConnectionDiagnostics, atConnectionStage } from '../shared/connection-error.mjs';
 import { createHash, randomBytes } from 'node:crypto';
 
 import {
   areJidsSameUser,
   downloadMediaMessage,
   jidDecode,
+  jidNormalizedUser,
   normalizeMessageContent,
 } from '@whiskeysockets/baileys';
 
@@ -12,8 +15,12 @@ import { t } from '../shared/i18n.mjs';
 import { ImagePromptError } from '../shared/image-prompt.mjs';
 import { trackOutboundArtifactProviderPromise } from '../shared/semantic/artifact.mjs';
 import { createWhatsappBridgeStatus, WhatsappHarnessBridge } from './whatsapp-bridge.mjs';
+import { createTextDeliveryBlock } from '../shared/semantic/delivery.mjs';
+import { chunkMarkdownText } from '../shared/markdown-chunks.mjs';
+import { markdownToWhatsapp } from './whatsapp-markdown.mjs';
 import {
   WHATSAPP_ACCESS_MODES,
+  normalizeWhatsappAccountJid,
 } from './config-store.mjs';
 import { createWhatsappWebSession } from './whatsapp-web-session.mjs';
 
@@ -289,8 +296,23 @@ export function createWhatsappMediaDownloader({
   });
 }
 
+function whatsappAccountMatcher(accountJid, aliases) {
+  // PN and LID are separate identities unless the linked account supplies both.
+  const accountJids = new Set(
+    [accountJid, ...(Array.isArray(aliases) ? aliases : [])]
+      .map((jid) => normalizeWhatsappAccountJid(jidNormalizedUser(jid)))
+      .filter(Boolean),
+  );
+  return (jid) => {
+    const normalized = normalizeWhatsappAccountJid(jidNormalizedUser(jid));
+    return normalized !== null && accountJids.has(normalized);
+  };
+}
+
 export function normalizeWhatsappMessage(message, accountJid, {
   download = downloadMediaMessage,
+  accountAliases = [],
+  isBotMessage = () => false,
 } = {}) {
   const remoteJid = typeof message?.key?.remoteJid === 'string' ? message.key.remoteJid : '';
   const alternateRemoteJid = typeof message?.key?.remoteJidAlt === 'string'
@@ -300,8 +322,9 @@ export function normalizeWhatsappMessage(message, accountJid, {
     || remoteJid.endsWith('@newsletter')) return null;
   const group = remoteJid.endsWith('@g.us');
   const fromMe = message.key.fromMe === true;
+  const matchesAccount = whatsappAccountMatcher(accountJid, accountAliases);
   const selfChat = fromMe && !group
-    && [remoteJid, alternateRemoteJid].some((jid) => jid && areJidsSameUser(jid, accountJid));
+    && [remoteJid, alternateRemoteJid].some(matchesAccount);
   if (fromMe && !selfChat && !group) return null;
   const senderJid = fromMe ? accountJid : group ? message.key.participant : remoteJid;
   const senderAlternateJid = group && !fromMe ? message.key.participantAlt : alternateRemoteJid;
@@ -310,9 +333,12 @@ export function normalizeWhatsappMessage(message, accountJid, {
   const content = normalizeMessageContent(message.message);
   const context = messageContext(content);
   const mentioned = Array.isArray(context?.mentionedJid)
-    && context.mentionedJid.some((jid) => areJidsSameUser(jid, accountJid));
-  const replyToSelf = typeof context?.participant === 'string'
-    && areJidsSameUser(context.participant, accountJid);
+    && context.mentionedJid.some(matchesAccount);
+  // The linked account also sends human messages. Only a known bot message
+  // in this chat counts as a reply trigger, not every reply to the account.
+  const replyToBot = typeof context?.participant === 'string'
+    && matchesAccount(context.participant)
+    && isBotMessage(remoteJid, context.stanzaId) === true;
   const image = whatsappImageSource(message, content, download, { viewOnce });
   const file = whatsappFileSource(message, content, download);
   const replyTo = whatsappReplyReference(context);
@@ -331,7 +357,7 @@ export function normalizeWhatsappMessage(message, accountJid, {
     images: image ? [image] : [],
     files: file ? [file] : [],
     ...(replyTo ? { replyTo } : {}),
-    addressed: !group || fromMe || mentioned || replyToSelf,
+    addressed: !group || mentioned || replyToBot,
     selfChat,
     replyTarget: { jid: remoteJid, quoted: message, selfChat },
     reactionTarget: { jid: remoteJid, key: message.key },
@@ -441,6 +467,7 @@ function whatsappArtifactError(error) {
 export class WhatsappBotClient {
   #socket;
   #outboundIds;
+  #rememberBotMessage;
   #signal;
   #abortController = new AbortController();
   #mediaUploadTimeoutMs;
@@ -452,9 +479,11 @@ export class WhatsappBotClient {
     signal,
     mediaUploadTimeoutMs = WHATSAPP_MEDIA_UPLOAD_TIMEOUT_MS,
     logger = console,
+    rememberBotMessage = async () => {},
   } = {}) {
     this.#socket = socket;
     this.#outboundIds = outboundIds;
+    this.#rememberBotMessage = rememberBotMessage;
     this.#signal = signal
       ? AbortSignal.any([signal, this.#abortController.signal])
       : this.#abortController.signal;
@@ -466,6 +495,25 @@ export class WhatsappBotClient {
     await this.#stopTyping(target.jid);
     const providerMessageIds = [];
     for (const [index, chunk] of splitMessageText(text, WHATSAPP_TEXT_LIMIT).entries()) {
+      const result = await this.#sendTextMessage(target, chunk, { quote: index === 0 });
+      providerMessageIds.push(result.key.id);
+    }
+    return { providerMessageIds };
+  }
+
+  async sendDelivery(target, value) {
+    const block = createTextDeliveryBlock(value);
+    if (block.format === 'plain') return this.sendText(target, block.text);
+    let chunks;
+    try {
+      chunks = chunkMarkdownText(markdownToWhatsapp(block.text), WHATSAPP_TEXT_LIMIT);
+    } catch {
+      this.#logger.warn?.('[dsh-im:whatsapp] Markdown could not be prepared; sending plain text');
+      return this.sendText(target, block.text);
+    }
+    await this.#stopTyping(target.jid);
+    const providerMessageIds = [];
+    for (const [index, chunk] of chunks.entries()) {
       const result = await this.#sendTextMessage(target, chunk, { quote: index === 0 });
       providerMessageIds.push(result.key.id);
     }
@@ -490,6 +538,7 @@ export class WhatsappBotClient {
     );
     const result = await waitWithSignal(pending, this.#signal);
     this.#outboundIds.remember(result?.key?.id);
+    await this.#rememberBotMessage(target.jid, edit?.id ?? result?.key?.id ?? messageId);
     return {
       ...result,
       key: { remoteJid: target.jid, fromMe: true, id: messageId, ...result?.key },
@@ -623,6 +672,7 @@ export class WhatsappBotClient {
     }
     this.#signal?.throwIfAborted();
     this.#outboundIds.remember(result?.key?.id);
+    await this.#rememberBotMessage(target.jid, result?.key?.id ?? messageId);
     return result;
   }
 
@@ -675,8 +725,10 @@ export class WhatsappRuntime {
   #harness;
   #state;
   #contextEnhancement;
+  #groupHistory;
   #accessPolicy;
   #logger;
+  #diagnostics;
   #replyTimeoutMs;
   #connectTimeoutMs;
   #mediaUploadTimeoutMs;
@@ -694,6 +746,7 @@ export class WhatsappRuntime {
     harness,
     state,
     contextEnhancement,
+    groupHistory,
     accessPolicy,
     logger = console,
     replyTimeoutMs = 600_000,
@@ -709,8 +762,9 @@ export class WhatsappRuntime {
     this.#harness = harness;
     this.#state = state;
     this.#contextEnhancement = contextEnhancement;
+    this.#groupHistory = groupHistory;
     this.#accessPolicy = accessPolicy;
-    this.#logger = logger;
+    this.#logger = logger; this.#diagnostics = createConnectionDiagnostics({ channel: 'whatsapp', logger });
     this.#replyTimeoutMs = replyTimeoutMs;
     this.#connectTimeoutMs = connectTimeoutMs;
     if (!Number.isSafeInteger(mediaUploadTimeoutMs) || mediaUploadTimeoutMs <= 0) {
@@ -738,8 +792,8 @@ export class WhatsappRuntime {
     await this.stop();
     this.#status.startedAt = new Date().toISOString();
     this.#status.connectionState = 'connecting';
-    this.#status.lastError = null;
-    await this.#harness.ensureRunning();
+    this.#status.lastError = null; this.#status.error = null; this.#diagnostics.clear();
+    await atConnectionStage('harness.check', () => this.#harness.ensureRunning());
     this.#status.harnessReachable = true;
     const controller = new AbortController();
     this.#abortController = controller;
@@ -757,13 +811,36 @@ export class WhatsappRuntime {
           { code: 'relink-required' },
         )),
         onMessage: async (raw, context) => {
+          const linkedAccount = context?.socket?.user;
           const message = normalizeWhatsappMessage(raw, this.#config.accountJid, {
+            isBotMessage: (jid, id) => this.#state.isBotMessage?.(jid, id) === true,
+            accountAliases: [
+              linkedAccount?.id,
+              linkedAccount?.lid,
+              linkedAccount?.phoneNumber,
+            ],
             download: createWhatsappMediaDownloader({
               socket: context?.socket,
               logger: this.#logger,
             }),
           });
           if (!message || outboundIds.has(message.providerMessageId) || !this.#bridge) return;
+          let groupName;
+          if (this.#groupHistory && message.kind === 'group' && message.addressed) {
+            let timeout;
+            try {
+              groupName = (await Promise.race([
+                context?.socket?.groupMetadata?.(message.conversationId),
+                new Promise((resolve) => { timeout = setTimeout(resolve, 2500); timeout.unref?.(); }),
+              ]))?.subject;
+            } catch { /* optional metadata must not block normal replies */ }
+            finally { clearTimeout(timeout); }
+          }
+          if (!hasViewOnceWrapper(raw.message)) {
+            await captureGroupHistory(this.#groupHistory, message, groupHistoryEntry('whatsapp', raw, message, { groupName }), {
+              logger: this.#logger,
+            });
+          }
           this.#status.lastCheckedAt = Date.now();
           await this.#bridge.accept(message);
         },
@@ -771,7 +848,8 @@ export class WhatsappRuntime {
           if (controller.signal.aborted) return;
           this.#status.ready = false;
           this.#status.connectionState = 'failed';
-          this.#status.lastError = error?.message ?? 'WhatsApp Web connection closed';
+          this.#status.error = this.#diagnostics.report(error, { operation: 'connection.monitor', botId: this.#config?.botId, automatic: true }).publicError;
+          this.#status.lastError = this.#status.error.message;
         },
       });
       this.#session = session;
@@ -790,6 +868,15 @@ export class WhatsappRuntime {
         throw new Error('WhatsApp linked account does not match the saved bot');
       }
       const client = new WhatsappBotClient(session.socket, outboundIds, {
+        rememberBotMessage: async (jid, id) => {
+          try {
+            await this.#state.rememberBotMessage?.(jid, id);
+          } catch (error) {
+            // Delivery already succeeded; a bookkeeping failure must not turn
+            // it into a failed send that can be retried and duplicated.
+            this.#logger.warn?.('[dsh-im:whatsapp] failed to persist bot message identity:', error);
+          }
+        },
         signal: controller.signal,
         mediaUploadTimeoutMs: this.#mediaUploadTimeoutMs,
         logger: this.#logger,
@@ -822,7 +909,8 @@ export class WhatsappRuntime {
     } catch (error) {
       this.#status.ready = false;
       this.#status.connectionState = 'failed';
-      this.#status.lastError = error?.message ?? String(error);
+      this.#status.error = this.#diagnostics.report(error, { operation: 'connection.monitor', botId: this.#config?.botId, automatic: true }).publicError;
+      this.#status.lastError = this.#status.error.message;
       await this.stop();
       throw error;
     }
@@ -849,7 +937,17 @@ export class WhatsappRuntime {
     return { sent: true };
   }
 
-  async sendProactiveText(target, text, { signal } = {}) {
+  async presentSessionSyncApproval(target, interaction, options = {}) {
+    if (!this.#status.ready || !this.#bridge) return false;
+    const actor = typeof target?.route?.jid === 'string' ? target.route.jid.trim() : '';
+    if (!actor) return false;
+    return this.#bridge.presentSessionSyncApproval(interaction, {
+      key: options.key, actor, validate: options.validate,
+      send: (text) => this.sendProactiveText(target, text),
+    }, options);
+  }
+
+  async sendProactiveText(target, text, { signal, format = 'plain' } = {}) {
     const jid = typeof target?.route?.jid === 'string' ? target.route.jid.trim() : '';
     const validUser = target?.kind === 'user'
       && /^[^@\s]+@(s\.whatsapp\.net|lid)$/.test(jid);
@@ -865,6 +963,9 @@ export class WhatsappRuntime {
       throw error;
     }
     signal?.throwIfAborted();
+    if (format === 'markdown') {
+      return this.#client.sendDelivery({ jid }, createTextDeliveryBlock(text, format));
+    }
     return this.#client.sendText({ jid }, text);
   }
 

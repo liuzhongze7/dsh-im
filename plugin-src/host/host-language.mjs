@@ -60,8 +60,11 @@ export function createHostLanguageController({
 
   const mirrorTag = () => (typeof store?.getLanguageTag === 'function' ? store.getLanguageTag() : null);
 
+  const explicitTag = () => (typeof store?.getExplicitTag === 'function' ? store.getExplicitTag() : null);
+
   const resolution = () => resolveHostLanguageTag({
     config: configLanguage,
+    explicit: explicitTag(),
     settings: settingsTag(),
     mirror: mirrorTag(),
   });
@@ -84,6 +87,32 @@ export function createHostLanguageController({
 
     /** The resolution as it stands, without switching the active language. */
     snapshot: () => describe(resolution()),
+
+    /**
+     * Pin the plugin's own message language, or pass null (the settings page's
+     * "same as the DSH interface") to clear that selection. It outranks DSH's
+     * locale, so a reader who wants English DSH with Russian bot messages can
+     * say so; an operator's `language` option still outranks both.
+     */
+    async select(value) {
+      const choice = value === null || value === undefined ? null : value;
+      if (typeof store?.setExplicitTag !== 'function') return apply();
+      if (choice === null) {
+        await store.setExplicitTag(null);
+      } else {
+        const tag = normalizeInterfaceLanguageTag(choice);
+        if (tag === null) {
+          const error = new Error('Invalid message language selection.');
+          error.code = 'interface-language-invalid';
+          throw error;
+        }
+        await store.setExplicitTag(tag);
+      }
+      return apply();
+    },
+
+    /** The current explicit selection, or null when the plugin follows DSH. */
+    explicit: explicitTag,
 
     /** Record the interface locale reported by the settings UI, then re-resolve. */
     async mirror(value) {
@@ -125,33 +154,33 @@ export function installHostLanguage(ctx, config = {}, internals = {}) {
     config: config.language ?? process.env.DSH_IM_LANGUAGE,
     logger,
   });
-  // Read an already-attached settings service synchronously: channels start
-  // inside the same activation, and waiting for the injection callback would
-  // let the first bot register its command menu in the previous language and
-  // then need a second push. The injection below keeps it live afterwards and
-  // covers a provider that attaches later.
-  controller.observeSettings(
-    () => ctx?.settings?.get?.(DSH_LOCALE_NAMESPACE)?.[DSH_LOCALE_PREFERENCE_FIELD],
-  );
-  const ready = Promise.resolve()
+  // Only the injected context may access settings. Waiting for its current
+  // lifecycle work does not wait for an absent provider to arrive.
+  let settingsBinding;
+  const readPreference = (settings) => typeof settings?.describe === 'function'
+    ? settings.describe().find((row) => row.ns === DSH_LOCALE_NAMESPACE)
+      ?.value?.[DSH_LOCALE_PREFERENCE_FIELD]
+    : settings?.get?.(DSH_LOCALE_NAMESPACE)?.[DSH_LOCALE_PREFERENCE_FIELD];
+  if (typeof ctx?.inject === 'function') {
+    settingsBinding = ctx.inject(['settings'], (settingsCtx) => {
+      controller.observeSettings(() => readPreference(settingsCtx.settings));
+      for (const event of ['settings/updated', 'settings/document-updated']) {
+        settingsCtx.on(event, (namespace) => {
+          if (namespace === DSH_LOCALE_NAMESPACE) controller.apply();
+        });
+      }
+      // Do not retain a reader bound to a withdrawn service/context.
+      return () => { controller.observeSettings(); };
+    });
+  }
+  const ready = Promise.resolve(settingsBinding)
     .then(() => store.load?.())
     .then(() => controller.apply(), (error) => {
       logger?.error?.(
-        '[dsh-im] could not read the mirrored DSH interface language; falling back to Chinese',
+        '[dsh-im] could not initialize the DSH interface language; falling back to the available language',
         error,
       );
       return controller.snapshot();
     });
-  if (typeof ctx?.inject === 'function') {
-    ctx.inject(['settings'], (settingsCtx) => {
-      controller.observeSettings(
-        () => settingsCtx.settings?.get?.(DSH_LOCALE_NAMESPACE)?.[DSH_LOCALE_PREFERENCE_FIELD],
-      );
-      settingsCtx.on('settings/updated', (namespace) => {
-        if (namespace !== DSH_LOCALE_NAMESPACE) return;
-        controller.apply();
-      });
-    });
-  }
   return Object.freeze({ ...controller, ready });
 }

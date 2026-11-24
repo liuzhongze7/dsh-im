@@ -1,8 +1,50 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { PluginConfigStore } from '../../../src/channels/feishu/plugin-config-store.mjs';
 import { MultiBotDshFeishuController } from '../../../src/channels/feishu/multi-bot-controller.mjs';
+import { normalizeFeishuVoiceConfig } from '../../../src/channels/feishu/voice-config.mjs';
+import { createFeishuRpcHandler, FEISHU_ENDPOINTS } from '../../../plugin-src/host/channels/feishu/rpc.mjs';
+import { normalizeBotsSnapshot } from '../../../plugin-src/client/channels/feishu/api.js';
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+test('panel management RPC preserves legacy defaults, validates input, and updates only the saved bot without reconnecting', async (t) => {
+  const existing = bot('bot_panels', 'panels');
+  const other = bot('bot_other', 'other');
+  const fx = fixture({ bots: [existing, other], secrets: { [existing.secretRef]: 'secret', [other.secretRef]: 'secret2' } });
+  t.after(() => fx.controller.close());
+  await fx.controller.initialize();
+  const rpc = createFeishuRpcHandler(fx.controller);
+  const runtime = fx.runtimes.get(existing.id)[0];
+  const updates = [];
+  runtime.setStepCardPanels = (value) => updates.push(value);
+  const snapshot = () => rpc(FEISHU_ENDPOINTS.status, {});
+  assert.deepEqual((await snapshot()).value.bots[0].stepCardPanels, { thinkingExpanded: false, toolsExpanded: true });
+  const panels = { thinkingExpanded: true, toolsExpanded: false };
+  const result = await rpc(FEISHU_ENDPOINTS.setStepCardPanels, { botId: existing.id, stepCardPanels: panels });
+  assert.equal(result.ok, true);
+  assert.deepEqual(normalizeBotsSnapshot(result.value).bots[0].stepCardPanels, panels);
+  assert.deepEqual(fx.configStore.getBot(existing.id).stepCardPanels, panels);
+  assert.deepEqual(updates, [panels]);
+  assert.equal(runtime.stops, 0);
+  assert.equal(fx.runtimes.get(existing.id).length, 1);
+  assert.deepEqual(result.value.bots[1].stepCardPanels, { thinkingExpanded: false, toolsExpanded: true });
+  for (const stepCardPanels of [null, [], {}, { thinkingExpanded: true }, { thinkingExpanded: 'true', toolsExpanded: false }, { ...panels, extra: true }]) {
+    const bad = await rpc(FEISHU_ENDPOINTS.setStepCardPanels, { botId: existing.id, stepCardPanels });
+    assert.equal(bad.ok, false);
+    assert.equal(bad.error.code, 'bad-request');
+  }
+  assert.equal((await rpc(FEISHU_ENDPOINTS.setStepCardPanels, { botId: existing.id, stepCardPanels: panels, stepPush: true })).ok, false);
+  assert.equal((await rpc(FEISHU_ENDPOINTS.setStepCardPanels, { botId: 'missing', stepCardPanels: panels })).ok, false);
+  assert.deepEqual(updates, [panels]);
+  fx.configStore.saveBot = async () => { throw new Error('disk full'); };
+  await assert.rejects(fx.controller.updateStepCardPanels(existing.id, { thinkingExpanded: false, toolsExpanded: true }), /disk full/);
+  assert.deepEqual(updates, [panels], 'failed persistence must not change the runtime');
+  assert.deepEqual((await snapshot()).value.bots[0].stepCardPanels, panels);
+});
 
 async function waitFor(predicate, timeoutMs = 1000) {
   const deadline = Date.now() + timeoutMs;
@@ -48,6 +90,7 @@ function bot(id, suffix = id) {
 
 function fixture({
   bots = [],
+  configStore: suppliedStore,
   secrets = {},
   createBotIds = [],
   failResolveRefs = new Set(),
@@ -58,7 +101,7 @@ function fixture({
   credentialSet,
   deleteState,
 } = {}) {
-  const configStore = new MemoryConfigStore(bots);
+  const configStore = suppliedStore ?? new MemoryConfigStore(bots);
   const values = new Map(Object.entries(secrets));
   const unsetCalls = [];
   const registrationRuns = [];
@@ -94,7 +137,8 @@ function fixture({
       },
     },
     configStore,
-    createRuntime: async ({ botId, config, appSecret, repair }) => {
+    createRuntime: async ({ botId, config, appSecret, repair, acceptExternal }) => {
+      const lifetime = new AbortController();
       const status = {
         ready: false,
         feishuLongConnectionState: 'idle',
@@ -110,7 +154,9 @@ function fixture({
         proactiveSends: [],
         probes: [],
         responseModes: [],
+        voiceCalls: [],
         repair,
+        acceptExternal: (event, { signal } = {}) => acceptExternal(event, { signal: signal ? AbortSignal.any([signal, lifetime.signal]) : lifetime.signal }),
         get status() { return structuredClone(status); },
         async start() {
           runtime.starts += 1;
@@ -120,6 +166,7 @@ function fixture({
           status.harnessReachable = true;
         },
         async stop() {
+          lifetime.abort(Object.assign(new Error('runtime-stopped'), { code: 'consumer-unavailable' }));
           runtime.stops += 1;
           status.ready = false;
           status.feishuLongConnectionState = 'idle';
@@ -135,6 +182,9 @@ function fixture({
         setGroupResponseMode(mode) {
           runtime.responseModes.push(mode);
           runtime.config.groupResponseMode = mode;
+        },
+        setVoice(config) {
+          runtime.voiceCalls.push(structuredClone(config));
         },
         async beginCardActionProbe(options) {
           runtime.probes.push(structuredClone(options));
@@ -187,6 +237,8 @@ test('QR registration separates events from card callbacks', async () => {
   assert.deepEqual(run.options.addons.callbacks.items, ['card.action.trigger']);
   assert.ok(run.options.addons.scopes.tenant.includes('im:resource'));
   assert.ok(run.options.addons.scopes.tenant.includes('im:message.group_at_msg.include_bot:readonly'));
+  assert.ok(run.options.addons.scopes.tenant.includes('im:message.group_msg'));
+  assert.ok(run.options.addons.scopes.tenant.includes('im:message:readonly'));
   assert.equal(run.options.addons.scopes.tenant.includes('im:resource:upload'), false);
   assert.ok(run.options.addons.scopes.tenant.includes('application:app_slash_command:read'));
   assert.ok(run.options.addons.scopes.tenant.includes('application:app_slash_command:write'));
@@ -196,6 +248,9 @@ test('QR registration separates events from card callbacks', async () => {
     user_info: { open_id: 'ou_callbacks', tenant_brand: 'feishu' },
   });
   await waitFor(() => fx.controller.registrationStatus(attemptId).registration.state === 'succeeded');
+  assert.equal(fx.configStore.getBot('bot_callbacks').groupMessagePermissionGranted, true);
+  assert.equal(fx.controller.status().bots[0].groupMessagePermissionGranted, true);
+  assert.equal(fx.controller.status().bots[0].groupResponseMode, 'mention');
   await fx.controller.close();
 });
 
@@ -224,7 +279,7 @@ test('group response mode defaults to mention and updates the live runtime witho
   await fx.controller.close();
 });
 
-test('groupTopicReply persists and reaches the live runtime without reconnecting', async () => {
+test('mentionTopicReply persists and reaches the live runtime without reconnecting', async () => {
   const existing = bot('bot_topic_reply', 'topic_reply');
   const fx = fixture({
     bots: [existing],
@@ -232,19 +287,19 @@ test('groupTopicReply persists and reaches the live runtime without reconnecting
   });
   await fx.controller.initialize();
 
-  assert.equal(fx.controller.status().bots[0].groupTopicReply, false);
+  assert.equal(fx.controller.status().bots[0].mentionTopicReply, true);
   const runtime = fx.runtimes.get(existing.id)[0];
   const topicReplies = [];
-  runtime.setGroupTopicReply = (value) => topicReplies.push(value);
-  const updated = await fx.controller.updateGroupTopicReply(existing.id, true);
+  runtime.setMentionTopicReply = (value) => topicReplies.push(value);
+  const updated = await fx.controller.updateMentionTopicReply(existing.id, false);
 
-  assert.equal(updated.bots[0].groupTopicReply, true);
-  assert.equal(fx.configStore.getBot(existing.id).groupTopicReply, true);
-  assert.deepEqual(topicReplies, [true]);
+  assert.equal(updated.bots[0].mentionTopicReply, false);
+  assert.equal(fx.configStore.getBot(existing.id).mentionTopicReply, false);
+  assert.deepEqual(topicReplies, [false]);
   assert.equal(fx.runtimes.get(existing.id).length, 1);
   await assert.rejects(
-    fx.controller.updateGroupTopicReply(existing.id, 'yes'),
-    /Invalid Feishu group topic reply flag/,
+    fx.controller.updateMentionTopicReply(existing.id, 'yes'),
+    /Invalid Feishu mention topic reply flag/,
   );
   await fx.controller.close();
 });
@@ -274,6 +329,40 @@ test('stepPush persists and reaches the live runtime without reconnecting', asyn
   await fx.controller.close();
 });
 
+test('slashPanel persists, normalizes, and reaches the live runtime without reconnecting', async () => {
+  const existing = bot('bot_slash_panel', 'slash_panel');
+  const fx = fixture({
+    bots: [existing],
+    secrets: { [existing.secretRef]: 'stable-secret' },
+  });
+  await fx.controller.initialize();
+
+  // A bot that never configured the panel follows the shipped manifest.
+  assert.deepEqual(fx.controller.status().bots[0].slashPanel, { mode: 'default', order: [] });
+  const runtime = fx.runtimes.get(existing.id)[0];
+  const panels = [];
+  runtime.setSlashPanel = (value) => panels.push(value);
+  const updated = await fx.controller.updateSlashPanel(existing.id, {
+    mode: 'custom',
+    order: ['new', 'stop'],
+  });
+
+  assert.deepEqual(updated.bots[0].slashPanel, { mode: 'custom', order: ['new', 'stop'] });
+  assert.deepEqual(fx.configStore.getBot(existing.id).slashPanel, { mode: 'custom', order: ['new', 'stop'] });
+  assert.deepEqual(panels, [{ mode: 'custom', order: ['new', 'stop'] }]);
+  // The panel lives on Feishu's side: recording it must not bounce the bot.
+  assert.equal(fx.runtimes.get(existing.id).length, 1);
+  await assert.rejects(
+    fx.controller.updateSlashPanel(existing.id, { mode: 'custom', order: ['nope'] }),
+    /Invalid Feishu slash panel config/,
+  );
+  await assert.rejects(
+    fx.controller.updateSlashPanel(existing.id, { mode: 'default', order: ['new'] }),
+    /Invalid Feishu slash panel config/,
+  );
+  await fx.controller.close();
+});
+
 test('stepPushMode persists, normalizes, and reaches the live runtime without reconnecting', async () => {
   const existing = bot('bot_step_push_mode', 'step_push_mode');
   const fx = fixture({
@@ -293,9 +382,48 @@ test('stepPushMode persists, normalizes, and reaches the live runtime without re
   assert.equal(fx.configStore.getBot(existing.id).stepPushMode, 'streaming_card');
   assert.deepEqual(modes, ['streaming_card']);
   assert.equal(fx.runtimes.get(existing.id).length, 1);
+  const live = await fx.controller.updateStepPushMode(existing.id, 'live_cot');
+  assert.equal(live.bots[0].stepPushMode, 'live_cot');
+  assert.equal(fx.configStore.getBot(existing.id).stepPushMode, 'live_cot');
+  assert.deepEqual(modes, ['streaming_card', 'live_cot']);
   await assert.rejects(
     fx.controller.updateStepPushMode(existing.id, 'bubble'),
     /Invalid Feishu step push mode/,
+  );
+  await fx.controller.close();
+});
+
+test('voice persists, normalizes, and reaches the live runtime without reconnecting', async () => {
+  const existing = bot('bot_voice', 'voice');
+  const fx = fixture({
+    bots: [existing],
+    secrets: { [existing.secretRef]: 'stable-secret', MY_KEY: 'dashscope-key' },
+  });
+  await fx.controller.initialize();
+
+  // 未配置时不返回语音配置,页面据此回显“关闭”,与后台实际状态一致。
+  assert.equal(fx.controller.status().bots[0].voice, null);
+  const runtime = fx.runtimes.get(existing.id)[0];
+
+  const normalized = normalizeFeishuVoiceConfig({ enabled: true, secretRef: 'MY_KEY', ttsVoice: 'Cherry' });
+  const updated = await fx.controller.updateVoice(existing.id, {
+    enabled: true, secretRef: 'MY_KEY', ttsVoice: 'Cherry',
+  });
+
+  // 保存 → 状态查询 → 页面回显:状态必须携带归一化后的 voice,刷新后仍显示开启。
+  assert.deepEqual(updated.bots[0].voice, normalized);
+  assert.equal(fx.configStore.getBot(existing.id).voice.ttsVoice, 'Cherry');
+  assert.deepEqual(runtime.voiceCalls, [{ config: normalized, secret: 'dashscope-key' }]);
+  assert.equal(fx.runtimes.get(existing.id).length, 1);
+
+  const off = await fx.controller.updateVoice(existing.id, null);
+  assert.equal(off.bots[0].voice, null);
+  assert.equal(fx.configStore.getBot(existing.id).voice, null);
+  assert.deepEqual(runtime.voiceCalls[1], { config: null, secret: null });
+
+  await assert.rejects(
+    fx.controller.updateVoice(existing.id, 'yes'),
+    /Invalid Feishu voice configuration/,
   );
   await fx.controller.close();
 });
@@ -370,6 +498,58 @@ test('group-message authorization grants only its scope, enables all mode, and r
   await fx.controller.close();
 });
 
+test('group recording authorization preserves mention mode', async () => {
+  const existing = bot('bot_group_permission', 'group_permission');
+  const fx = fixture({
+    bots: [existing],
+    secrets: { [existing.secretRef]: 'stable-secret' },
+    verifyApp: async () => ({
+      name: existing.botName,
+      openId: existing.botOpenId,
+      activated: existing.activated,
+    }),
+  });
+  await fx.controller.initialize();
+  const oldRuntime = fx.runtimes.get(existing.id)[0];
+
+  const started = fx.controller.startGroupMessagePermission(existing.id, { preserveResponseMode: true });
+  const duplicate = fx.controller.startGroupMessagePermission(existing.id, { preserveResponseMode: true });
+  const attemptId = started.registration.attempt;
+  assert.equal(duplicate.registration.attempt, attemptId);
+  assert.equal(started.registration.operation, 'group_message_permission');
+  assert.equal(started.registration.botId, existing.id);
+
+  await waitFor(() => fx.registrationRuns.length === 1);
+  const run = fx.registrationRuns.shift();
+  assert.equal(run.options.appId, existing.appId);
+  assert.equal(Object.hasOwn(run.options, 'createOnly'), false);
+  assert.deepEqual(run.options.addons, {
+    preset: false,
+    scopes: { tenant: ['im:message.group_msg'] },
+  });
+  run.options.onQRCodeReady({
+    url: callbackRepairQrUrl(existing.appId),
+    expireIn: 60,
+  });
+  run.resolve({
+    client_id: existing.appId,
+    client_secret: 'stable-secret',
+    user_info: { open_id: existing.ownerOpenIds[0], tenant_brand: existing.domain },
+  });
+
+  await waitFor(() => fx.controller.registrationStatus(attemptId).registration.state === 'succeeded');
+  const saved = fx.configStore.getBot(existing.id);
+  assert.equal(saved.groupMessagePermissionGranted, true);
+  assert.equal(saved.groupResponseMode ?? 'mention', 'mention');
+  assert.equal(oldRuntime.stops, 1);
+  assert.equal(fx.runtimes.get(existing.id).length, 2);
+  assert.equal(fx.runtimes.get(existing.id)[1].config.groupResponseMode ?? 'mention', 'mention');
+  const status = fx.controller.registrationStatus(attemptId);
+  assert.equal(status.bots[0].groupMessagePermissionGranted, true);
+  assert.equal(status.bots[0].groupResponseMode, 'mention');
+  await fx.controller.close();
+});
+
 test('cancelling group-message authorization before confirmation preserves mention mode', async () => {
   const existing = bot('bot_group_permission_cancel', 'group_permission_cancel');
   const fx = fixture({
@@ -390,7 +570,7 @@ test('cancelling group-message authorization before confirmation preserves menti
   await fx.controller.close();
 });
 
-test('callback repair is deduplicated per bot, updates only its secret, and proves the callback', async () => {
+test('callback repair is deduplicated per bot, records granted permissions, and proves the callback', async () => {
   const existing = bot('bot_existing', 'existing');
   const fx = fixture({
     bots: [existing],
@@ -430,6 +610,7 @@ test('callback repair is deduplicated per bot, updates only its secret, and prov
         'im:message:readonly',
         'im:resource',
         'im:message.group_at_msg.include_bot:readonly',
+        'im:message.group_msg',
         'application:app_slash_command:read',
         'application:app_slash_command:write',
       ],
@@ -452,11 +633,14 @@ test('callback repair is deduplicated per bot, updates only its secret, and prov
   assert.equal(result.registration.operation, 'callback_repair');
   assert.equal(result.registration.botId, existing.id);
   assert.equal(result.registration.stage, 'verified');
-  assert.deepEqual(fx.configStore.list(), [existing]);
+  assert.deepEqual(fx.configStore.list(), [{ ...existing, groupMessagePermissionGranted: true }]);
+  assert.equal(result.bots[0].groupMessagePermissionGranted, true);
+  assert.equal(result.bots[0].groupResponseMode, 'mention');
   assert.equal(fx.values.get(existing.secretRef), 'rotated-secret');
   assert.equal(history.length, 2);
   assert.equal(oldRuntime.stops, 1);
   assert.equal(history[1].appSecret, 'rotated-secret');
+  assert.equal(history[1].config.groupMessagePermissionGranted, true);
   assert.deepEqual(history[1].probes, [{
     expectedOperatorOpenId: existing.ownerOpenIds[0],
     timeoutMs: 50,
@@ -499,6 +683,56 @@ test('callback repair with an unchanged secret still refreshes the target runtim
     timeoutMs: 50,
   }]);
   await fx.controller.close();
+});
+
+test('permission repair persists group access across reload and preserves both reply modes', async (t) => {
+  for (const mode of ['mention', 'all']) await t.test(mode, async (t) => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-feishu-permissions-'));
+    const path = join(root, 'bots.json');
+    const store = await new PluginConfigStore(path).load();
+    const existing = await store.saveBot({ ...bot('bot_repair', 'repair'), groupResponseMode: mode,
+      groupMessagePermissionGranted: false, mentionTopicReply: false, stepPush: true });
+    const fx = fixture({ configStore: store, secrets: { [existing.secretRef]: 'stable-secret' },
+      verifyApp: async () => ({ openId: existing.botOpenId }) });
+    t.after(async () => { await fx.controller.close(); await rm(root, { recursive: true, force: true }); });
+    await fx.controller.initialize();
+    const started = fx.controller.startCallbackRepair(existing.id);
+    const attemptId = started.registration.attempt;
+    await waitFor(() => fx.registrationRuns.length === 1);
+    const run = fx.registrationRuns.shift();
+    run.options.onQRCodeReady({ url: callbackRepairQrUrl(existing.appId), expireIn: 60 });
+    run.resolve({ client_id: existing.appId, client_secret: 'stable-secret',
+      user_info: { open_id: existing.ownerOpenIds[0], tenant_brand: 'feishu' } });
+    await waitFor(() => fx.controller.registrationStatus(attemptId).registration.state === 'succeeded');
+    const reloaded = await new PluginConfigStore(path).load();
+    assert.deepEqual(reloaded.getBot(existing.id), { ...existing, groupMessagePermissionGranted: true });
+    assert.equal(fx.controller.status().bots[0].groupMessagePermissionGranted, true);
+    assert.equal(fx.controller.status().bots[0].groupResponseMode, mode);
+    assert.equal(fx.runtimes.get(existing.id).at(-1).config.groupResponseMode, mode);
+  });
+});
+
+test('permission repair reports a failed state save without claiming local activation', async (t) => {
+  const existing = bot('bot_repair_save', 'repair_save');
+  const fx = fixture({ bots: [existing], secrets: { [existing.secretRef]: 'stable-secret' },
+    verifyApp: async () => ({ openId: existing.botOpenId }) });
+  t.after(() => fx.controller.close());
+  await fx.controller.initialize();
+  fx.configStore.saveBot = async () => { throw new Error('private storage diagnostic'); };
+  const started = fx.controller.startCallbackRepair(existing.id);
+  const attemptId = started.registration.attempt;
+  await waitFor(() => fx.registrationRuns.length === 1);
+  const run = fx.registrationRuns.shift();
+  run.options.onQRCodeReady({ url: callbackRepairQrUrl(existing.appId), expireIn: 60 });
+  run.resolve({ client_id: existing.appId, client_secret: 'stable-secret',
+    user_info: { open_id: existing.ownerOpenIds[0], tenant_brand: 'feishu' } });
+  await waitFor(() => fx.controller.registrationStatus(attemptId).registration.state === 'error');
+  const result = fx.controller.registrationStatus(attemptId);
+  assert.equal(result.registration.error.code, 'repair_permissions_save_failed');
+  assert.equal(result.bots[0].groupMessagePermissionGranted, false);
+  assert.deepEqual(fx.configStore.getBot(existing.id), existing);
+  assert.equal(fx.runtimes.get(existing.id).length, 1);
+  assert.doesNotMatch(JSON.stringify(result), /private storage diagnostic/);
 });
 
 test('close drains a repair runtime created after delayed credential verification', async () => {
@@ -599,7 +833,7 @@ test('web callback repair accepts wildcard visibility but probes the precise SDK
   });
 
   await waitFor(() => fx.controller.registrationStatus(attemptId).registration.state === 'succeeded');
-  assert.deepEqual(fx.configStore.list(), [existing]);
+  assert.deepEqual(fx.configStore.list(), [{ ...existing, groupMessagePermissionGranted: true }]);
   const history = fx.runtimes.get(existing.id);
   assert.equal(history.length, 2);
   assert.equal(oldRuntime.stops, 1);
@@ -747,7 +981,7 @@ test('callback repair restart failure keeps the remotely committed secret for re
   await waitFor(() => fx.controller.registrationStatus(attemptId).registration.state === 'error');
   const result = fx.controller.registrationStatus(attemptId);
   assert.equal(result.registration.error.code, 'repair_connection_failed');
-  assert.deepEqual(fx.configStore.list(), [existing]);
+  assert.deepEqual(fx.configStore.list(), [{ ...existing, groupMessagePermissionGranted: true }]);
   assert.equal(fx.values.get(existing.secretRef), 'rotated-secret');
   assert.equal(fx.runtimes.get(existing.id).length, 2);
   assert.equal(fx.runtimes.get(existing.id).at(-1).appSecret, 'rotated-secret');
@@ -827,12 +1061,32 @@ test('manual Feishu credentials are verified, stored host-side, and use app visi
   });
 
   assert.equal(status.totals.connected, 1);
+  assert.equal(status.bots[0].groupMessagePermissionGranted, false, 'manual binding alone does not prove granted scopes');
   assert.equal(fx.configStore.bots.length, 1);
   assert.deepEqual(fx.configStore.bots[0].ownerOpenIds, ['*']);
   assert.equal(fx.values.get(fx.configStore.bots[0].secretRef), 'manual-private-secret');
   assert.equal(fx.runtimes.get('bot_manual')[0].appSecret, 'manual-private-secret');
   assert.doesNotMatch(JSON.stringify(status), /manual-private-secret|ownerOpenIds|secretRef/);
   await fx.controller.close();
+});
+
+test('manual Lark binding verifies, persists, and starts the runtime with the Lark domain', async (t) => {
+  const verified = [];
+  const fx = fixture({
+    createBotIds: ['bot_lark'],
+    verifyApp: async (options) => {
+      verified.push(options);
+      return { name: 'Lark bot', openId: 'ou_lark_bot', activated: 1 };
+    },
+  });
+  t.after(() => fx.controller.close());
+  const credentials = { appId: 'cli_lark', appSecret: 'lark-private-secret', domain: 'lark' };
+  const result = await fx.controller.bindCredentials(credentials);
+  assert.deepEqual(verified, [credentials]);
+  assert.equal(fx.configStore.getBot('bot_lark').domain, 'lark');
+  assert.equal(fx.runtimes.get('bot_lark')[0].config.domain, 'lark');
+  assert.equal(result.bots[0].bot.domain, 'lark');
+  assert.doesNotMatch(JSON.stringify(result), /lark-private-secret|appSecret/);
 });
 
 test('initialization isolates failures and starts every bot with available credentials', async () => {
@@ -1222,3 +1476,275 @@ for (const entry of ['manual', 'scan']) {
     await fx.controller.close();
   });
 }
+
+test('delivery account fingerprint is authenticated and checked inside the sending transition', async () => {
+  const existing = bot('bot_checked', 'checked');
+  let principal = existing.botOpenId;
+  const fx = fixture({bots: [existing], secrets: {[existing.secretRef]: 'local-secret'},
+    verifyApp: async ({appId, appSecret}) => {
+      assert.equal(appId, existing.appId); assert.equal(appSecret, 'local-secret');
+      return {openId: principal, name: 'Verified bot'};
+    }});
+  await fx.controller.initialize();
+  const info = await fx.controller.describeDeliveryAccount(existing.id);
+  assert.equal(info.version, 1); assert.equal(info.connected, true);
+  assert.match(info.account.fingerprint, /^[a-f0-9]{64}$/);
+  assert.equal(JSON.stringify(info).includes('local-secret'), false);
+  const target = {targetId: 'self', kind: 'user', route: {openId: 'ou_self'}};
+  await fx.controller.sendProactiveText(existing.id, target, 'hello', {expectedFingerprint: info.account.fingerprint});
+  principal = 'ou_other_bot';
+  await assert.rejects(fx.controller.sendProactiveText(existing.id, target, 'hello', {
+    expectedFingerprint: info.account.fingerprint,
+  }), {code: 'account-changed'});
+  assert.equal(fx.runtimes.get(existing.id)[0].proactiveSends.length, 1);
+  fx.values.delete(existing.secretRef);
+  await assert.rejects(fx.controller.describeDeliveryAccount(existing.id), {code: 'account-unverified'});
+  await fx.controller.close();
+});
+
+
+test('external account consumption persists exclusive mode and never restores standalone after consumer loss or restart', async () => {
+  const existing = bot('bot_external', 'external');
+  const options = { bots: [existing], secrets: { [existing.secretRef]: 'local-secret' },
+    verifyApp: async () => ({ openId: existing.botOpenId, name: 'Verified' }) };
+  const fx = fixture(options);
+  await fx.controller.initialize();
+  const info = await fx.controller.describeDeliveryAccount(existing.id);
+  let calls = 0;
+  const dispose = await fx.controller.consumeInbound(existing.id, {
+    expectedFingerprint: info.account.fingerprint,
+    onEvent: async evidence => { calls++; assert.equal(evidence.fingerprint, info.account.fingerprint); assert.equal(evidence.conversation.kind, 'group'); assert.equal(evidence.mentionedAccount, true); return { accepted: true }; },
+  });
+  const runtime = fx.runtimes.get(existing.id).at(-1);
+  assert.equal(runtime.config.consumerMode, 'external-consumer');
+  const input = { event_id: 'event', app_id: existing.appId,
+    sender: { sender_type: 'user', sender_id: { open_id: 'human' } },
+    message: { message_id: 'message', chat_id: 'chat', chat_type: 'group', message_type: 'text',
+      mentions: [{ id: { open_id: existing.botOpenId }, key: '@_user_1' }],
+      thread_id: 'work-topic', root_id: 'root', parent_id: 'parent',
+      create_time: '1790787600000', content: JSON.stringify({ text: 'hello' }) } };
+  await runtime.acceptExternal(input);
+  assert.equal(calls, 1);
+  await assert.rejects(fx.controller.consumeInbound(existing.id, {
+    expectedFingerprint: info.account.fingerprint, onEvent: async () => ({ accepted: true }),
+  }), { code: 'consumer-conflict' });
+  dispose();
+  await assert.rejects(runtime.acceptExternal(input), { code: 'consumer-unavailable' });
+  assert.equal(fx.configStore.getBot(existing.id).consumerMode, 'external-consumer');
+  await fx.controller.close();
+  const restarted = fixture({ ...options, bots: fx.configStore.list() });
+  await restarted.controller.initialize();
+  const restoredRuntime = restarted.runtimes.get(existing.id).at(-1);
+  assert.equal(restoredRuntime.config.consumerMode, 'external-consumer');
+  await assert.rejects(restoredRuntime.acceptExternal(input), { code: 'consumer-unavailable' });
+  await restarted.controller.close();
+});
+
+
+for (const operation of ['consumeInbound', 'replyChecked', 'historyChecked']) {
+  test(`${operation} refuses a Host close during account verification before changing mode or sending`, async () => {
+    const existing = bot('bot_closing_checked', 'closing_checked');
+    let entered;
+    const verifying = new Promise(resolve => { entered = resolve; });
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    let blocked = false;
+    const fx = fixture({ bots: [existing], secrets: { [existing.secretRef]: 'local-secret' },
+      verifyApp: async () => {
+        if (blocked) { entered(); await gate; }
+        return { openId: existing.botOpenId };
+      } });
+    await fx.controller.initialize();
+    const info = await fx.controller.describeDeliveryAccount(existing.id);
+    blocked = true;
+    const options = { expectedFingerprint: info.account.fingerprint,
+      onEvent: async () => ({ accepted: true }) };
+    const pending = operation === 'consumeInbound'
+      ? fx.controller.consumeInbound(existing.id, options)
+      : operation === 'replyChecked' ? fx.controller.replyChecked(existing.id, {}, 'hello', options)
+      : fx.controller.historyChecked(existing.id, {}, {}, options);
+    const refused = assert.rejects(pending, { code: 'capability-unavailable' });
+    await verifying;
+    const closing = fx.controller.close();
+    release();
+    await refused;
+    await closing;
+    assert.equal(fx.configStore.getBot(existing.id).consumerMode, undefined);
+    assert.equal(fx.runtimes.get(existing.id).length, 1);
+    assert.equal(fx.controller.status().totals.connected, 0);
+  });
+}
+
+test('history requires current verified account and live exclusive consumer lease', async () => {
+ const existing=bot('bot_history');
+ const fx=fixture({bots:[existing],secrets:{[existing.secretRef]:'local-secret'},verifyApp:async()=>({openId:existing.botOpenId})});
+ await fx.controller.initialize();
+ const account=await fx.controller.describeDeliveryAccount(existing.id);
+ assert.ok(account.capabilities.includes('history-text-checked'));
+ const options={expectedFingerprint:account.account.fingerprint};
+ await assert.rejects(fx.controller.historyChecked(existing.id,{}, {},options),{code:'capability-unavailable'});
+ const dispose=await fx.controller.consumeInbound(existing.id,{...options,onEvent:async()=>({accepted:true})});
+ const runtime=fx.runtimes.get(existing.id).at(-1);let calls=0;
+ runtime.historyChecked=async(identity,route,query,context)=>{calls++;assert.equal(identity.fingerprint,options.expectedFingerprint);context.signal.throwIfAborted();return {events:[]};};
+ assert.deepEqual(await fx.controller.historyChecked(existing.id,{}, {},options),{events:[]});
+ await assert.rejects(fx.controller.historyChecked(existing.id,{}, {},{expectedFingerprint:'b'.repeat(64)}),{code:'account-changed'});
+ dispose();await assert.rejects(fx.controller.historyChecked(existing.id,{}, {},options),{code:'consumer-unavailable'});
+ assert.equal(calls,1);await fx.controller.close();
+});
+
+test('releasing the exclusive consumer cancels a pending history read', async () => {
+ const existing=bot('bot_history_release');
+ const fx=fixture({bots:[existing],secrets:{[existing.secretRef]:'local-secret'},verifyApp:async()=>({openId:existing.botOpenId})});
+ await fx.controller.initialize();const account=await fx.controller.describeDeliveryAccount(existing.id);
+ const options={expectedFingerprint:account.account.fingerprint};
+ const dispose=await fx.controller.consumeInbound(existing.id,{...options,onEvent:async()=>({accepted:true})});
+ let entered,release;const started=new Promise(resolve=>{entered=resolve;});const gate=new Promise(resolve=>{release=resolve;});
+ fx.runtimes.get(existing.id).at(-1).historyChecked=async()=>{entered();await gate;return {events:['must not escape']};};
+ const pending=fx.controller.historyChecked(existing.id,{}, {},options);await started;dispose();release();
+ await assert.rejects(pending,{code:'consumer-unavailable'});await fx.controller.close();
+});
+
+
+test('external callback awaits checked history without deadlocking acknowledgement or later operations', async () => {
+  const existing = bot('bot_nested_history', 'nested_history');
+  const fx = fixture({ bots: [existing], secrets: { [existing.secretRef]: 'fixture-secret' },
+    verifyApp: async () => ({ openId: existing.botOpenId }) });
+  await fx.controller.initialize();
+  const account = await fx.controller.describeDeliveryAccount(existing.id);
+  let reads = 0;
+  const dispose = await fx.controller.consumeInbound(existing.id, { expectedFingerprint: account.account.fingerprint,
+    onEvent: async (event, { signal }) => {
+      const page = await fx.controller.historyChecked(existing.id, event.reply, { scope: 'thread', limit: 1 },
+        { expectedFingerprint: account.account.fingerprint, signal });
+      assert.equal(page.events[0].text, 'context'); return { accepted: true };
+    } });
+  const runtime = fx.runtimes.get(existing.id).at(-1);
+  runtime.historyChecked = async (_, route, __, { signal }) => {
+    signal.throwIfAborted(); reads++; assert.equal(route.threadId, 'topic');
+    return { events: [{ text: 'context' }] };
+  };
+  const incoming = runtime.acceptExternal({ event_id: 'event', app_id: existing.appId,
+    sender: { sender_type: 'user', sender_id: { open_id: 'human' } },
+    message: { message_id: 'source', chat_id: 'group', chat_type: 'group', message_type: 'text', thread_id: 'topic',
+      create_time: '1790787600000', content: JSON.stringify({ text: 'read context' }) } });
+  let timer;
+  try {
+    await Promise.race([incoming, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('callback history deadlocked')), 300); })]);
+    assert.equal(reads, 1);
+    await fx.controller.disconnectBot(existing.id);
+    assert.equal(fx.controller.status().totals.connected, 0);
+  } finally {
+    clearTimeout(timer); dispose(); await incoming.catch(() => {}); await fx.controller.close();
+  }
+});
+
+
+function externalInput(existing) {
+  return { event_id: 'external-event', app_id: existing.appId,
+    sender: { sender_type: 'user', sender_id: { open_id: 'human' } },
+    message: { message_id: 'external-message', chat_id: 'group', chat_type: 'group', message_type: 'text',
+      thread_id: 'topic', root_id: 'root', parent_id: 'parent',
+      mentions: [{ id: { open_id: existing.botOpenId }, key: '@_user_1' }],
+      create_time: '1790787600000', content: JSON.stringify({ text: 'hello' }) } };
+}
+
+async function persistentExternalFixture(t, overrides = {}) {
+  const directory = await mkdtemp(join(tmpdir(), 'dsh-external-regression-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const existing = bot('bot_external_feedback', 'external_feedback');
+  const store = await new PluginConfigStore(join(directory, 'config.json')).load();
+  await store.saveBot(existing);
+  const fx = fixture({ configStore: store, secrets: { [existing.secretRef]: 'fixture-secret' },
+    verifyApp: async () => ({ openId: existing.botOpenId, name: 'Verified' }), ...overrides });
+  await fx.controller.initialize();
+  t.after(() => fx.controller.close());
+  const info = await fx.controller.describeDeliveryAccount(existing.id);
+  return { ...fx, existing, fingerprint: info.account.fingerprint };
+}
+
+function deferred() {
+  let resolve; const promise = new Promise(r => { resolve = r; });
+  return { promise, resolve };
+}
+const bounded = async (promise, message) => {
+  let timer;
+  try { return await Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message)), 300); })]); }
+  finally { clearTimeout(timer); }
+};
+
+test('external takeover survives an overlapping credential rebind in the durable config and replacement runtime', async t => {
+  const writing = deferred(), release = deferred();
+  const fx = await persistentExternalFixture(t, { credentialSet: async ({ ref, value, values }) => {
+    writing.resolve(); await release.promise; values.set(ref, value);
+  } });
+  const binding = fx.controller.bindCredentials({ appId: fx.existing.appId, appSecret: 'new-fixture-secret' });
+  await writing.promise;
+  let calls = 0;
+  const takeover = fx.controller.consumeInbound(fx.existing.id, { expectedFingerprint: fx.fingerprint,
+    onEvent: async () => { calls++; return { accepted: true }; } });
+  // Old code can finish takeover before the earlier bind; corrected serialization
+  // waits for bind. Exercise either ordering without leaving a blocked test behind.
+  await bounded(takeover, 'takeover serialized behind credential save').catch(() => {});
+  release.resolve();
+  const [, dispose] = await Promise.all([binding, takeover]);
+  t.after(dispose);
+  assert.equal(fx.configStore.getBot(fx.existing.id).consumerMode, 'external-consumer');
+  const runtime = fx.runtimes.get(fx.existing.id).at(-1);
+  assert.equal(runtime.config.consumerMode, 'external-consumer');
+  await runtime.acceptExternal(externalInput(fx.existing));
+  assert.equal(calls, 1);
+});
+
+test('external intake survives presentation settings but still refuses changed identity and ownership', async t => {
+  const fx = await persistentExternalFixture(t);
+  let calls = 0;
+  const dispose = await fx.controller.consumeInbound(fx.existing.id, { expectedFingerprint: fx.fingerprint,
+    onEvent: async () => { calls++; return { accepted: true }; } });
+  t.after(dispose);
+  const runtime = fx.runtimes.get(fx.existing.id).at(-1);
+  await runtime.acceptExternal(externalInput(fx.existing));
+  await fx.controller.updateStepPush(fx.existing.id, true);
+  await runtime.acceptExternal(externalInput(fx.existing));
+  assert.equal(calls, 2);
+  await fx.configStore.saveBot({ ...fx.configStore.getBot(fx.existing.id), ownerOpenIds: ['another-owner'] });
+  await assert.rejects(runtime.acceptExternal(externalInput(fx.existing)), { code: 'account-changed' });
+  assert.equal(calls, 2);
+});
+
+test('disconnect cancels an outstanding consumer callback before waiting for application work', async t => {
+  const fx = await persistentExternalFixture(t);
+  const entered = deferred(), completed = deferred(), aborted = deferred();
+  const dispose = await fx.controller.consumeInbound(fx.existing.id, { expectedFingerprint: fx.fingerprint,
+    onEvent: async (_, { signal }) => {
+      signal.addEventListener('abort', () => { aborted.resolve(); completed.resolve(); }, { once: true });
+      entered.resolve(); await completed.promise; return { accepted: true };
+    } });
+  t.after(dispose);
+  const runtime = fx.runtimes.get(fx.existing.id).at(-1);
+  const incoming = runtime.acceptExternal(externalInput(fx.existing));
+  const refused = assert.rejects(incoming, { code: 'consumer-unavailable' });
+  await entered.promise;
+  const disconnect = fx.controller.disconnectBot(fx.existing.id);
+  try { await bounded(aborted.promise, 'disconnect did not cancel callback'); }
+  finally { completed.resolve(); await disconnect; await Promise.allSettled([refused]); }
+  assert.equal(fx.controller.status().totals.connected, 0);
+  assert.equal(fx.configStore.getBot(fx.existing.id).consumerMode, 'external-consumer');
+});
+
+
+test('external callback can await a checked original-route reply without owning the bot queue', async t => {
+  const fx = await persistentExternalFixture(t);
+  let calls = 0;
+  const dispose = await fx.controller.consumeInbound(fx.existing.id, { expectedFingerprint: fx.fingerprint,
+    onEvent: async (event, { signal }) => {
+      await fx.controller.replyChecked(fx.existing.id, event.reply, 'ack', { expectedFingerprint: fx.fingerprint, signal });
+      return { accepted: true };
+    } });
+  t.after(dispose);
+  const runtime = fx.runtimes.get(fx.existing.id).at(-1);
+  runtime.replyChecked = async route => { calls++; assert.equal(route.messageId, 'external-message'); return { sent: true }; };
+  const incoming = runtime.acceptExternal(externalInput(fx.existing));
+  try { await bounded(incoming, 'callback checked reply deadlocked'); }
+  finally { dispose(); await incoming.catch(() => {}); }
+  assert.equal(calls, 1);
+});

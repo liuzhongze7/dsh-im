@@ -135,39 +135,14 @@ export function modelCatalogHas(catalog, selection) {
   return modelCatalogEntry(catalog, selection) !== undefined;
 }
 
-export function unavailableModelError() {
-  const error = new Error('模型不存在或不可用。');
-  error.code = 'model-selection-unavailable';
-  return error;
-}
-
-export function unsupportedEffortError() {
-  const error = new Error('当前模型不支持所选思考强度，请重新选择。');
-  error.code = 'model-reasoning-unavailable';
-  return error;
-}
-
-/**
- * 校验模型选择在当前目录里可用：未选择模型时恒为可用；目录里查不到模型、
- * 或所选思考强度不属于该模型时返回对应的 Error，调用方直接抛出即可。
- */
-export function modelSelectionError(catalog, selection) {
-  const normalized = normalizeModelSelection(selection);
-  if (!normalized) return null;
-  const entry = modelCatalogEntry(catalog, normalized);
-  if (!entry) return unavailableModelError();
-  if (normalized.reasoningEffort !== undefined
-    && !entry.reasoning?.efforts.some((effort) => effort.id === normalized.reasoningEffort)) {
-    return unsupportedEffortError();
-  }
-  return null;
-}
-
-export async function listModelCatalog(harness, options = {}) {
+export async function listModelCatalog(harness, { throwOnError = false, ...options } = {}) {
   try {
-    if (typeof harness?.listModels !== 'function') return normalizeModelCatalog(null);
+    if (typeof harness?.listModels !== 'function') throw new Error('Harness model catalog is unavailable');
     return normalizeModelCatalog(await harness.listModels(options));
-  } catch {
+  } catch (error) {
+    // Status reads may degrade; save validation must distinguish a failed read
+    // from a successful catalog that no longer contains the selected model.
+    if (throwOnError) throw error;
     return normalizeModelCatalog(null);
   }
 }

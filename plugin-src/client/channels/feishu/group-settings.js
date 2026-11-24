@@ -1,6 +1,6 @@
 import * as React from 'react';
 
-import { h } from '../../i18n.js';
+import { h, localizeTemplate } from '../../i18n.js';
 import {
   FEISHU_ENDPOINTS,
   FEISHU_REGISTRATION_OPERATIONS,
@@ -27,7 +27,7 @@ function SettingsButton({ children, kind = 'secondary', className = '', ...props
 function groupSettingsFrom(value) {
   return {
     groupResponseMode: normalizeGroupResponseMode(value?.groupResponseMode),
-    groupTopicReply: value?.groupTopicReply === true,
+    mentionTopicReply: value?.mentionTopicReply !== false,
     groupMessagePermissionGranted: value?.groupMessagePermissionGranted === true,
   };
 }
@@ -107,11 +107,11 @@ export function GroupResponseModeEditor({
   };
 
   const authorize = async () => {
-    if (current !== 'all' || saving || authorizing || disabled || authorizationDisabled) return;
+    if (saving || authorizing || disabled || authorizationDisabled) return;
     setAuthorizing(true);
     setError(null);
     try {
-      await onAuthorize?.();
+      await onAuthorize?.({ preserveResponseMode: current !== 'all' });
     } catch (cause) {
       setError(cause?.message ?? '群消息权限授权失败，请重试。');
     } finally {
@@ -142,11 +142,11 @@ export function GroupResponseModeEditor({
     current === 'mention'
       ? permissionGranted
         ? '私聊始终响应；群聊仅处理明确 @当前机器人的消息。群消息权限已开通，再次切换无需授权。'
-        : '私聊始终响应；群聊仅处理明确 @当前机器人的消息。选择全部消息后会打开飞书官方授权流程。'
+        : '私聊始终响应；群聊仅处理明确 @当前机器人的消息。也可单独授权采集群消息，保持仅 @ 时回复。'
       : permissionGranted
         ? '已开通“获取群组中所有消息”权限（im:message.group_msg）；机器人会处理群聊中的所有可见消息。'
         : '尚未确认“获取群组中所有消息”权限，请完成飞书授权。'),
-  current === 'all'
+  (current === 'all' || !permissionGranted)
     ? h('div', { className: 'dim-feishuGroupPermissionAction' },
         h(SettingsButton, {
           disabled: disabled || authorizationDisabled || saving || authorizing,
@@ -161,7 +161,7 @@ export function GroupResponseModeEditor({
   }, error) : null);
 }
 
-export function GroupTopicReplyEditor({ value = false, disabled = false, onSave }) {
+export function MentionTopicReplyEditor({ value = true, disabled = false, onSave }) {
   const current = value === true ? 'on' : 'off';
   const [saving, setSaving] = React.useState(false);
   const [error, setError] = React.useState(null);
@@ -174,7 +174,7 @@ export function GroupTopicReplyEditor({ value = false, disabled = false, onSave 
     try {
       await onSave?.(next);
     } catch (cause) {
-      setError(cause?.message ?? '群聊以话题方式回复设置保存失败，请重试。');
+      setError(cause?.message ?? '以话题方式回复设置保存失败，请重试。');
     } finally {
       setSaving(false);
     }
@@ -182,10 +182,10 @@ export function GroupTopicReplyEditor({ value = false, disabled = false, onSave 
 
   return h('section', {
     className: 'dim-feishuGroupControl',
-    'aria-labelledby': 'dim-feishu-group-topic-title',
+    'aria-labelledby': 'dim-feishu-mention-topic-title',
   },
   h('div', { className: 'dim-feishuGroupControlHeader' },
-    h('h3', { id: 'dim-feishu-group-topic-title' }, '群聊以话题方式回复'),
+    h('h3', { id: 'dim-feishu-mention-topic-title' }, '被 @ 时以话题方式回复'),
     saving
       ? h('span', { className: 'dim-feishuGroupControlStatus', role: 'status' }, '保存中…')
       : null),
@@ -193,13 +193,13 @@ export function GroupTopicReplyEditor({ value = false, disabled = false, onSave 
     className: 'dim-feishuGroupSelect',
     value: current,
     disabled: disabled || saving,
-    'aria-label': '群聊以话题方式回复',
+    'aria-label': '被 @ 时以话题方式回复',
     onChange: (event) => { void change(event); },
   },
-  h('option', { value: 'off' }, '关闭（群内直接回复）'),
+  h('option', { value: 'off' }, '关闭（在会话主窗口回复）'),
   h('option', { value: 'on' }, '开启（自动开启独立飞书话题）')),
   h('p', { className: 'dim-feishuGroupHelp' },
-    '开启后，群聊中向机器人提问会自动开启独立飞书话题，回复落在话题内；每个话题是 dsh 会话列表里一条独立会话，上下文互不串。私聊不受影响。'),
+    '开启后，在群聊或私聊里 @机器人 提问，机器人会在那条消息下新建一个飞书话题并在话题内回答；该话题是一条独立会话，话题里的后续消息都属于同一个会话。只发一个 @机器人（打开菜单）不会新建话题，没有 @机器人 的消息也留在原来的会话里。'),
   error ? h('p', {
     className: 'dim-feishuGroupError',
     role: 'alert',
@@ -250,14 +250,14 @@ function PermissionFlow({ provision, now, busy, botName, onRetry, onCancel, onCl
 
   return h('section', {
     className: 'dim-feishuGroupAuthorization',
-    'aria-label': `${botName}的飞书授权流程`,
+    'aria-label': localizeTemplate('{bot}的飞书授权流程', { bot: botName }),
   },
   h('div', { className: 'dim-feishuGroupQrColumn' },
     h('div', { className: 'dim-feishuGroupQrFrame' },
       qrSource
         ? h('img', {
             src: qrSource,
-            alt: `用于为${botName}开通群消息权限的一次性授权二维码`,
+            alt: localizeTemplate('用于为{bot}开通群消息权限的一次性授权二维码', { bot: botName }),
           })
         : h('div', { className: 'dim-feishuGroupQrFallback' },
             h(QrPlaceholder), h('span', null, '二维码未就绪，请打开授权链接')),
@@ -267,7 +267,7 @@ function PermissionFlow({ provision, now, busy, botName, onRetry, onCancel, onCl
         : null),
     h('div', {
       className: 'dim-feishuGroupCountdown',
-      'aria-label': expired ? '二维码已失效' : `二维码剩余 ${formatRemaining(remaining)}`,
+      'aria-label': expired ? '二维码已失效' : localizeTemplate('二维码剩余 {remaining}', { remaining: formatRemaining(remaining) }),
     },
     h('span', null, expired ? '等待刷新' : '二维码有效时间'),
     h('strong', null, formatRemaining(remaining)),
@@ -275,14 +275,14 @@ function PermissionFlow({ provision, now, busy, botName, onRetry, onCancel, onCl
       h('span', { style: { width: `${Math.round(progress * 100)}%` } })))),
   h('div', { className: 'dim-feishuGroupAuthorizationCopy' },
     h('span', { className: 'dim-feishuGroupAuthorizationEyebrow' },
-      `正在为「${botName}」开通群消息权限`),
+      localizeTemplate('正在为「{bot}」开通群消息权限', { bot: botName })),
     h('h3', null, expired ? '刷新二维码后继续' : '使用飞书确认群消息权限'),
     h('p', null,
-      '扫码会更新现有飞书应用，只增量开通“获取群组中所有消息”权限；不会创建新应用。确认后会自动启用“响应所有群消息”，其他机器人不受影响。'),
+      '扫码会更新现有飞书应用，只增量开通“获取群组中所有消息”权限，不会创建新应用。单独授权采集时保留原来的回复方式；选择响应所有消息时才切换。'),
     h('ol', null,
       h('li', null, '打开飞书移动端，使用扫一扫读取二维码'),
       h('li', null, '核对现有应用，并确认“获取群组中所有消息”权限'),
-      h('li', null, '保持本页打开，等待权限生效并自动切换响应方式')),
+      h('li', null, '保持本页打开，等待权限生效')),
     h('div', { className: 'dim-feishuGroupAuthorizationActions' },
       expired
         ? h(SettingsButton, { kind: 'primary', onClick: onRetry, disabled: busy },
@@ -315,7 +315,7 @@ export function FeishuGroupSettingsPage({ account, rpcCall }) {
   }, [
     account.botId,
     account.groupResponseMode,
-    account.groupTopicReply,
+    account.mentionTopicReply,
     account.groupMessagePermissionGranted,
   ]);
 
@@ -377,7 +377,7 @@ export function FeishuGroupSettingsPage({ account, rpcCall }) {
     applySnapshot(value);
   }, [account.botId, applySnapshot, invoke]);
 
-  const startAuthorization = React.useCallback(async ({ replace = false } = {}) => {
+  const startAuthorization = React.useCallback(async ({ replace = false, preserveResponseMode = provision?.preserveResponseMode === true } = {}) => {
     if (provisionBusy) return;
     const previousAttemptId = provision?.attemptId;
     setProvisionBusy(true);
@@ -393,7 +393,7 @@ export function FeishuGroupSettingsPage({ account, rpcCall }) {
       }
       const normalized = normalizeProvisioning(await invoke(
         FEISHU_ENDPOINTS.beginGroupMessagePermission,
-        { botId: account.botId },
+        { botId: account.botId, ...(preserveResponseMode ? { preserveResponseMode: true } : {}) },
       ));
       if (normalized.operation !== GROUP_MESSAGE_PERMISSION_OPERATION
         || normalized.botId !== account.botId) {
@@ -405,6 +405,7 @@ export function FeishuGroupSettingsPage({ account, rpcCall }) {
       setProvision({
         phase: normalized.submitted ? 'connecting' : 'qr',
         ...normalized,
+        preserveResponseMode,
         durationMs: Math.max(1, normalized.expiresAt - timestamp),
         expired: false,
       });
@@ -556,14 +557,14 @@ export function FeishuGroupSettingsPage({ account, rpcCall }) {
         }
         await saveSetting(FEISHU_ENDPOINTS.setGroupResponseMode, { groupResponseMode });
       },
-      onAuthorize: () => startAuthorization(),
+      onAuthorize: (options) => startAuthorization(options),
     }),
-    h(GroupTopicReplyEditor, {
-      value: settings.groupTopicReply,
+    h(MentionTopicReplyEditor, {
+      value: settings.mentionTopicReply,
       disabled,
-      onSave: (groupTopicReply) => saveSetting(
-        FEISHU_ENDPOINTS.setGroupTopicReply,
-        { groupTopicReply },
+      onSave: (mentionTopicReply) => saveSetting(
+        FEISHU_ENDPOINTS.setMentionTopicReply,
+        { mentionTopicReply },
       ),
     })),
   h(PermissionFlow, {

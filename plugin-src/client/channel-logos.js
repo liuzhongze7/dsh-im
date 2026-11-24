@@ -110,13 +110,26 @@ export function DiscordLogoGlyph({ size } = {}) {
 export function SlackLogoGlyph({ size } = {}) {
   return h('svg', {
     ...dimensions(size),
-    viewBox: '0 0 24 24',
+    viewBox: '0 0 100 100',
     focusable: 'false',
     'aria-hidden': 'true',
     'data-im-channel-logo': 'slack',
-  }, h('path', {
-    fill: 'currentColor',
-    d: 'M6 15a2 2 0 1 1-2-2h2v2Zm1 0a2 2 0 1 1 4 0v5a2 2 0 1 1-4 0v-5Zm2-8a2 2 0 1 1 2-2v2H9Zm0 1a2 2 0 1 1 0 4H4a2 2 0 1 1 0-4h5Zm8 2a2 2 0 1 1 2 2h-2v-2Zm-1 0a2 2 0 1 1-4 0V5a2 2 0 1 1 4 0v5Zm-2 8a2 2 0 1 1-2 2v-2h2Zm0-1a2 2 0 1 1 0-4h5a2 2 0 1 1 0 4h-5Z',
+  },
+  h('path', {
+    fill: '#36C5F0',
+    d: 'M36.5 0A10.5 10.5 0 0 0 36.5 21H47V10.5A10.5 10.5 0 0 0 36.5 0ZM10.5 26a10.5 10.5 0 0 0 0 21h26a10.5 10.5 0 0 0 0-21Z',
+  }),
+  h('path', {
+    fill: '#2EB67D',
+    d: 'M100 36.5A10.5 10.5 0 0 0 79 36.5V47h10.5A10.5 10.5 0 0 0 100 36.5ZM74 10.5a10.5 10.5 0 0 0-21 0v26a10.5 10.5 0 0 0 21 0Z',
+  }),
+  h('path', {
+    fill: '#ECB22E',
+    d: 'M63.5 100a10.5 10.5 0 0 0 0-21H53v10.5A10.5 10.5 0 0 0 63.5 100ZM89.5 74a10.5 10.5 0 0 0 0-21h-26a10.5 10.5 0 0 0 0 21Z',
+  }),
+  h('path', {
+    fill: '#E01E5A',
+    d: 'M0 63.5a10.5 10.5 0 0 0 21 0V53H10.5A10.5 10.5 0 0 0 0 63.5ZM26 89.5a10.5 10.5 0 0 0 21 0v-26a10.5 10.5 0 0 0-21 0Z',
   }));
 }
 
@@ -139,7 +152,18 @@ export function IMessageLogoGlyph({ size } = {}) {
     'aria-hidden': 'true', 'data-im-channel-logo': 'imessage',
   }, h('path', {
     fill: 'currentColor',
-    d: 'M12 2.2c-5.52 0-10 3.75-10 8.38 0 2.63 1.52 4.98 3.9 6.52l-.92 3.43a.5.5 0 0 0 .72.56l3.54-1.96c.87.23 1.8.35 2.76.35 5.52 0 10-3.75 10-8.9S17.52 2.2 12 2.2Zm-3.4 8.2a1.2 1.2 0 1 1 0 2.4 1.2 1.2 0 0 1 0-2.4Zm3.4 0a1.2 1.2 0 1 1 0 2.4 1.2 1.2 0 0 1 0-2.4Zm3.4 0a1.2 1.2 0 1 1 0 2.4 1.2 1.2 0 0 1 0-2.4Z',
+    d: 'M12 2.5C5.65 2.5.5 6.66.5 11.8c0 2.76 1.49 5.24 3.85 6.94.28 1.34-.35 2.76-1.6 4.01 2.1-.2 3.87-.86 5.26-1.85 1.25.4 2.6.62 3.99.62 6.35 0 11.5-4.35 11.5-9.72S18.35 2.5 12 2.5Z',
+  }));
+}
+
+export function MatrixLogoGlyph({ size } = {}) {
+  return h('svg', {
+    ...dimensions(size), viewBox: '0 0 24 24', focusable: 'false',
+    'aria-hidden': 'true', 'data-im-channel-logo': 'matrix',
+  }, h('path', {
+    fill: 'currentColor',
+    'fill-rule': 'evenodd',
+    d: 'M4 4h16a2.4 2.4 0 0 1 2.4 2.4v8.2A2.4 2.4 0 0 1 20 17h-7.55l-4.2 3.3a.6.6 0 0 1-.98-.47V17H4A2.4 2.4 0 0 1 1.6 14.6V6.4A2.4 2.4 0 0 1 4 4Zm3 4.1a1.45 1.45 0 1 0 0 2.9 1.45 1.45 0 0 0 0-2.9Zm5.6 0a1.45 1.45 0 1 0 0 2.9 1.45 1.45 0 0 0 0-2.9Zm5.6 0a1.45 1.45 0 1 0 0 2.9 1.45 1.45 0 0 0 0-2.9Z',
   }));
 }
 
@@ -155,14 +179,13 @@ export function OfficeLogoGlyph({ size } = {}) {
   h('path', { fill: 'currentColor', d: 'M18.3 8.2h1.5v3h3v1.5h-3v3h-1.5v-3h-3v-1.5h3v-3Z' }));
 }
 
-export function YouduLogoGlyph({ size = 32 } = {}) {
-  return h('img', {
-    src: youduLogo,
-    // 品牌图标是位图（其余渠道为内联 SVG），父节点已 aria-hidden，空 alt 避免英文界面出现中文。
-    alt: '',
-    width: size,
-    height: size,
-    'data-im-channel-logo': 'youdu',
-    style: { objectFit: 'contain', verticalAlign: 'middle' },
-  });
+export function EmailLogoGlyph({ size } = {}) {
+  return h('svg', {
+    ...dimensions(size),
+    viewBox: '0 0 24 24',
+    focusable: 'false',
+    'aria-hidden': 'true',
+    'data-im-channel-logo': 'email',
+  },
+  h('path', { fill: 'currentColor', d: 'M3.2 5.6h17.6c.66 0 1.2.54 1.2 1.2v10.4c0 .66-.54 1.2-1.2 1.2H3.2A1.2 1.2 0 0 1 2 17.2V6.8c0-.66.54-1.2 1.2-1.2Zm.9 1.7v.28L12 12.3l7.9-4.72V7.3H4.1Zm15.8 2.02-7.42 4.43a1 1 0 0 1-1.06 0L4.1 9.32v7.78h15.8V9.32Z' }));
 }

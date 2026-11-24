@@ -1,3 +1,5 @@
+// Email conversation keys contain Message-IDs or bound Session IDs, not
+// recipient addresses. Keep email targets explicit until a mapping is stored.
 const CHANNELS = new Set([
   'weixin',
   'feishu',
@@ -9,7 +11,8 @@ const CHANNELS = new Set([
   'telegram',
   'discord',
   'whatsapp',
-  'youdu',
+  'imessage',
+  'matrix',
 ]);
 
 function isRecord(value) {
@@ -57,6 +60,8 @@ function slackSuggestion(key) {
   return { kind: 'thread', route: { channelId: match[1], threadTs: match[2] } };
 }
 
+// Telegram-only: numeric chat/topic keys can safely prefill Telegram target fields.
+// Other channels must use their native route fields; never turn their keys into Telegram links.
 function telegramSuggestion(key) {
   const match = /^(direct|group):(-?\d+)(?::([1-9]\d*))?$/.exec(key);
   if (!match) return null;
@@ -79,6 +84,15 @@ function whatsappSuggestion(key) {
   if (direct) return { kind: 'user', route: { jid: direct[1] } };
   const group = /^group:(\d{5,32}(?:-\d{1,32})?@g\.us)$/.exec(key);
   return group ? { kind: 'group', route: { jid: group[1] } } : null;
+}
+
+function matrixSuggestion(key) {
+  const dm = /^dm:(@[A-Za-z0-9._=\-\/+]+:[A-Za-z0-9.-]+(?::\d{1,5})?)$/.exec(key);
+  if (dm) return { kind: 'dm', route: { userId: dm[1] } };
+  const room = /^room:([!#][^:$\s]+:[A-Za-z0-9.-]+(?::\d{1,5})?)(?:\$(\$[^\s]+))?$/u.exec(key);
+  if (!room) return null;
+  if (room[2] === undefined) return { kind: 'room', route: { roomId: room[1] } };
+  return { kind: 'thread', route: { roomId: room[1], threadId: room[2] } };
 }
 
 /** Convert one persisted conversation key into a stable proactive-delivery route. */
@@ -114,13 +128,17 @@ export function deliverySuggestionFromConversationKey(channel, key) {
       return discordSuggestion(key);
     case 'whatsapp':
       return whatsappSuggestion(key);
-    // 有度的会话键是 `direct:<userId>` / `group:<chatId>`；服务端对单聊把
-    // chatId 解析为对方用户 ID，因此两者都能直接当成 send_msg 的 chatId。
-    case 'youdu':
-      return simpleSuggestion(key, [
-        ['direct', 'user', 'chatId'],
-        ['group', 'group', 'chatId'],
-      ]);
+    case 'imessage': {
+      const chatGuid = key.startsWith('direct:') ? key.slice('direct:'.length) : '';
+      // Older iMessage runtimes recorded every conversation as direct. Its
+      // native GUID's single-recipient marker must also match; + denotes groups.
+      return /^(?:iMessage|any);-;[^;]+$/u.test(chatGuid)
+        && chatGuid.length <= 512 && chatGuid.trim() === chatGuid
+        && !/[\u0000-\u001f\u007f]/u.test(chatGuid)
+        ? { kind: 'user', route: { chatGuid } } : null;
+    }
+    case 'matrix':
+      return matrixSuggestion(key.replace(/^(direct|group):/, ''));
     default:
       return null;
   }
@@ -128,6 +146,7 @@ export function deliverySuggestionFromConversationKey(channel, key) {
 
 /** Convert only a persisted private-chat key into its stable delivery route. */
 export function privateDeliverySuggestionFromConversationKey(channel, key) {
+  if (channel === 'matrix' && typeof key === 'string') key = key.replace(/^direct:dm:/, 'dm:');
   const separator = typeof key === 'string' ? key.indexOf(':') : -1;
   const prefix = separator > 0 ? key.slice(0, separator) : '';
   const privatePrefix = {
@@ -141,7 +160,8 @@ export function privateDeliverySuggestionFromConversationKey(channel, key) {
     telegram: 'direct',
     discord: 'direct',
     whatsapp: 'direct',
-    youdu: 'direct',
+    imessage: 'direct',
+    matrix: 'dm',
   }[channel];
   if (!privatePrefix || prefix !== privatePrefix) return null;
   return deliverySuggestionFromConversationKey(channel, key);
@@ -169,6 +189,32 @@ export function resolvePrivateConversationKey(channel, sessions, target) {
   for (const [key, sessionId] of Object.entries(sessions)) {
     if (typeof sessionId !== 'string' || !sessionId) continue;
     if (privateConversationKeyMatchesTarget(channel, key, target)) matches.push(key);
+    if (matches.length > 1) return null;
+  }
+  return matches[0] ?? null;
+}
+
+/**
+ * Check that one saved conversation key still identifies this target route.
+ *
+ * Unlike the private variant this accepts every route the channel can persist —
+ * a Telegram forum topic (`group:<chatId>:<threadId>`), a Slack thread, a
+ * Discord channel — because mirrored text is not limited to private chat.
+ * Questions and approvals keep the private gate: they are resolved through
+ * `privateConversationKeyMatchesTarget` instead of this function.
+ */
+export function conversationKeyMatchesTarget(channel, key, target) {
+  const suggestionIdentity = routeIdentity(deliverySuggestionFromConversationKey(channel, key));
+  return suggestionIdentity !== null && suggestionIdentity === routeIdentity(target);
+}
+
+/** Resolve exactly one current conversation of any route kind for a normalized delivery target. */
+export function resolveConversationKey(channel, sessions, target) {
+  if (!CHANNELS.has(channel) || !isRecord(sessions)) return null;
+  const matches = [];
+  for (const [key, sessionId] of Object.entries(sessions)) {
+    if (typeof sessionId !== 'string' || !sessionId) continue;
+    if (conversationKeyMatchesTarget(channel, key, target)) matches.push(key);
     if (matches.length > 1) return null;
   }
   return matches[0] ?? null;

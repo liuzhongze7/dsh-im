@@ -17,7 +17,9 @@ const channels = await Promise.all([
   ['wecom', 'WecomConfigStore'], ['wecom-app', 'WecomAppConfigStore'],
   ['qq', 'QqConfigStore'], ['slack', 'SlackConfigStore'],
   ['telegram', 'TelegramConfigStore'], ['discord', 'DiscordConfigStore'],
-  ['whatsapp', 'WhatsappConfigStore'], ['office', 'OfficeConfigStore'],
+  ['whatsapp', 'WhatsappConfigStore'],
+  ['matrix', 'MatrixConfigStore', 'matrix-config-store'],
+  ['email', 'EmailConfigStore'], ['office', 'OfficeConfigStore'],
 ].map(async ([id, storeName, storeFile = 'config-store']) => ({
   id,
   key: id === 'wecom-app' ? 'wecomApp' : id,
@@ -128,15 +130,26 @@ for (const { id, apply, Store, api } of channels) {
       const result = await f.call(id);
       assert.equal(result.ok, false);
       assert.equal(result.error.code, `${id}-startup-config-invalid`);
-      assert.deepEqual(result.error.details, {});
+      if (id === 'weixin') {
+        assert.equal(result.error.details.stage, 'startup.load');
+        assert.match(result.error.details.referenceId, /^WX-CONN-[A-F0-9]{8}$/);
+        assert.equal(result.error.details.file, filename === 'configPath' ? 'config.json' : 'workspaces.json');
+        assert.equal(result.error.details.resource, filename === 'configPath' ? 'account-config' : 'workspace-config');
+        assert.equal(result.error.details.reason, label === 'malformed JSON' ? 'invalid-json' : 'invalid-config');
+        if (label !== 'malformed JSON') {
+          assert.equal(result.error.details.field, 'version');
+          assert.equal(result.error.details.issue, 'unsupported-version');
+        }
+      } else { assert.equal(result.error.details.stage, 'startup.load'); assert.match(result.error.details.referenceId, /^IM-CONN-[A-F0-9]{8}$/); assert.equal(result.error.details.operation, 'startup'); }
       assert.doesNotMatch(JSON.stringify(result), /private-secret-value/);
       assert.equal(await readFile(config[filename], 'utf8'), contents);
       assert.throws(() => (api.unwrapRpcResult ?? api.unwrapOfficeRpc)(result), error => {
         assert.equal(error.code, result.error.code);
         const message = api.presentError ? api.presentError(error).message : error.message;
-        assert.match(message, /config\.json/);
+        assert.match(message, id === 'weixin' && filename === 'workspacesPath' ? /workspaces\.json/ : /config\.json/);
         assert.match(message, /重启 DSH/);
-        if (id === 'office') assert.doesNotMatch(message, /workspaces\.json/);
+        if (id === 'weixin') assert.ok(message.includes(result.error.details.file));
+        else if (id === 'office') assert.doesNotMatch(message, /workspaces\.json/);
         else assert.match(message, /workspaces\.json/);
         return true;
       });
@@ -196,15 +209,15 @@ test('the composed host serves other real channels while Feishu is loading and a
     return [key, f.config(id, { internals: { ConfigStore } })];
   }));
   const internals = Object.fromEntries([
-    'installUpdateRpc', 'installInboundTtlRpc', 'installDeliveryRpc', 'installDeliveryHttp',
+    'installUpdateRpc', 'installInboundTtlRpc', 'installDeliverySyncRpc', 'installDeliveryRpc', 'installDeliveryHttp',
     'installSessionSyncCoordinator', 'installHostLanguage', 'installHostLanguageRpc',
   ].map(name => [name, () => {}]));
   const fiber = f.start(createImHostPlugin(internals).apply, config);
   try {
     // Allow Cordis to enter its activation callback; Feishu stays gated.
     await new Promise(setImmediate);
-    // 有度走 installProductionChannel，会先挂 RPC 路由再初始化，因此即便它的启动在此失败也占一条路由。
-    assert.equal(f.routes.size, channels.length + 1);
+    assert.equal(f.routes.size, channels.length + 2);
+    assert.equal(f.routes.has('/dsh-im-sidebar'), true);
     await allLoaded.promise;
     assert.equal((await f.call('feishu')).error.code, 'feishu-initializing');
     // Let the other channels finish their local workspace reconciliation.
@@ -245,6 +258,23 @@ test('startup rolls back prepared resources even when delivery cleanup fails', a
   assert.equal(closed, 1);
   assert.equal(unregistered, 1);
   assert.equal(f.routes.size, 0);
+});
+
+test('an uncaught endpoint failure keeps a final Host diagnostic instead of becoming a management transport failure', async t => {
+  const f = await fixture(t);
+  const fiber = f.start((ctx, config) => installProductionChannel(ctx, config, {
+    channel: 'telegram', rpcChannel: '/telegram',
+    createProduction: async () => ({ controller: {}, async close() {} }),
+    createHandler: () => async () => { throw new Error('private-endpoint-error', { cause: Object.assign(new Error('private-host'), { code: 'ENOTFOUND' }) }); },
+  }), {});
+  await fiber.await();
+  const result = await f.call('telegram', 'bot.reconnect');
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, 'telegram-operation-failed');
+  assert.equal(result.error.details.reason, 'ENOTFOUND');
+  assert.equal(result.error.details.stage, 'connection.start');
+  assert.match(result.error.details.referenceId, /^IM-CONN-[A-F0-9]{8}$/);
+  assert.doesNotMatch(JSON.stringify(result), /private/);
 });
 
 test('a host language change refreshes every started channel menu and releases on unload', async t => {

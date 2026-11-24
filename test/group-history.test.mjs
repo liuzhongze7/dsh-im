@@ -1,273 +1,245 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { setTimeout as delay } from 'node:timers/promises';
+import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
+import { GroupHistoryStore } from '../src/channels/shared/group-history-store.mjs';
+import { GroupHistoryAccessRegistry, createGroupHistoryTools } from '../src/channels/shared/group-history-access.mjs';
+import { captureGroupHistory, groupHistoryEntry } from '../src/channels/shared/group-history.mjs';
+import { createGroupHistoryRpcHandler, GROUP_HISTORY_ENDPOINTS } from '../plugin-src/host/group-history-rpc.mjs';
 
-import {
-  CURRENT_MESSAGE_MARKER,
-  DEFAULT_GROUP_HISTORY_CONFIG,
-  DEFAULT_GROUP_HISTORY_LIMIT,
-  DISABLED_GROUP_HISTORY_CONFIG,
-  GROUP_HISTORY_LIMIT_MAX,
-  MAX_GROUP_HISTORY_BLOCK_CHARS,
-  MAX_GROUP_HISTORY_ENTRY_CHARS,
-  appendGroupHistoryContext,
-  createGroupHistory,
-  formatGroupHistoryBlock,
-  formatGroupHistoryFilesBlock,
-  groupHistoryActive,
-  normalizeGroupHistoryConfig,
-  normalizeGroupHistoryEntry,
-  validateGroupHistoryConfig,
-} from '../src/channels/shared/group-history.mjs';
+const DAY = 86400000;
+const base = Date.parse('2026-10-18T12:00:00Z');
+const entry = (messageId, extra = {}) => ({ channel: 'whatsapp', groupId: 'test@g.us',
+  groupName: 'test', messageId, senderId: 'person', sentAt: base, text: `message ${messageId}`, ...extra });
+async function fixture(t, options = {}) {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-group-history-'));
+  let now = base;
+  const store = new GroupHistoryStore(root, { now: () => now, logger: { warn() {} }, ...options });
+  t.after(async () => { await store.close(); await rm(root, { recursive: true, force: true }); });
+  const group = await store.capture(entry('expired-bootstrap', { sentAt: base - 15 * DAY }));
+  return { root, store, groupId: group.groupId, advance: (ms) => { now += ms; } };
+}
 
-test('a missing configuration reads as the enabled 50-message default', () => {
-  assert.deepEqual(normalizeGroupHistoryConfig(undefined), DEFAULT_GROUP_HISTORY_CONFIG);
-  assert.deepEqual(normalizeGroupHistoryConfig(null), DEFAULT_GROUP_HISTORY_CONFIG);
-  assert.equal(DEFAULT_GROUP_HISTORY_CONFIG.enabled, true);
-  assert.equal(DEFAULT_GROUP_HISTORY_CONFIG.limit, DEFAULT_GROUP_HISTORY_LIMIT);
-  assert.equal(DEFAULT_GROUP_HISTORY_LIMIT, 50);
+test('silent capture is on by default, shared across bots, deduplicated and independent of sessions', async (t) => {
+  const { store, groupId } = await fixture(t);
+  assert.equal((await store.query(groupId)).items.length, 0);
+  assert.equal((await store.settings()).groupHistoryRetentionDays, 14);
+  let downloads = 0;
+  await store.capture(entry('m1'));
+  await store.capture(entry('m1', { attachments: [{ key: 'file:0', name: 'a.txt', load: async () => {
+    downloads += 1; return Buffer.from('shared content');
+  } }] }));
+  await store.idle();
+  await store.capture(entry('m1', { attachments: [{ key: 'file:0', load: () => { throw new Error('duplicate download'); } }] }));
+  const page = await store.query(groupId);
+  assert.deepEqual(JSON.parse(JSON.stringify(page)), page, 'Host tool output must be lossless JSON');
+  const filesPage = await store.query(groupId, { kind: 'files' });
+  assert.deepEqual(JSON.parse(JSON.stringify(filesPage)), filesPage);
+  assert.equal(page.items.length, 1);
+  assert.equal(page.items[0].attachments[0].status, 'ready');
+  assert.equal(downloads, 1);
+  await store.capture(entry('m2'));
+  assert.equal((await store.query(groupId)).items.length, 2);
 });
 
-test('a stored configuration is normalized without throwing or clamping away intent', () => {
-  assert.deepEqual(normalizeGroupHistoryConfig({ enabled: false, limit: 0 }), { enabled: false, limit: 0 });
-  assert.deepEqual(normalizeGroupHistoryConfig({ enabled: true, limit: 20 }), { enabled: true, limit: 20 });
-  // 越界与非法类型按默认值/边界收敛，而不是让读取方拿到坏配置。
-  assert.deepEqual(normalizeGroupHistoryConfig({ enabled: 'yes', limit: 5 }), { enabled: true, limit: 5 });
-  assert.deepEqual(normalizeGroupHistoryConfig({ enabled: true, limit: 9999 }), {
-    enabled: true,
-    limit: GROUP_HISTORY_LIMIT_MAX,
-  });
-  assert.deepEqual(normalizeGroupHistoryConfig({ enabled: true, limit: -3 }), { enabled: true, limit: 0 });
-  assert.deepEqual(normalizeGroupHistoryConfig({ enabled: true, limit: 7.6 }), { enabled: true, limit: 7 });
-  assert.deepEqual(normalizeGroupHistoryConfig({ enabled: true, limit: 'many' }), DEFAULT_GROUP_HISTORY_CONFIG);
-  assert.deepEqual(normalizeGroupHistoryConfig([]), DEFAULT_GROUP_HISTORY_CONFIG);
+test('archive files are group-scoped; model edits only affect copies; copies have cleanup', async (t) => {
+  const { store, groupId, root, advance } = await fixture(t);
+  await store.capture(entry('file', { attachments: [{ key: 'file:0', name: '../../original.txt',
+    load: async function* () { yield Buffer.from('first '); yield Buffer.from('second'); } }] }));
+  await store.idle();
+  const id = (await store.query(groupId, { kind: 'files' })).items[0].id;
+  await assert.rejects(store.materialize('other-group', id, root), /不属于当前群/);
+  const copy = await store.materialize(groupId, id, root);
+  const { cleanup: _cleanup, ...publicCopy } = copy;
+  assert.deepEqual(JSON.parse(JSON.stringify(publicCopy)), publicCopy);
+  assert.equal(await readFile(copy.path, 'utf8'), 'first second');
+  await writeFile(copy.path, 'changed');
+  const another = await store.materialize(groupId, id, root);
+  assert.equal(await readFile(another.path, 'utf8'), 'first second');
+  await copy.cleanup(); await another.cleanup();
+  await assert.rejects(readFile(copy.path), { code: 'ENOENT' });
+  advance(15 * DAY);
+  await assert.rejects(store.materialize(groupId, id, root), /已过期/);
+  assert.equal((await store.sweep()).deletedMessages, 1);
 });
 
-test('the settings save path validates strictly', () => {
-  assert.deepEqual(validateGroupHistoryConfig({ enabled: true, limit: 50 }), { enabled: true, limit: 50 });
-  assert.deepEqual(validateGroupHistoryConfig({ enabled: false, limit: 0 }), { enabled: false, limit: 0 });
-  const rejected = [
-    {},
-    { enabled: true },
-    { enabled: true, limit: 50, extra: 1 },
-    { enabled: 'true', limit: 50 },
-    { enabled: true, limit: -1 },
-    { enabled: true, limit: GROUP_HISTORY_LIMIT_MAX + 1 },
-    { enabled: true, limit: 2.5 },
-  ];
-  for (const value of rejected) {
-    assert.throws(
-      () => validateGroupHistoryConfig(value),
-      (error) => error?.code === 'group-history-invalid',
-      `expected ${JSON.stringify(value)} to be rejected`,
-    );
+test('download failures and oversize streams do not stall capture', async (t) => {
+  const { store, groupId } = await fixture(t, { maxFileBytes: 4 });
+  await store.capture(entry('files', { attachments: [
+    { key: 'large', load: async function* () { yield Buffer.from('123'); yield Buffer.from('456'); } },
+    { key: 'fail', load: () => { throw new Error('https://secret-token.example'); } },
+    { key: 'good', load: () => Buffer.from('ok') },
+  ] }));
+  await store.idle();
+  const files = (await store.query(groupId, { kind: 'files' })).items;
+  assert.equal(files.filter((item) => item.status === 'ready').length, 1);
+  assert.equal(files.filter((item) => item.status === 'unavailable').length, 1);
+  assert.equal(files.filter((item) => item.status === 'failed').length, 1);
+  assert.doesNotMatch(JSON.stringify(files), /secret-token/);
+});
+
+test('a provider ignoring cancellation still releases its slot after the download timeout', async (t) => {
+  const { store, groupId } = await fixture(t, { downloadTimeoutMs: 20 });
+  await store.capture(entry('hung', { attachments: [{ key: 'hang', load: () => new Promise(() => {}) }] }));
+  await Promise.all([store.idle(), delay(50)]);
+  assert.equal((await store.query(groupId, { kind: 'files' })).items[0].status, 'failed');
+});
+
+test('retention persists, cleans more than one batch, and reads exclude overdue rows immediately', async (t) => {
+  const { store, groupId, root, advance } = await fixture(t);
+  for (let i = 0; i < 505; i++) await store.capture(entry(`old-${i}`));
+  advance(15 * DAY);
+  assert.equal((await store.query(groupId)).items.length, 0);
+  assert.equal((await store.sweep()).deletedMessages, 505);
+  await store.setRetentionDays(30);
+  assert.equal(JSON.parse(await readFile(join(root, 'general-settings.json'), 'utf8')).groupHistoryRetentionDays, 30);
+  assert.equal((await store.query(groupId)).items.length, 0);
+  for (const bad of [0, -1, 1.5, '2a', null]) await assert.rejects(store.setRetentionDays(bad));
+});
+
+test('corrupt retention settings fail closed and can be repaired explicitly', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-group-history-corrupt-'));
+  await writeFile(join(root, 'general-settings.json'), '{broken');
+  const store = new GroupHistoryStore(root);
+  t.after(async () => { await store.close(); await rm(root, { recursive: true, force: true }); });
+  assert.ok((await store.settings()).error);
+  assert.ok((await store.sweep()).error);
+  await assert.rejects(store.query('group'), /暂停自动清理/);
+  await store.setRetentionDays(30);
+  assert.deepEqual(await store.settings(), { groupHistoryRetentionDays: 30 });
+});
+
+test('queries paginate within byte budget and reject cross-group cursors', async (t) => {
+  const { store, groupId } = await fixture(t);
+  for (let i = 0; i < 5; i++) await store.capture(entry(`long-${i}`, { text: '群'.repeat(9000),
+    attachments: Array.from({ length: 15 }, (_, index) => ({ key: String(index), name: '附'.repeat(512) })) }));
+  await store.idle();
+  const ids = new Set(); let cursor;
+  do {
+    const page = await store.query(groupId, { cursor });
+    assert.ok(Buffer.byteLength(JSON.stringify(page)) < 24000);
+    for (const item of page.items) { assert.equal(ids.has(item.id), false); ids.add(item.id); assert.ok(item.textTruncated); }
+    cursor = page.nextCursor;
+    if (cursor) {
+      const other = await store.capture(entry('other', { groupId: 'other@g.us' }));
+      await assert.rejects(store.query(other.groupId, { cursor }), /游标无效/);
+    }
+  } while (cursor);
+  assert.equal(ids.size, 5);
+});
+
+test('ordinary group messages are captured without discovery; private messages are excluded', async (t) => {
+  const { store } = await fixture(t);
+  const message = { kind: 'group', senderId: 'person', addressed: false };
+  await captureGroupHistory(store, message, entry('first', { groupId: 'new@g.us',
+    attachments: [{ key: 'file:0', name: 'first.txt', load: () => Buffer.from('first ordinary file') }] }));
+  await store.idle();
+  const page = await store.query(message.groupHistory.groupId);
+  assert.equal(page.items.length, 1);
+  assert.equal(page.items[0].text, 'message first');
+  assert.equal(page.items[0].attachments[0].status, 'ready');
+  assert.equal(page.recordingStartedAt, base);
+  const privateMessage = { kind: 'direct', senderId: 'person' };
+  await captureGroupHistory(store, privateMessage, entry('private'));
+  assert.equal(privateMessage.groupHistory, undefined);
+});
+
+test('groups previously saved as disabled record automatically after upgrade', async (t) => {
+  const { store, root, groupId } = await fixture(t);
+  await store.close();
+  const legacy = new DatabaseSync(join(root, 'group-history.sqlite'));
+  legacy.exec('ALTER TABLE groups ADD COLUMN enabled INTEGER NOT NULL DEFAULT 0');
+  legacy.close();
+  const upgraded = new GroupHistoryStore(root, { now: () => base });
+  t.after(() => upgraded.close());
+  const context = await upgraded.capture(entry('after-upgrade'));
+  assert.equal(context.groupId, groupId);
+  assert.equal((await upgraded.query(groupId)).items[0].text, 'message after-upgrade');
+  await upgraded.close();
+});
+
+test('Telegram/Slack use source message identity, not delivery or thread identity', async () => {
+  let captured;
+  const store = { capture: async (...args) => { captured = args; return { store, groupId: 'g' }; } };
+  const message = { kind: 'group', senderId: 'person', addressed: false };
+  await captureGroupHistory(store, message, entry('x'));
+  assert.equal(captured[0].messageId, 'x');
+  assert.equal(captured.length, 1);
+  const tg = groupHistoryEntry('telegram', { update_id: 20, message: { message_id: 10, chat: { id: -1 }, message_thread_id: 3 } }, message);
+  assert.equal(tg.messageId, '10'); assert.equal(tg.groupId, '-1'); assert.equal(tg.threadId, '3');
+  const slack = groupHistoryEntry('slack', { event_id: 'Ev1', team_id: 'T1', event: { channel: 'C1', ts: '1700000000.1', thread_ts: '1700000000.0' } }, message);
+  assert.equal(slack.groupId, 'C1'); assert.equal(slack.messageId, '1700000000.1');
+});
+
+test('host-bound access rejects invented, ended, Web, mixed-group and switched-session requests', async () => {
+  const registry = new GroupHistoryAccessRegistry();
+  const store = { query: async (groupId) => ({ groupId }) };
+  const session = { id: 's1', header: { cwd: '/tmp' }, events: [] };
+  const start = (turn) => { const event = { type: 'turn/start', data: { turn } }; session.events.push(event); registry.observe(session, event); };
+  const tools = createGroupHistoryTools(registry);
+  const exec = { agent: { session } };
+  const close = registry.open('s1', 'rpc1', { store, groupId: 'g1' });
+  start(1); registry.claim(session, { source: { rpcId: 'rpc1' } }, 1);
+  for (const kind of ['runtime-context', 'time-context', 'plugin:dsh-im']) {
+    registry.observe(session, { type: 'user/message', data: { source: { kind, form: 'snapshot' } } });
   }
+  assert.deepEqual(await tools[0].execute({}, exec), { groupId: 'g1' });
+  assert.equal(registry.resolve({ ...session, id: 's2' }), null);
+  registry.claim(session, { source: { rpcId: 'web-rpc' } }, 1);
+  assert.throws(() => tools[0].execute({}, exec), /authorized request/);
+  start(2); registry.claim(session, { source: { rpcId: 'rpc1' } }, 2);
+  const closeOther = registry.open('s1', 'rpc2', { store, groupId: 'g2' });
+  registry.claim(session, { source: { rpcId: 'rpc2' } }, 2);
+  assert.equal(registry.resolve(session), null);
+  closeOther();
+  start(3); registry.claim(session, { source: { rpcId: 'rpc1' } }, 3);
+  let cleaned = false; registry.trackCopy(session, async () => { cleaned = true; });
+  close(); await Promise.resolve();
+  assert.equal(cleaned, true); assert.equal(registry.resolve(session), null);
 });
 
-test('a configuration only takes effect when it is enabled with a positive limit', () => {
-  assert.equal(groupHistoryActive(DEFAULT_GROUP_HISTORY_CONFIG), true);
-  assert.equal(groupHistoryActive({ enabled: true, limit: 1 }), true);
-  assert.equal(groupHistoryActive({ enabled: false, limit: 50 }), false);
-  assert.equal(groupHistoryActive({ enabled: true, limit: 0 }), false);
-  assert.equal(groupHistoryActive(DISABLED_GROUP_HISTORY_CONFIG), false);
+test('Host skill catalogs preserve group access without granting access to other inputs', async () => {
+  const registry = new GroupHistoryAccessRegistry();
+  const store = { query: async (groupId) => ({ groupId }) };
+  const session = { id: 'feishu-session', events: [] };
+  const observe = (type, data) => {
+    const event = { type, data };
+    session.events.push(event);
+    registry.observe(session, event);
+  };
+  const [history] = createGroupHistoryTools(registry);
+  const exec = { agent: { session } };
+  const close = registry.open(session.id, 'feishu-rpc', { store, groupId: 'feishu-group' });
+  observe('turn/start', { turn: 1 });
+  observe('user/message', { source: { kind: 'user', rpcId: 'feishu-rpc' } });
+  observe('user/message', { source: { kind: 'plugin:dsh-im', form: 'notice' } });
+  observe('user/message', { source: { kind: 'runtime-context', form: 'snapshot' } });
+  assert.deepEqual(await history.execute({}, exec), { groupId: 'feishu-group' });
+  observe('user/message', { source: { kind: 'skill-catalog', form: 'catalog', entries: [] } });
+  observe('user/message', { source: { kind: 'time-context', form: 'snapshot' } });
+  assert.deepEqual(await history.execute({}, exec), { groupId: 'feishu-group' });
+  observe('user/message', { source: { kind: 'user', form: 'catalog', rpcId: 'web-rpc' } });
+  assert.throws(() => history.execute({}, exec), /authorized request/);
+  observe('turn/end', { turn: 1 });
+  observe('turn/start', { turn: 2 });
+  observe('user/message', { source: { kind: 'skill-catalog', form: 'catalog', entries: [] } });
+  assert.throws(() => history.execute({}, exec), /authorized request/);
+  observe('turn/end', { turn: 2 });
+  observe('turn/start', { turn: 3 });
+  observe('user/message', { source: { kind: 'user', rpcId: 'feishu-rpc' } });
+  observe('user/message', { source: { kind: 'skill-catalog', form: 'message' } });
+  assert.throws(() => history.execute({}, exec), /authorized request/);
+  close();
 });
 
-test('the buffer keeps the newest entries within the configured limit', () => {
-  const history = createGroupHistory();
-  for (let index = 1; index <= 5; index += 1) {
-    history.record('group:g-1', { sender: 'S', body: `m${index}`, messageId: `id-${index}` }, { limit: 3 });
-  }
-  assert.equal(history.size('group:g-1'), 3);
-  assert.deepEqual(
-    history.snapshot('group:g-1', { limit: 3 }).map((entry) => entry.body),
-    ['m3', 'm4', 'm5'],
-  );
-});
-
-test('a zero or negative limit records nothing, and empty bodies are ignored', () => {
-  const history = createGroupHistory();
-  history.record('group:g-1', { body: 'ignored' }, { limit: 0 });
-  history.record('group:g-1', { body: '' }, { limit: 50 });
-  history.record('group:g-1', { body: '   ' }, { limit: 50 });
-  history.record('group:g-1', {}, { limit: 50 });
-  history.record('', { body: 'no key' }, { limit: 50 });
-  assert.equal(history.size('group:g-1'), 0);
-});
-
-test('entries are single-line, control-character free and length capped', () => {
-  const normalized = normalizeGroupHistoryEntry({
-    sender: ' 张三 \n',
-    body: '第一行\u0000\n第二行   第三行',
-    timestamp: 1_700_000_000_000,
-    messageId: ' id-1 ',
-  });
-  assert.equal(normalized.sender, '张三');
-  assert.equal(normalized.body, '第一行 第二行 第三行');
-  assert.equal(normalized.messageId, 'id-1');
-  const long = normalizeGroupHistoryEntry({ body: '字'.repeat(MAX_GROUP_HISTORY_ENTRY_CHARS + 50) });
-  assert.equal([...long.body].length, MAX_GROUP_HISTORY_ENTRY_CHARS);
-  assert.equal(long.body.endsWith('…'), true);
-});
-
-test('the snapshot is a copy and consuming it keeps messages that arrived mid-turn', () => {
-  const history = createGroupHistory();
-  history.record('group:g-1', { sender: 'A', body: 'one', messageId: 'id-1' });
-  history.record('group:g-1', { sender: 'B', body: 'two', messageId: 'id-2' });
-  const snapshot = history.snapshot('group:g-1');
-  snapshot.pop();
-  assert.equal(history.size('group:g-1'), 2, 'mutating the snapshot must not shrink the buffer');
-  // 回合进行中又到了两条没有寻址机器人的消息。
-  history.record('group:g-1', { sender: 'C', body: 'three', messageId: 'id-3' });
-  history.record('group:g-1', { sender: 'D', body: 'four', messageId: 'id-4' });
-  const consumed = history.snapshot('group:g-1');
-  assert.equal(consumed.length, 4);
-  history.consume('group:g-1', [consumed[0], consumed[1]]);
-  assert.deepEqual(
-    history.snapshot('group:g-1').map((entry) => entry.body),
-    ['three', 'four'],
-  );
-  history.consume('group:g-1', history.snapshot('group:g-1'));
-  assert.equal(history.size('group:g-1'), 0);
-});
-
-test('a redelivered message is not buffered twice', () => {
-  const history = createGroupHistory();
-  history.record('group:g-1', { sender: 'A', body: 'one', messageId: 'id-1' });
-  history.record('group:g-1', { sender: 'A', body: 'one', messageId: 'id-1' });
-  history.record('group:g-1', { sender: 'A', body: 'one', messageId: 'id-2' });
-  assert.equal(history.size('group:g-1'), 2);
-  assert.deepEqual(history.snapshot('group:g-1').map((entry) => entry.messageId), ['id-1', 'id-2']);
-});
-
-test('repeated message ids are consumed together even when the snapshot is rebuilt', () => {
-  const history = createGroupHistory();
-  history.record('group:g-1', { sender: 'A', body: 'one', messageId: 'id-1' });
-  const snapshot = history.snapshot('group:g-1');
-  // 重建快照（模拟交付重试）后仍按 messageId 消费同一条记录。
-  history.consume('group:g-1', history.snapshot('group:g-1'));
-  assert.equal(history.size('group:g-1'), 0);
-  history.record('group:g-1', { sender: 'A', body: 'one', messageId: 'id-1' });
-  history.consume('group:g-1', snapshot.map((entry) => ({ ...entry })));
-  assert.equal(history.size('group:g-1'), 0, 'the same messageId must not be injected twice');
-});
-
-test('the buffer evicts the least recently used conversation beyond the key cap', () => {
-  const history = createGroupHistory({ maxKeys: 2 });
-  history.record('group:a', { body: 'a' });
-  history.record('group:b', { body: 'b' });
-  history.record('group:c', { body: 'c' });
-  assert.equal(history.size('group:a'), 0);
-  assert.equal(history.size('group:b'), 1);
-  assert.equal(history.size('group:c'), 1);
-  // 命中过的会话刷新为最近使用，下一次淘汰最旧的那个。
-  history.record('group:b', { body: 'b2' });
-  history.record('group:d', { body: 'd' });
-  assert.equal(history.size('group:c'), 0);
-  assert.equal(history.size('group:b'), 2);
-});
-
-test('the injected block carries the marker, note, time and escaping', () => {
-  const entries = [
-    normalizeGroupHistoryEntry({ sender: '张三', body: '下午三点评审', timestamp: 1_700_000_000_000 }),
-    normalizeGroupHistoryEntry({ sender: '李四', body: '<b>收到</b> & ok', timestamp: 1_700_000_060_000 }),
-  ];
-  const block = formatGroupHistoryBlock(entries);
-  assert.match(block, /^<dsh_im_group_history note="[^"]+">\n/);
-  assert.match(block, /\n<\/dsh_im_group_history>$/);
-  assert.match(block, /\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\] 张三: 下午三点评审/);
-  assert.equal(block.includes('<b>'), false, 'tag characters must be escaped');
-  assert.equal(block.includes('\\u003cb\\u003e收到\\u003c/b\\u003e \\u0026 ok'), true);
-  assert.equal(formatGroupHistoryBlock([]), '');
-  assert.equal(formatGroupHistoryBlock(null), '');
-});
-
-test('the injected block drops the oldest entries to stay within the character budget', () => {
-  const entries = Array.from({ length: 40 }, (_, index) => normalizeGroupHistoryEntry({
-    sender: 'S',
-    body: `m${index}-${'a'.repeat(MAX_GROUP_HISTORY_ENTRY_CHARS - 8)}`,
-  }));
-  const block = formatGroupHistoryBlock(entries);
-  assert.equal([...block].length <= MAX_GROUP_HISTORY_BLOCK_CHARS, true);
-  assert.equal(block.includes('m39-'), true, 'the newest entry must survive');
-  assert.equal(block.includes('m0-'), false, 'the oldest entries are dropped first');
-});
-
-test('the context block is prepended before the current message', () => {
-  const block = '<dsh_im_group_history note="n">\n[2026-09-10 14:12] 张三: 下午三点评审\n</dsh_im_group_history>';
-  const content = appendGroupHistoryContext('帮我总结一下', block);
-  assert.equal(content.endsWith('\n帮我总结一下'), true);
-  assert.equal(content.includes(CURRENT_MESSAGE_MARKER), true);
-  assert.equal(content.indexOf(block) < content.indexOf(CURRENT_MESSAGE_MARKER), true);
-  assert.equal(content.indexOf(CURRENT_MESSAGE_MARKER) < content.indexOf('帮我总结一下'), true);
-  // 图片消息走数组内容，块作为第一个文本块前置。
-  const arrayContent = appendGroupHistoryContext([{ type: 'text', text: '正文' }], block);
-  assert.equal(Array.isArray(arrayContent), true);
-  assert.equal(arrayContent[0].text.startsWith(block), true);
-  assert.deepEqual(arrayContent[1], { type: 'text', text: '正文' });
-  // 空块与未知内容形态原样返回。
-  assert.equal(appendGroupHistoryContext('只有正文', ''), '只有正文');
-  assert.equal(appendGroupHistoryContext('只有正文', '   '), '只有正文');
-  assert.deepEqual(appendGroupHistoryContext({ custom: true }, block), { custom: true });
-});
-
-test('staged attachments are attached to their entry and listed in their own block', () => {
-  const history = createGroupHistory();
-  history.record('group:g-1', { sender: '张三', body: '[图片] photo.png', messageId: 'id-1', timestamp: 1_700_000_000_000 });
-  history.record('group:g-1', { sender: '李四', body: '看下附件', messageId: 'id-2', timestamp: 1_700_000_060_000 });
-  assert.deepEqual(history.snapshot('group:g-1')[0].files, []);
-  assert.equal(formatGroupHistoryFilesBlock(history.snapshot('group:g-1')), '');
-
-  const attached = history.attachFiles('group:g-1', 'id-1', [
-    { name: 'photo.png', path: '.dsh-im/group-context/g-1/20260910-141200-id-1/01-photo.png' },
-  ]);
-  assert.equal(attached.files.length, 1);
-  assert.equal(history.attachFiles('group:g-1', 'missing', [{ path: 'x' }]), null);
-  assert.equal(history.attachFiles('group:g-1', 'id-2', []), null);
-  assert.equal(history.attachFiles('group:missing', 'id-1', [{ path: 'x' }]), null);
-
-  const entries = history.snapshot('group:g-1');
-  assert.equal(entries[0].files[0].name, 'photo.png');
-  const filesBlock = formatGroupHistoryFilesBlock(entries);
-  assert.match(filesBlock, /^<dsh_im_group_files>\n/u);
-  assert.match(filesBlock, /\n<\/dsh_im_group_files>$/u);
-  const payload = JSON.parse(filesBlock.split('\n')[1]);
-  assert.equal(payload.files.length, 1);
-  assert.equal(payload.files[0].sender, '张三');
-  assert.equal(payload.files[0].path, '.dsh-im/group-context/g-1/20260910-141200-id-1/01-photo.png');
-  assert.match(payload.files[0].time, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/u);
-  assert.match(payload.description, /relative to the current Harness workspace/u);
-
-  // 历史块与附件清单块一起前置，且顺序固定：历史 → 附件 → 当前消息。
-  const content = appendGroupHistoryContext(
-    '帮我看看',
-    formatGroupHistoryBlock(entries),
-    filesBlock,
-  );
-  assert.equal(content.indexOf('<dsh_im_group_history') < content.indexOf('<dsh_im_group_files>'), true);
-  assert.equal(content.indexOf('<dsh_im_group_files>') < content.indexOf(CURRENT_MESSAGE_MARKER), true);
-  assert.equal(content.endsWith('\n帮我看看'), true);
-
-  // 条目被消费后附件清单随之消失，但磁盘文件不受影响（由保留期清理）。
-  history.consume('group:g-1', entries);
-  assert.equal(formatGroupHistoryFilesBlock(history.snapshot('group:g-1')), '');
-});
-
-test('the attachment block drops the oldest files first when it exceeds its budget', () => {
-  const history = createGroupHistory();
-  for (let index = 0; index < 60; index += 1) {
-    history.record('group:g-1', {
-      sender: 'S',
-      body: `m${index}`,
-      messageId: `id-${index}`,
-      timestamp: 1_700_000_000_000 + index * 1000,
-    });
-    history.attachFiles('group:g-1', `id-${index}`, [{
-      name: `${'n'.repeat(120)}-${index}.bin`,
-      path: `.dsh-im/group-context/g-1/${'p'.repeat(80)}-${index}/01-file.bin`,
-    }]);
-  }
-  const block = formatGroupHistoryFilesBlock(history.snapshot('group:g-1', { limit: 200 }));
-  assert.equal([...block].length <= 4_000, true);
-  const payload = JSON.parse(block.split('\n')[1]);
-  assert.equal(payload.files.at(-1).name.endsWith('-59.bin'), true, 'the newest attachment survives');
-  assert.equal(payload.files.some((file) => file.name.endsWith('-0.bin')), false, 'the oldest are dropped');
+test('settings RPC rejects unknown parameters and persists valid retention', async (t) => {
+  const { store, groupId } = await fixture(t);
+  const rpc = createGroupHistoryRpcHandler(store);
+  assert.equal((await rpc(GROUP_HISTORY_ENDPOINTS.set, { groupHistoryRetentionDays: 3 })).value.groupHistoryRetentionDays, 3);
+  assert.equal((await rpc('settings.group-history.enable', { groupId, enabled: false })).ok, false);
+  assert.equal((await rpc(GROUP_HISTORY_ENDPOINTS.set, { groupHistoryRetentionDays: 0 })).ok, false);
+  assert.equal((await rpc(GROUP_HISTORY_ENDPOINTS.get, { groupId })).ok, false);
 });

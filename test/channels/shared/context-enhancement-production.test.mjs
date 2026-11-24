@@ -10,7 +10,7 @@ import {
   captureContextEnhancement,
 } from '../../../src/channels/shared/context-enhancement.mjs';
 
-for (const channel of ['wecom', 'weixin', 'feishu', 'dingtalk', 'qq', 'slack', 'telegram', 'discord', 'whatsapp']) {
+for (const channel of ['wecom', 'weixin', 'feishu', 'dingtalk', 'qq', 'slack', 'telegram', 'discord', 'whatsapp', 'imessage', 'email', 'matrix', 'wecom-app']) {
   test(`${channel} production passes live, isolated context settings without reconnecting or changing Harness options`, async (t) => {
     const dataDir = await mkdtemp(join(tmpdir(), `dsh-context-${channel}-`));
     t.after(() => rm(dataDir, { recursive: true, force: true }));
@@ -45,7 +45,7 @@ for (const channel of ['wecom', 'weixin', 'feishu', 'dingtalk', 'qq', 'slack', '
     }
     const production = await createProductionController({
       credentials: {},
-      apiProxy: {},
+      typertGateway: { invoke() {}, stream() {} },
       logger: () => ({ error() {}, warn() {}, info() {}, debug() {} }),
     }, { dataDir, workspace: dataDir }, {
       ConfigStore,
@@ -72,6 +72,12 @@ for (const channel of ['wecom', 'weixin', 'feishu', 'dingtalk', 'qq', 'slack', '
     assert.equal(stateLoads, 2);
     assert.equal(Object.hasOwn(harnessOptions, 'contextEnhancement'), false);
     assert.equal(Object.hasOwn(harnessOptions, 'source'), false);
+    assert.equal(runtimes[0].harness.currentBusyMessageMode(), 'queue');
+    await production.controller.updateBusyMessageMode(botIds[0], 'steer');
+    assert.equal(runtimes[0].harness.currentBusyMessageMode(), 'steer');
+    assert.equal(runtimes[1].harness.currentBusyMessageMode(), 'queue');
+    await production.controller.updateBusyMessageMode(botIds[0], 'queue');
+    assert.equal(runtimes[0].harness.currentBusyMessageMode(), 'queue');
     const provider = runtimes[0].contextEnhancement;
     assert.equal(provider.botId, botIds[0]);
     assert.equal(provider.getSettings(), DEFAULT_CONTEXT_ENHANCEMENT_CONFIG);

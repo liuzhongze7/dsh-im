@@ -2,7 +2,9 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { normalizeFeishuGroupResponseMode } from './group-response-mode.mjs';
-import { normalizeFeishuStepPushMode } from './step-push-mode.mjs';
+import { normalizeFeishuStepPushMode, normalizeFeishuStepCardPanels } from './step-push-mode.mjs';
+import { normalizeFeishuVoiceConfig } from './voice-config.mjs';
+import { normalizeSlashPanelConfig } from './slash-command-panel.mjs';
 
 export const LEGACY_FEISHU_SECRET_REF = 'DSH_FEISHU_APP_SECRET';
 
@@ -38,6 +40,7 @@ function normalizeBot(value, { legacy = false } = {}) {
   const domain = value.domain === 'lark' ? 'lark' : 'feishu';
   return Object.freeze({
     id,
+    consumerMode: value.consumerMode === 'external-consumer' ? 'external-consumer' : 'standalone',
     appId,
     secretRef,
     ownerOpenIds: Object.freeze(ownerOpenIds),
@@ -46,9 +49,12 @@ function normalizeBot(value, { legacy = false } = {}) {
     botOpenId: cleanString(value.botOpenId),
     activated: value.activated ?? null,
     groupResponseMode: normalizeFeishuGroupResponseMode(value.groupResponseMode),
-    groupTopicReply: value.groupTopicReply === true,
+    mentionTopicReply: value.mentionTopicReply !== false,
     stepPush: value.stepPush === true,
     stepPushMode: normalizeFeishuStepPushMode(value.stepPushMode),
+    stepCardPanels: normalizeFeishuStepCardPanels(value.stepCardPanels),
+    voice: normalizeFeishuVoiceConfig(value.voice),
+    slashPanel: normalizeSlashPanelConfig(value.slashPanel),
     groupMessagePermissionGranted: value.groupMessagePermissionGranted === true,
     deletionPending: value.deletionPending === true,
     connectedAt: cleanString(value.connectedAt),

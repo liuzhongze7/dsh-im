@@ -422,6 +422,7 @@ test('Discord controller persists a credential reference and exposes only masked
   const controller = new DiscordController({
     credentials: credentialStore,
     configStore,
+    inspectOwner: async () => '234567890123456789',
     inspectToken: async () => ({
       platformId: '1234567890123456789',
       name: 'Harness Discord',
@@ -1925,4 +1926,42 @@ test('Discord runtime identifies on Gateway v10 and becomes ready', async () => 
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(errors.length, 2);
   assert.equal(runtime.status.ready, false);
+});
+
+
+test('discord synced approval accepts the DM recipient, never the channel id as actor', async () => {
+  let socket;
+  let finish;
+  let result;
+  const notices = [];
+  const completion = new Promise(resolve => { finish = resolve; });
+  const runtime = new DiscordRuntime({
+    config: { botId: 'discord_test', platformId: '1234567890123456789' }, token: TOKEN,
+    harness: { ensureRunning: async () => true, ask: () => assert.fail('approval must not create a prompt') },
+    state: { hasSeen: () => false, markSeen: async () => {}, sessionFor: () => null },
+    createApi: () => ({ getCurrentUser: async () => ({ id: '1234567890123456789', bot: true }), getGatewayBot: async () => ({ url: 'wss://gateway.discord.gg' }), getChannel: async () => ({ type: 1, recipients: [{ id: '333333333333333333' }] }), createMessage: async r => { notices.push(r.content); return { id: '111111111111111900' }; } }),
+    createWebSocket: () => {
+      socket = new FakeSocket();
+      queueMicrotask(() => socket.emit('message', { data: JSON.stringify({ op: 10, d: { heartbeat_interval: 45_000 } }) }));
+      return socket;
+    },
+    random: () => 0.5, logger: { warn() {}, error() {} },
+  });
+  const emit = actor => socket.emit('message', { data: JSON.stringify({ op: 0, t: 'MESSAGE_CREATE', s: actor === '333333333333333333' ? 3 : 2, d: { id: actor, channel_id: '222222222222222900', author: { id: actor, bot: false }, content: 'yes' } }) });
+  try {
+    await runtime.start();
+    assert.equal(await runtime.presentSessionSyncApproval({ kind: 'channel', route: { channelId: '222222222222222900' } }, {
+      kind: 'approval', rpcId: 'rpc-sync', interactionId: 'sync', sessionId: 's',
+      payload: { type: 'approval/requested', sessionId: 's', approvalId: 'sync', toolName: 'bash', callId: 'call' },
+      toolCall: { name: 'bash', callId: 'call', arguments: '{"command":"echo safe"}' },
+      respond: async value => { result = value; finish(value.value.outcome); },
+      withdraw: async () => finish('unavailable'),
+    }, { key: 'direct:222222222222222900', completion }), true);
+    emit('222222222222222900');
+    await eventually(() => notices.some(text => text.includes('只有发起当前任务')));
+    assert.equal(result, undefined);
+    emit('333333333333333333');
+    await eventually(() => result);
+    assert.equal(result.value.outcome, 'allowed-once');
+  } finally { await runtime.stop(); }
 });

@@ -8,6 +8,7 @@ import {
 import { h, localizeText } from './i18n.js';
 
 export const ACCESS_POLICY_ENDPOINT = 'bot.access-policy.set';
+const CONFIRMED_OWNER_CHANNELS = new Set(['weixin', 'feishu', 'qq', 'whatsapp', 'discord']);
 
 export const ACCESS_CHANNEL_DEFINITIONS = Object.freeze({
   weixin: Object.freeze({
@@ -17,9 +18,9 @@ export const ACCESS_CHANNEL_DEFINITIONS = Object.freeze({
   }),
   feishu: Object.freeze({
     directUserLabel: '飞书 Open ID',
-    directPlaceholder: 'ou_xxx',
+    directPlaceholder: '填写使用者的 Open ID（ou_xxx），不是机器人 ID',
     groupUserLabel: '群成员 Open ID',
-    groupPlaceholder: 'ou_xxx',
+    groupPlaceholder: '填写使用者的 Open ID（ou_xxx），不是机器人 ID',
   }),
   dingtalk: Object.freeze({
     directUserLabel: '钉钉用户 ID',
@@ -131,6 +132,8 @@ function ScenePolicyEditor({
   placeholder,
   disabled = false,
   unsupported = false,
+  ownerHelp,
+  identityHelp,
   onChange,
 }) {
   const ownerHelpId = React.useId();
@@ -171,7 +174,7 @@ function ScenePolicyEditor({
           id: ownerHelpId,
           className: 'dim-channelTooltip dim-accessHelpTooltip',
           role: 'tooltip',
-        }, '原所有者或扫码接入者始终可以访问并执行命令；以下设置仅约束其他用户。')))),
+        }, ownerHelp, identityHelp ? h('br') : null, identityHelp)))),
   unsupported
     ? h('div', { className: 'dim-accessUnsupported', role: 'note' },
         h('strong', null, '当前渠道不支持群聊'),
@@ -277,6 +280,12 @@ function ScenePolicyEditor({
 
 export function AccessPolicySettingsPage({ channel, account, rpcCall, onSaved }) {
   const definition = ACCESS_CHANNEL_DEFINITIONS[channel];
+  const ownerHelp = CONFIRMED_OWNER_CHANNELS.has(channel)
+    ? '已由接入流程确认的所有者可以访问并执行命令，不受本页限制。未识别到所有者身份时，按本页访问设置执行。'
+    : '原所有者或扫码接入者始终可以访问并执行命令；以下设置仅约束其他用户。';
+  const identityHelp = channel === 'feishu'
+    ? '白名单请填写使用者的 Open ID，不是机器人的 Open ID。仅保存通配符的接入配置不包含所有者身份。'
+    : null;
   const initialPolicy = normalizeAccessPolicy(account?.accessPolicy);
   const initialKey = JSON.stringify(initialPolicy);
   const [draft, setDraft] = React.useState(() => clonePolicy(
@@ -339,6 +348,8 @@ export function AccessPolicySettingsPage({ channel, account, rpcCall, onSaved })
     policy: draft.direct,
     userLabel: definition.directUserLabel,
     placeholder: definition.directPlaceholder,
+    ownerHelp,
+    identityHelp,
     disabled: saving,
     onChange: (direct) => { setDraft((current) => ({ ...current, direct })); setFeedback(null); },
   }),
@@ -348,6 +359,10 @@ export function AccessPolicySettingsPage({ channel, account, rpcCall, onSaved })
     policy: draft.group,
     userLabel: definition.groupUserLabel ?? definition.directUserLabel,
     placeholder: definition.groupPlaceholder ?? definition.directPlaceholder,
+    ownerHelp,
+    identityHelp: channel === 'qq'
+      ? '扫码获得的是私聊身份，群聊只有匹配已确认的所有者身份时才豁免；其他成员按群聊白名单设置执行。'
+      : identityHelp,
     disabled: saving || definition.groupSupported === false,
     unsupported: definition.groupSupported === false,
     onChange: (group) => { setDraft((current) => ({ ...current, group })); setFeedback(null); },

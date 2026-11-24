@@ -12,8 +12,8 @@
   <p>
     <img src="https://dsh-im-random-badge.xmanrui-dsh-im.workers.dev" alt="滑动变祖器：今天是梁子或今天是梁圣（随机）">
     <a href="LICENSE"><img src="https://img.shields.io/github/license/xmanrui/dsh-im" alt="MIT 许可证"></a>
-    <img src="https://img.shields.io/badge/agent-DeepSeek%20Harness-5865f2" alt="DeepSeek Harness">
-    <a href="https://dshfind.com/zh/plugins/xmanrui/dsh-im?ref=badge"><img src="https://dshfind.com/api/badge/xmanrui/dsh-im?lang=zh" alt="dshfind"></a>
+    <a href="#recognition"><img src="https://img.shields.io/badge/DeepSeek%20Harness-%E5%AE%98%E6%96%B9%E8%B5%9E%E5%8A%A9-4176E6?style=flat" alt="DeepSeek Harness 官方赞助"></a>
+    <a href="https://deepseek1024.com/"><img src="https://img.shields.io/badge/deepseek1024-%E4%B8%8B%E8%BD%BD%E9%87%8FTop%2010-D97706?style=flat" alt="deepseek1024 下载量Top 10"></a>
     <a href="https://dshfind.com/zh/plugins/xmanrui/dsh-im"><img src="https://img.shields.io/badge/dshfind-%E5%88%86%E7%B1%BB%E7%AC%AC%E4%B8%80-d97706" alt="dshfind: 分类第一"></a>
     <a href="https://dshfind.com/zh/plugins/xmanrui/dsh-im?ref=badge"><img src="https://dshfind.com/api/badge/xmanrui/dsh-im?metric=downloads&amp;lang=zh" alt="dshfind downloads"></a>
   </p>
@@ -25,15 +25,71 @@
     <img src="https://img.shields.io/badge/%E4%BC%81%E4%B8%9A%E5%BE%AE%E4%BF%A1-3370FF?logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI%2BPHBhdGggZmlsbD0ibm9uZSIgc3Ryb2tlPSIjZmZmIiBzdHJva2Utd2lkdGg9IjIuMzUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIgZD0iTTE3LjcgMTQuNWMxLjA1LTEuMTIgMS42NS0yLjUyIDEuNjUtNC4wMyAwLTMuODItMy41OC02LjkyLTgtNi45MnMtOCAzLjEtOCA2LjkyIDMuNTggNi45MiA4IDYuOTJjMS4xNyAwIDIuMjgtLjIyIDMuMjgtLjYyIi8%2BPHBhdGggZmlsbD0iI2ZmZiIgZD0iTTE2LjEgMTUuMTVjLjctLjcgMS44My0uNyAyLjUzIDBzLjcgMS44MyAwIDIuNTMtMS44My43LTIuNTMgMC0uNy0xLjgzIDAtMi41M1pNMTkuMjUgMTMuNDVhMS4zNiAxLjM2IDAgMSAxIDEuOTIgMS45MiAxLjM2IDEuMzYgMCAwIDEtMS45Mi0xLjkyWk0xOS41NSAxOC4wNWExLjE2IDEuMTYgMCAxIDEgMS42NCAxLjY0IDEuMTYgMS4xNiAwIDAgMS0xLjY0LTEuNjRaTTE1LjI1IDE4Ljc1YS45Mi45MiAwIDEgMSAxLjMgMS4zLjkyLjkyIDAgMCAxLTEuMy0xLjNaIi8%2BPC9zdmc%2B" alt="企业微信">
     <img src="https://img.shields.io/badge/QQ-1EBAFC?logo=qq&amp;logoColor=white" alt="QQ">
     <img src="https://img.shields.io/badge/Slack-4A154B?logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI%2BPHBhdGggZmlsbD0iI2ZmZiIgZD0iTTYgMTVhMiAyIDAgMSAxLTItMmgydjJabTEgMGEyIDIgMCAxIDEgNCAwdjVhMiAyIDAgMSAxLTQgMHYtNVptMi04YTIgMiAwIDEgMSAyLTJ2Mkg5Wm0wIDFhMiAyIDAgMSAxIDAgNEg0YTIgMiAwIDEgMSAwLTRoNVptOCAyYTIgMiAwIDEgMSAyIDJoLTJ2LTJabS0xIDBhMiAyIDAgMSAxLTQgMFY1YTIgMiAwIDEgMSA0IDB2NVptLTIgOGEyIDIgMCAxIDEtMiAydi0yaDJabTAtMWEyIDIgMCAxIDEgMC00aDVhMiAyIDAgMSAxIDAgNGgtNVoiLz48L3N2Zz4%3D" alt="Slack">
-    <img src="https://img.shields.io/badge/Telegram-26A5E4?logo=telegram&amp;logoColor=white" alt="Telegram">
+    <img src="https://img.shields.io/badge/Telegram-26A5E4?logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI%2BPHBhdGggZmlsbD0iI2ZmZiIgZD0iTTIzLjk1IDQuNTdjLS4zNi0xLjQ1LTEuNDMtMS43Ni0yLjgyLTEuMjRMMS41IDEwLjljLTEuMzQuNTItMS4zMiAxLjI3LS4yNCAxLjZsNS4wMyAxLjU3IDExLjY2LTcuMzZjLjU1LS4zNCAxLjA1LS4xNi42NC4yMWwtOS40NCA4LjUyLS4zNyA1LjEyYy41NCAwIC43OC0uMjQgMS4wOC0uNTNsMi41OS0yLjUxIDUuMzggMy45N2MuOTkuNTUgMS43LjI3IDEuOTUtLjkyTDIzLjk1IDQuNTdaIi8%2BPC9zdmc%2B" alt="Telegram">
     <img src="https://img.shields.io/badge/Discord-5865F2?logo=discord&amp;logoColor=white" alt="Discord">
     <img src="https://img.shields.io/badge/WhatsApp-25D366?logo=whatsapp&amp;logoColor=white" alt="WhatsApp">
+    <img src="https://img.shields.io/badge/iMessage-34C759?logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI%2BPHBhdGggZmlsbD0iI2ZmZiIgZD0iTTEyIDNDNS45MjUgMyAxIDcuMDI5IDEgMTJjMCAyLjc1MSAxLjUxNCA1LjIxNCAzLjkwMSA2Ljg2NS4yOTEgMS41MjYtLjE3NCAyLjY0OC0xLjI1OCAzLjY0IDIuMDQ3LjAyNSAzLjQ0Mi0uNTA5IDQuNjQzLTEuNThBMTMuMiAxMy4yIDAgMCAwIDEyIDIxYzYuMDc1IDAgMTEtNC4wMjkgMTEtOVMxOC4wNzUgMyAxMiAzWiIvPjwvc3ZnPg%3D%3D" alt="iMessage">
+  </p>
+
+  <p>
+    <a href="https://trendshift.io/repositories/169119#achievements">
+      <img src="https://trendshift.io/api/badge/repositories/169119" alt="DSH-IM — GitHub Trending JavaScript 日榜第 7 名" width="48%" align="middle">
+    </a>&nbsp;
+    <a href="https://trendshift.io/repositories/169119#achievements">
+      <img src="https://trendshift.io/api/badge/trendshift/repositories/169119/daily?language=JavaScript" alt="DSH-IM — Trendshift JavaScript 日榜第 3 名" width="48%" align="middle">
+    </a>
   </p>
 
   <p><strong>简体中文</strong> · <a href="README.en.md">English</a></p>
 </div>
 
 ---
+
+## ❤️ 赞助商
+
+<table width="100%">
+  <tr>
+    <td width="180" align="center" valign="middle">
+      <a href="https://88api.ai/sign-up?aff=lJoL"><img src="assets/sponsors/88api.jpg" alt="88API Token聚合平台" width="150"></a>
+    </td>
+    <td valign="middle">
+      <a href="https://88api.ai/sign-up?aff=lJoL"><strong>88API Token聚合平台</strong></a>赞助了本项目！88API 是一家由香港企业运营并且主要面向开发者、创作者与 AI 应用用户的一站式多模型 API 平台，通过统一接口接入文本、图片、语音和视频模型，覆盖 AI 编程、智能翻译、内容创作、配音、图像生成、视频生成等常见工作流。可提供高质量的折扣Deepseek官转算力和自有B300集群自部署Deepseek算力；支持国际主流付款方式，可提供发票，提供企业级稳定服务。<a href="https://88api.ai/sign-up?aff=lJoL"><strong>通过此链接注册可以获取专属赠送额度！</strong></a>
+    </td>
+  </tr>
+  <tr>
+    <td width="180" align="center" valign="middle">
+      <a id="recognition"></a>
+      <a href="https://github.com/deepseek-ai/deepseek-harness"><strong>DeepSeek<br>Harness</strong></a>
+    </td>
+    <td valign="middle">
+      <strong>DSH-IM 已获得 <a href="https://github.com/deepseek-ai/deepseek-harness">DeepSeek Harness</a> 官方 Token 赞助</strong>。感谢官方对本项目的支持！
+      <p>本项目由社区开发者独立开发与维护。</p>
+    </td>
+  </tr>
+</table>
+
+---
+
+> [!IMPORTANT]
+> **安装请认准完整包名：`@xmanrui/dsh-im`**
+>
+> 为避免名称混淆，在插件市场搜索、插件安装框中填写或使用命令安装时，请复制下方完整包名。
+>
+> ```text
+> @xmanrui/dsh-im
+> ```
+>
+> 选择对应的一条命令：**Desktop** 在内置终端执行，**Web** 在启动当前 Harness 的终端执行。
+>
+> ```sh
+> dsh plugin --profile desktop add -w @xmanrui/dsh-im
+> ```
+>
+> ```sh
+> dsh plugin --profile web add -w @xmanrui/dsh-im
+> ```
+>
+> 安装后重启 Desktop 或 `dsh web`，Web 刷新浏览器，再打开「设置 → IM机器人」。
 
 ## 简介
 
@@ -51,25 +107,40 @@ Connect IM bots to DeepSeek Harness by scanning a QR code, using an App Manifest
 
 | 渠道 | 接入方式 | 消息与回复 |
 | --- | --- | --- |
-| 飞书 | 扫码创建机器人，或使用 App ID + App Secret 手动绑定 | 长连接接收消息；通过飞书流式卡片显示思考、工具进度和回答 |
+| 飞书 | 扫码创建机器人，或使用 App ID + App Secret 手动绑定 | 长连接接收消息；可选择飞书原生“实时直播”、单张实时过程卡或逐步消息展示任务过程；每机器人可开启语音交互（可选渠道能力，默认关闭）：语音消息转写为文字走正常流程，答案同时以语音回复 |
 | 微信 | 使用微信扫码绑定机器人 | 腾讯 iLink 长轮询收发消息；等待 Harness 回答时显示“正在输入”，最终回复按 1,800 字符分段发送 |
 | 钉钉 | 扫码创建机器人，或使用 Client ID + Client Secret 手动绑定 | 钉钉 Stream 长连接；通过 AI Card 流式显示回答 |
 | 企业微信 | 使用企业微信 App 扫码创建智能机器人，或使用 Bot ID + Secret 手动绑定 | 官方 WebSocket 长连接；原生显示“正在思考中”、工具执行进度和流式回答 |
 | 企业微信应用 | 在企业微信管理后台创建自建应用，填写企业 ID、AgentId、Secret、Token、EncodingAESKey（可选代理地址） | HTTP 回调接收；私聊支持流式回复（微信端不支持时自动改为分段文本），支持图片输入与结果文件回传；成员的微信关注该企业的微信插件后可在微信中直接使用 |
 | QQ | 使用手机 QQ 扫码创建机器人，或使用 AppID + AppSecret 手动绑定 | WebSocket 长连接；私聊显示“正在输入”并以单条 Markdown 回复，群聊被 @ 后只发送最终答案 |
 | Slack | 使用预置 App Manifest 创建应用，再填写 Bot Token（`xoxb-`）和 App Token（`xapp-`） | Socket Mode 长连接；私聊直接回复，频道被 @ 后响应，优先使用官方流式消息 API |
-| Telegram | 使用 @BotFather 生成的 Bot Token | Bot API 长轮询；默认私聊直接响应、群聊被提及或回复时响应，也可为每个机器人独立启用私聊白名单安全模式；私聊通过 Rich Message Draft 流式预览并持久化最终富消息，群聊和 Topic 原位完成占位消息，平台不支持时回退为普通文字 |
+| Telegram | 使用 @BotFather 生成的 Bot Token | Bot API 长轮询；默认私聊直接响应、群聊被提及或回复时响应，也可为每个机器人独立启用私聊白名单安全模式；关闭思考过程留痕时，私聊、群聊和 Topic 均通过占位消息编辑展示进度并原位完成富文本回复，避免 Android 私聊 Draft 占用发送入口，平台不支持富文本时回退为普通文字 |
 | Discord | 使用 Developer Portal 生成的 Bot Token | Gateway v10 长连接；私信直接回复；服务器文字/公告频道首次 @ 后创建原生 Thread，后续在线程中无需重复 @，并通过编辑消息流式显示回答 |
-| WhatsApp | 使用手机 WhatsApp 扫码关联设备 | WhatsApp Web 长连接；默认仅响应账号自聊，也可切换到指定联系人或开放响应模式；显示已读和“正在输入”，通过每秒编辑同一条消息显示工具进度和逐步生成的回答，长回复自动分段，编辑失败时回退为完整文字回复 |
+| WhatsApp | 使用手机 WhatsApp 扫码关联设备 | WhatsApp Web 长连接；默认仅响应账号自聊，也可切换到指定联系人或开放响应模式；群聊仅在被 @ 或回复机器人消息时触发，主人普通发言不触发；显示已读和“正在输入”，通过每秒编辑同一条消息显示工具进度和逐步生成的回答，长回复自动分段，编辑失败时回退为完整文字回复 |
 | iMessage | 在 macOS Messages.app 中登录 iMessage，并按[渠道说明](docs/imessage.md)授予本机权限 | 使用 macOS 原生 Messages.app 收发文本私聊；不依赖 BlueBubbles；每个 macOS 用户账户使用一个本机 iMessage 身份 |
+| Matrix（实验功能） | 填写 homeserver 地址，并提供访问令牌，或用户 ID 与密码 | CS API 长轮询接收；私聊直接回复，房间被 @ 后响应，支持线程回复、HTML 白名单富文本与编辑式流式输出，可回传图片和结果文件；包含实验性房间消息加解密，限制见下文 |
+
+WhatsApp 会保存最近 2,000 条机器人群消息的标识，重启后仍可通过引用这些消息唤醒机器人。升级前未记录或已超出保留范围的历史消息不会作为唤醒依据；请 @ 机器人或回复其新消息。
+
+Matrix 加密目前仅供非敏感测试：默认 optional 模式尝试启动加密引擎，失败时跳过收到的加密消息；required 模式在引擎启动失败时拒绝连接。尚未实现交互式设备验证、密钥备份、SSSS 或媒体附件内容加密，本次发布未验证真实 homeserver／Element 互通，请勿将其视为完整的端到端保密保障。
 
 企业微信自建应用的回调基址、代理地址和企业可信 IP 配置，见[企业微信自建应用接入说明](docs/企业微信自建应用接入.md)。
 
 其他 IM 平台可继续按同一渠道适配器结构接入。
 
+扫码新建的飞书和 QQ 机器人，默认允许所有用户在私聊和群聊中聊天及执行内置命令；可在机器人的访问设置中调整白名单和命令权限。已有机器人的访问设置保持不变。
+
 飞书群聊默认接收其他机器人明确 @ 当前机器人的消息，无需额外开关；未 @、仅 @ 其他成员或全体、机器人自身发送的消息和机器人私聊消息仍会忽略，即使群聊响应方式设为“全部”。消息仍受群聊白名单与命令权限约束。飞书应用需要租户权限 `im:message.group_at_msg.include_bot:readonly`（“获取群组中其他机器人和用户@当前机器人的消息”）；扫码新建应用会默认申请，已有或手动绑定的应用可点击“补全权限”或私聊执行 `/repair`，扫码并完成飞书要求的发布审批后生效。详见[飞书接收消息权限说明](https://open.feishu.cn/document/server-docs/im-v1/message/events/receive)。
 
-支持图片输入的内置渠道均支持把 JPEG、PNG、WebP 图片，以及以图片文件方式发送的 GIF，连同可选文字说明发送给 Harness；单张图片上限为 5 MB，单条消息中的图片总大小上限为 20 MB。iMessage 首版仅支持文本私聊，不包含在图片能力中。飞书下载用户消息中的图片或文件需要租户权限 `im:message:readonly`，确认页将其显示为“获取单聊、群组消息”；飞书目前没有为该下载接口提供仅限图片的更窄权限。扫码新建的应用会默认申请；已有或手动绑定的应用可私聊机器人执行 `/repair`，或在「IM机器人」设置页点击“补全权限”，扫码增量补全该权限、上传机器人图片或文件所需的 `im:resource`、原生命令面板所需的 `application:app_slash_command:read` / `write`，以及卡片回调。
+支持图片输入的内置渠道均支持把 JPEG、PNG、WebP 图片，以及以图片文件方式发送的 GIF，连同可选文字说明发送给 Harness；默认每张原图最多接收 30 MB、每条消息最多 20 张；原图保存到会话工作区，模型副本自动缩放或压缩到单张 5 MB、总计 20 MB 以内，仍超限或模型不支持图片时按文件交给模型处理。这四项限制可在「通用设置 → 附件 → 图片输入」调整，对后续消息生效；原图沿用附件保留时长。调高模型输入上限会增加请求体积、处理耗时和模型成本，也仍受平台及宿主限制。iMessage 首版仅支持文本私聊，不包含在图片能力中。飞书下载用户消息中的图片或文件需要租户权限 `im:message:readonly`，确认页将其显示为“获取单聊、群组消息”；飞书目前没有为该下载接口提供仅限图片的更窄权限。扫码新建的应用会默认申请；已有或手动绑定的应用可私聊机器人执行 `/repair`，或在「IM机器人」设置页点击“补全权限”，扫码增量补全该权限、上传机器人图片或文件所需的 `im:resource`、原生命令面板所需的 `application:app_slash_command:read` / `write`，以及卡片回调。
+
+### 群聊天记录与群文件
+
+WhatsApp、飞书、Telegram、Discord、Slack、QQ 支持自动保存实际收到的群消息和附件，包括平台允许接收的未 @ 消息。采集默认开启，保存本身不触发模型回复；在群内 @ 机器人即可按需查询聊天记录、总结讨论或读取文件。
+
+记录按群共享，独立于机器人、AI 会话和工作区，默认滚动保留 **14 天**。可在 **DSH 设置 → IM机器人 → 齿轮「通用设置」→ 通用** 修改保留天数。只保存实际接收的内容，不回填完整历史；QQ 当前按应用来源隔离，Discord 线程独立保存。
+
+详见[群消息记录与群文件使用指南](docs/group-history.md)：包含六渠道权限与设置步骤、查询示例、存储位置、文件限制和排查方法。WhatsApp、飞书、QQ 已完成文字及文本附件实测；Telegram 已完成文字实测，文件暂未验证；Discord、Slack 待真实群验收。
 
 ### 超时后的结果补发
 
@@ -94,6 +165,7 @@ Connect IM bots to DeepSeek Harness by scanning a QR code, using an App Manifest
 | Telegram | 机器人必须能在当前聊天发送文档，实际可发送范围以 Bot API 返回为准。 |
 | Discord | Developer Portal 的 Bot 设置中需启用 **Message Content Intent**；机器人需有 **Send Messages**、**Create Public Threads**、**Send Messages in Threads** 和 **Read Message History** 权限；发送结果文件还需 **Attach Files**。实际附件额度由当前账号与服务器能力决定。 |
 | WhatsApp | 当前绑定会话需支持 Document Message，实际可发送范围以 WhatsApp/Baileys 返回为准。 |
+| Matrix | homeserver 需允许媒体上传，单文件实际上限由其媒体仓库配置决定；被拒绝时插件会明确提示检查媒体大小限制与上传权限。 |
 
 ## AI Office Connector
 
@@ -101,15 +173,27 @@ Connect IM bots to DeepSeek Harness by scanning a QR code, using an App Manifest
 
 ## 安装
 
-推荐从 npm 安装已发布的稳定版本：
+推荐从 npm 安装已发布的稳定版本 **`@xmanrui/dsh-im`**。请按实际使用的运行方式选择对应命令：
+
+**DSH Desktop**：在当前 Desktop 的内置终端中执行：
+
+```sh
+dsh plugin --profile desktop add -w @xmanrui/dsh-im
+```
+
+安装完成后重启 DSH Desktop。
+
+**DSH Web**：在启动当前 Harness 的终端环境中执行：
 
 ```sh
 dsh plugin --profile web add -w @xmanrui/dsh-im
 ```
 
-重启 `dsh web`、刷新浏览器，然后打开「设置 → IM机器人」。IM机器人使用 `order: 21`，尽量排在一级设置菜单的「Agent 预设」之后；插件页面不再保留旧入口。从旧版升级不会改变已有机器人、凭据、工作区、Agent Preset 或会话绑定。
+安装完成后重启 `dsh web`，并刷新浏览器。
 
-本机 `dsh web` 和 DSH Desktop 默认直接复用当前 Host 的内部服务：旧版 Harness 使用 `apiProxy`，新版 Harness 自动使用 Typert Gateway、Session Controller 和 Workspace Controller，不需要配置 Harness 地址，也不绕行本机 HTTP 端口。Desktop 的兼容模式、扩展窗口和增强模式均无需开启“允许在浏览器中打开”或局域网访问。渠道配置中显式设置的 `harnessBaseUrl` 仅保留给旧版远程 HTTP/WebSocket Harness；内部调用失败不会自动改连其他 Host。
+重启后打开「设置 → IM机器人」。IM机器人使用 `order: 21`，尽量排在一级设置菜单的「Agent 预设」之后；插件页面不再保留旧入口。从旧版升级不会改变已有机器人、凭据、工作区、Agent Preset 或会话绑定。
+
+本机 `dsh web` 和 DSH Desktop 默认直接复用当前 Host 的内部服务：通过 Typert Gateway 调用 Session Controller 和 Workspace Controller，不需要配置 Harness 地址，也不绕行本机 HTTP 端口。Desktop 的兼容模式、扩展窗口和增强模式均无需开启“允许在浏览器中打开”或局域网访问。渠道配置中显式设置的 `harnessBaseUrl` 仅保留给旧版远程 HTTP/WebSocket Harness；内部调用失败不会自动改连其他 Host。
 
 如需试用尚未发布到 npm 的最新代码，可以改用 GitHub 源安装器：
 
@@ -138,24 +222,94 @@ dsh web
 | 默认行为 | 说明 |
 | --- | --- |
 | 机器人别名 | 点击机器人名称旁的铅笔设置别名，保存后立即显示，无需重启或重连。原名称始终保留，可点击“恢复原名称”或清空别名后保存；仅影响本机设置页中的显示名称。 |
-| 机器人工作区 | 每个机器人独立保存工作区。新机器人默认使用 Host 当时的工作目录；之后可在机器人卡片中修改。 |
+| 机器人工作区 | 每个机器人独立保存工作区。新机器人默认使用 `$DSH_HOME/im`（未设置时为 `~/.dsh/im`），机器人或对话实际选用该目录时自动创建；全部使用其他工作区时，不会仅因启动插件而创建该目录。新会话显示在「未分组」；之后可在机器人卡片中修改。显式配置的 `workspace` 优先，`dshHome` 可覆盖环境变量 `DSH_HOME`。 |
 | 模型 | 每个 IM 渠道的每个机器人都可在工作区下方独立选择模型；未选择时跟随 Host 默认。切换只影响之后新建的会话；当前聊天先发送 `/new`，再发送普通消息才会使用新选择。 |
 | 思考强度 | 在模型下方显式选择该模型支持的思考强度，或跟随模型默认。档位、说明和默认值来自 DSH；切换模型后恢复新模型默认强度。每个机器人独立保存，只影响之后新建的会话。 |
 | Agent Preset | 每个机器人可在设置页卡片中选择 Agent Preset。未选择时跟随 Host 的 `agent-presets.default`；渠道级 `config.agentPreset` 只作为该渠道之后新接入机器人的默认值。切换不会修改或清空已有会话；若当前聊天已有会话，需先发送 `/new`，再发送一条普通消息，才会按新选择创建会话。 |
 | 上下文增强 | 从机器人卡片打开设置，分别决定群聊、私聊是否增强；两个开关默认均关闭，旧机器人升级后也不会自动开启。 |
+| 飞书指令面板 | 每个飞书机器人可在「更多设置 → 指令面板」里决定聊天输入框打 `/` 时列出哪些指令、按什么顺序：「跟随默认」使用插件自带的 31 条清单（随插件版本更新），「自定义」则恰好是所选指令和所选顺序。隐藏只是不在候选里出现，手动输入同一命令照旧可用；清单之外手工添加的指令不会被删除。配好一个机器人后，可用「保存并同步到其他机器人」一次写到该渠道的其他所有机器人（会覆盖它们各自的面板设置；离线机器人下次启动时生效）。保存后由机器人后台同步，指令较多时需要一点时间。 |
+| 飞书被 @ 时开话题 | 默认开启。在群聊或私聊里 @机器人 提问时，机器人会在那条消息下新建一条飞书话题，问答都落在话题内；该话题是 dsh 会话列表里一条独立会话，话题里的后续消息属于同一个会话。只发一个 @机器人（打开菜单）不会新建话题，没有 @机器人 的消息仍留在原会话。可在机器人卡片的「群聊」设置里关闭，关闭后群聊与私聊都恢复平铺回复。 |
+| 飞书任务过程展示 | 每个飞书机器人可选择不显示过程、实时直播、实时过程卡或逐步消息。实时直播使用飞书原生思考过程展示推理、工具调用和结果，最终答案单独发送；需要飞书 PC 7.70、移动端 7.74 或更新版本。飞书原生思考过程目前无法发到话题内，因此话题中的回合会改用实时过程卡，过程与答案都留在话题里。 |
+| 飞书最终答案格式 | 不显示过程时，流式卡不可用、创建失败或封存失败，最终答案仍优先通过支持 Markdown 的富文本消息发送；保留原话题路由，只有富文本也被拒绝时才降级为纯文本，不会再次请求模型。 |
 | 会话渠道标识 | 本机 Host 的 IM 渠道与 AI Office 会话自动标记来源。Web 会话列表和搜索结果将「微信 ·」等前缀显示为渠道 Logo；保留 DSH 原有的自动标题生成与更新。已有会话在下次加载时补上。 |
 
 渠道前缀在 DSH 生成标题后追加，完整保留原始标题与自动／手动来源，不会将自动标题锁定为手动命名，也不会额外调用模型。重复生成、刷新或重启不会叠加前缀；真实的手动命名仍遵循 DSH 原有的锁定规则。此功能由当前 Host 的会话事件驱动，显式连接远程 `harnessBaseUrl` 时需在目标 Host 上安装该插件。
 
 Logo 由 dsh-im 的浏览器适配显示，无需修改 DSH。适配保留原始文字节点和点击、菜单、拖拽操作；复制、读屏及其他界面仍保留文字渠道名。DSH 页面结构不匹配、浏览器不支持或图标加载失败时，自动保留文字前缀；插件卸载后恢复原始显示。
 
+### 排队与插话
+
+在机器人卡片中打开 **「更多设置 → 通用」**，选择 **「任务运行时的新消息处理方式」**，然后保存。每个机器人独立设置，覆盖全部 13 个聊天渠道。
+
+- **排队（默认）**：当前任务结束后再处理新消息，需要等待时会回复排队提示。
+- **插话**：任务运行期间，新的普通纯文字作为补充指令加入当前任务，Agent 在下一步读取，并回复提交提示。无需每次输入 `/steer`。
+
+没有运行中的任务时正常开始新任务；图片、文件、语音和带引用的消息继续按原有方式处理。原有群聊提及规则和权限限制保留，自动插话需要具备 `/steer` 权限。两种模式均可使用 `/steer 补充内容` 手动插话。
+
+保存后立即影响新收到的消息，已排队的消息不会转为插话。AI Office 当前没有普通聊天消息追加入口，此设置不适用。
+
 ### 主动投递
 
 支持主动投递的 IM 渠道可以使用稳定的 `botId + targetId` 主动发送文字消息。机器人设置页支持从已聊会话选择或手工填写目标、保存前测试当前路由，以及复制调用参数；HTTP POST、同 Host 插件和 Connection RPC 共用同一目标配置与投递核心。
 
-已保存的私聊目标还可以开启默认关闭的「会话双向同步」。开启后，DSH Web／CLI 在该私聊当前 Session 中发送的用户文字和最终助手文字会同步回私聊；IM 侧原有提问与 `/steer` 不会重复。开关自动跟随 `/session`、`/new` 和工作区切换后的当前 Session。首版仅支持当前 Host 的私聊文字；群聊、Topic、Thread 与显式远程 `harnessBaseUrl` 不支持。
+已保存的私聊目标还可以开启默认关闭的「会话双向同步」。开启后，DSH Web／CLI 在该私聊当前 Session 中发送的用户文字和最终助手文字会同步回私聊，定时任务成功完成后的最终助手文字也会同步；IM 侧原有提问与 `/steer` 不会重复。开关自动跟随 `/session`、`/new` 和工作区切换后的当前 Session。首版仅支持当前 Host 的私聊文字；群聊、Topic、Thread 与显式远程 `harnessBaseUrl` 不支持。
+
+同步回答按渠道能力呈现 Markdown：复用飞书卡片、Telegram 富文本、QQ／钉钉／Slack 的格式消息，以及企业微信机器人、Matrix、Discord 的已有能力；WhatsApp 适配常用格式，企业微信应用和微信保留完整文本。格式降级与长消息处理沿用或复用渠道机制，发送结果未知时不新增自动重发。
 
 设置步骤、各渠道字段、完整调用示例、管理端点、错误码与排错说明请查看[《主动投递使用指南》](PROACTIVE_DELIVERY.md)（[English](PROACTIVE_DELIVERY.en.md)）。
+
+### 客户端面板接入
+
+支持全局面板的 DSH 在左侧边栏提供「IM机器人」，沿用插件页的双对话框造型，以单色细线图标显示，点击打开完整 IM 管理面板。原「设置 → IM机器人」和插件详情页的「打开 IM机器人」入口保留。宿主也可通过可选客户端服务 `dshImClient` 嵌入面板；接口、兼容要求与接入示例见[客户端接入文档](docs/client-integration.md)。
+
+### 会话 → 对话反查（宿主服务）
+
+其他插件常常只拿得到会话 id，却需要知道这个会话属于哪个渠道、哪个机器人、哪个群和哪个话题。宿主服务 `dshIm` 为此提供一个只读方法：
+
+```js
+const info = await dshIm.describeConversation(sessionId);
+// null —— 该会话不属于任何 IM 对话
+// 否则：
+// { channel, botId, botName, conversationKey, chatType,
+//   chatId, threadId, chatTitle,
+//   senderId, senderName, senderUsername, senderIsBot }
+```
+
+- 只读：不访问网络、不创建会话、不阻塞回复，也不抛错；未知会话返回 `null`。
+- 数据全部来自插件自己的状态文件（`sessions` 映射）与机器人配置，不要求内核新增字段。
+- `chatType` 为 `group`、`thread` 或 `dm`。没有作者记录时，只有当键本身标识用户时才从键推出 `senderId`：Matrix `direct:dm:<userId>`、`p2p:<id>`（飞书、微信、企业微信自建应用、钉钉）、QQ `c2c:<openid>`，以及 Telegram 和企业微信的 `direct:<id>`。Slack、Discord、WhatsApp、iMessage 等渠道的 `direct:<id>` 标识的是私聊频道，因此放进 `chatId`，`senderId` 保持 `null`。
+- 每个会话首次反查写一行日志 `[dsh-im] describeConversation session=… chat=… sender=…`，之后不再重复。
+- 发言人会被记住：桥接在把消息交给会话之前，把 `senderId` 与「是否机器人」写进机器人状态文件（`authors`）；显示名和 `username` 只有在该聊天类型启用了上下文增强（或渠道本身提供发言人名称，如 Matrix）时才记录，否则为 `null`，每条新消息覆盖前一条，只保留身份、不保留文本；因此重启后仍然可读。
+- 上述渠道的私聊 `senderId` 即使作者记录缺失也能从键推出；群聊作者在第一条入站消息之前为 `null`。
+- 由对话键插入数字聊天／话题字段的链接是 **Telegram 专用**；QQ 和其他渠道必须使用各自的原生 route 字段，不能把它们当作 Telegram 链接。
+
+同一个反查还有一个同步版本，供在同步上下文里组装的场景使用（例如系统提示词的渲染）：
+
+```js
+const info = dshIm.describeConversationSync(sessionId);
+```
+
+- 没有 `await`：只读本进程已经加载的机器人状态，绝不发起加载、访问网络或启动账户查询。
+- 因此该机器人状态尚未加载时返回 `null` —— 调用方要自己决定「未知」意味着什么；异步版本会在需要时加载并给出 `botName`，同步版本 `botName` 恒为 `null`。
+- 已经处理过消息的机器人，其状态一定在内存里，所以活跃会话的第一次提示词组装就能拿到身份。
+
+### 对话绑定的两个事件
+
+写入绑定时，通道会同步发出事件，订阅方不必反查就能维持自己的「会话 → 身份」表：
+
+| 事件 | 何时发出 | 载荷 |
+| --- | --- | --- |
+| `dsh-im/session-pre-bind` | 对话绑定到某个会话，且在 `session.create` 之前 | `channel`、`botId`、`sessionId`、`conversationKey`、`chatType`、`chatId`、`threadId`、`senderId`、`senderName` |
+| `dsh-im/session-unbind` | 对话不再指向原会话：切换到另一个会话，或绑定被清除 | 同上，但没有作者字段；`sessionId` 是被解绑的旧会话 |
+
+- 两个事件同步发出，顺序是「先解绑旧的、再绑定新的」，订阅方能一条线读完。
+- 所有聊天通道都会发这两个事件：Telegram、Discord、Email、iMessage 走共用的生产控制器；DingTalk、飞书、Matrix、QQ、Slack、企业微信（`wecom` 与 `wecom-app`）、微信（`weixin`）和 WhatsApp 各自组装控制器，但状态同样经过同一层封装。`office` 是任务连接器，没有对话，因此不发这两个事件。
+- 自己组装生产控制器的通道不要直接 `new StateStore(path).load()`：用 `createAnnouncedStateStore({ announcer, StateStore, statePath })`，它按机器人只加载一次并返回已包装的 store，同时给出投递适配器需要的 `stateForSync`；启动时用 `prime()` 预热，第一次提示词组装才能同步拿到身份。
+- 只有真正提交的写入才会发事件：写入被拒绝（返回 `false`）或写成同一个会话时不发 `unbind`。
+- 订阅方必须按 `(conversationKey, sessionId)` 做到幂等：重复写入同一条绑定会再发一次绑定事件，协议上分不出这次重复和第一次。
+- 清除一个会话绑定（`clearSession`）和清除全部绑定（`clearSessions`）同样会按对话逐个发 `session-unbind`。
+- 订阅方抛错不影响消息处理。
+- 解绑不代表会话的身份消失：把它留在自己的表里（例如带 `superseded_at`）仍可让独占该会话的定时任务继续投递到原来的对话，只是「谁拥有这个对话」要按最新一次绑定算。
 
 ### 上下文增强
 
@@ -180,7 +334,7 @@ Logo 由 dsh-im 的浏览器适配显示，无需修改 DSH。适配保留原始
 | 命令 | 作用 |
 | --- | --- |
 | `/help` | 显示机器人支持的命令和用法。 |
-| `/menu`、`/m` | 飞书、钉钉和企业微信打开交互菜单。钉钉的会话、工作区、预设和模型按两列排列，选择后立即生效，并在原卡片更新结果。企微下拉选择后点击应用；收到每日进入单聊事件时也会自动展示菜单。菜单还提供新会话、停止、压缩、状态与帮助等按钮。 |
+| `/menu`、`/m` | 飞书、钉钉和企业微信打开交互菜单。钉钉的会话、工作区、预设和模型按两列排列，选择后立即生效，并在原卡片更新结果。企微下拉选择后点击应用；菜单仅通过 `/m` 或 `/menu` 手动打开，进入单聊时不自动展示，按钮执行后仅反馈结果，不自动补发菜单。菜单还提供新会话、停止、压缩、清空上下文、状态与帮助等按钮。 |
 | QQ `/menu`、`/m` | 打开按钮与数字菜单：会话选择、工作区、模式／预设、模型、新会话、会话列表、停止、压缩、补充指令、归档显示切换、状态和帮助。列表支持分页；按钮不可用时回复数字选择。菜单按聊天和操作者隔离，15 分钟或重启后失效；普通消息退出数字选择，审批、提问和批量输入保留原有优先级。 |
 | `/new` | 解除当前聊天的会话绑定，让下一条普通消息开启全新 Harness 会话。 |
 | `/status` | 检查当前机器人与 DeepSeek Harness 的连接状态。 |
@@ -196,6 +350,8 @@ Logo 由 dsh-im 的浏览器适配显示，无需修改 DSH。适配保留原始
 | `/preset` | 查看当前机器人的新会话 Agent Preset 设置。 |
 | `/preset <序号或 Preset ID>` | 设置当前机器人的 Agent Preset；纯数字 ID 使用 `/preset id:<ID>`。 |
 | `/preset --default` | 清除当前机器人的显式选择，让后续新 Session 跟随 Host 默认。 |
+| `/permissionlist` | 飞书、QQ：按序号列出当前绑定会话的可用权限档位。 |
+| `/permission [序号或完整ID]` | 飞书、QQ：查看或直接切换当前会话权限；纯数字 ID 使用 `/permission id:<ID>`。 |
 | `/stop` | 立即停止当前聊天正在运行的任务，并保留尚未开始的排队消息。 |
 | `/steer <补充指令>` | 把补充指令立即加入当前聊天正在运行的任务。 |
 | `/batch` | 在私聊中开启批量输入，最多收集 10 条纯文字消息。 |
@@ -203,14 +359,18 @@ Logo 由 dsh-im 的浏览器适配显示，无需修改 DSH。适配保留原始
 | `/cancel` | 取消批量输入并丢弃已收集的消息。 |
 | `/repair` | 在飞书私聊中增量修复卡片回调，并补全媒体、群聊机器人 @ 消息与原生 Slash Command 面板所需的权限。 |
 | `/compact` | 立即压缩当前聊天绑定会话的较早上下文。 |
-| `/workspace <工作区序号或绝对路径>`、`/ws <工作区序号或绝对路径>` | 按 `/workspacelist` 序号或绝对路径切换当前机器人的 Harness 工作区。 |
-| `/workspacelist`、`/workspaces`、`/wsl` | 列出当前 Harness Host 上仍然存在的工作区绝对路径。 |
-| `/sessionlist [工作区序号或绝对路径]`、`/sessions [...]` | 两个等价命令；列出指定工作区登记的所有会话 ID 和标题，省略参数时使用当前工作区。 |
+| `/clear` | 清空当前聊天绑定会话的模型上下文，同时保留 Session 绑定和历史记录；当前 Host 未注册该命令时会明确提示未支持。 |
+| `/workspace [工作区序号或绝对路径]`、`/ws [...]` | 查看并切换当前机器人的 Harness 工作区：不带参数时列出可切换的工作区（Telegram 上为可点击卡片，点一下即切换，原地标记当前项）；带序号或绝对路径时直接切换。 |
+| `/workspacelist`、`/workspaces`、`/wsl` | `/workspace` 的旧别名，等同无参数形式；原生命令菜单只保留一个工作区入口。 |
+| `/sessionlist [工作区序号或绝对路径]`、`/sessions [...]` | 两个等价命令；列出指定工作区的会话 ID 和标题，并标出本对话已绑定的会话（「（当前绑定）」）；默认 IM 目录也包含其中的未分组会话；省略参数时使用当前工作区。 |
+| `/sessionlist --all`、`/sessions --all` | 跨工作区汇总会话：当前对话有效工作区置顶并标注，每个工作区默认显示 10 条，可用 `--limit N` 调整；读取失败的工作区会跳过并提示数量。 |
 | `/sessionlist --limit N`、`/sessions --limit N` | 列出当前工作区现有顺序中的前 N 个会话；N 必须是正整数。 |
-| `/session <Session ID>` | 将当前聊天绑定到指定的已有 Harness 会话。 |
+| `/session <Session ID、序号或标题关键词>` | 将当前聊天绑定到指定的已有 Harness 会话；标题关键词只在当前对话工作区唯一命中时自动绑定，其他情况要求完整 Session ID；已归档的会话不会被关键词选中。 |
 | `/history [数量]` | 在私聊中查看当前绑定会话的最近历史消息，默认 3 条，最多 5 条。 |
-| 交互式提问 | 回复选项序号、选项文字或自定义文字；多选时用逗号分隔。 |
+| 交互式提问 | 回复选项序号、选项文字或自定义文字；多选时用逗号分隔。飞书中，提问发起人发送图片或图文消息会结束本轮追问，并在同一会话继续处理图片，无需答完剩余问题或重新发图。 |
 | 远程审批 | 回复 `批准` / `拒绝` / `同意` / `不同意` / `yes` / `no`。 |
+
+Web 与机器人可同时处理同一审批，先提交的「批准一次」或「拒绝」生效，另一端随即失效。支持微信、飞书、钉钉、企业微信机器人／应用、QQ、Telegram、Slack、Discord、WhatsApp、Matrix；iMessage、邮箱和 AI Office 暂不参与。机器人发起时使用原聊天；Web 或其他 Host 任务发起时，需要该 Session 恰好绑定一个已开启双向同步的私聊。同一私聊的目标别名按一个入口计算，多个私聊只发 Web 处理提醒。审批复用当前绑定与权限，绑定变更后不能继续提交；不提供永久批准。Slack 从 Web 投递审批还需 `im:read` 权限，可更新应用 Manifest 后重新安装应用；缺少权限时保留 Web 处理入口。
 
 ### 命令说明
 
@@ -220,27 +380,42 @@ Logo 由 dsh-im 的浏览器适配显示，无需修改 DSH。适配保留原始
 
 ## 其它功能
 
-- **图片识别**：支持图片输入的内置渠道都可以把 JPEG、PNG、WebP，以及以图片文件方式发送的 GIF 交给 Harness；图片可以附带文字说明。单张图片上限为 5 MB，单条消息中的图片总大小上限为 20 MB。iMessage 首版仅支持文本私聊。
+### 按 Agent Preset 自动分组
+
+在插件 Host 配置中设置 `groupByAgentPreset: true`（默认关闭），也可在某个渠道配置中单独启用或关闭。选择明确的 Agent Preset 后，在默认 IM 目录下创建或复用 `presets/<preset-id>` 工作区，标题使用 Preset 名称；后续新会话进入该分组。已有聊天保留原历史和位置，手动目录、会话级目录和飞书目录隔离优先。详见 [配置和行为](docs/preset-workspaces.md)。
+
+
+- **图片识别**：支持图片输入的内置渠道都可以把 JPEG、PNG、WebP，以及以图片文件方式发送的 GIF 交给 Harness；图片可以附带文字说明。默认每张原图最多接收 30 MB、每条消息最多 20 张；原图保存到会话工作区，模型副本自动缩放或压缩到单张 5 MB、总计 20 MB 以内，仍超限或模型不支持图片时按文件交给模型处理。这四项限制可在「通用设置 → 附件 → 图片输入」调整，对后续消息生效；原图沿用附件保留时长。调高模型输入上限会增加请求体积、处理耗时和模型成本，也仍受平台及宿主限制。iMessage 首版仅支持文本私聊。
 - **在机器人卡片切换工作区**：设置页中的每张机器人卡片都会显示当前 Harness 工作区。可以直接填写已有目录的绝对路径，也可以打开目录选择器。切换只清除该机器人的旧聊天映射，不会删除、清空或归档旧 Session；已经开始的回复可以继续完成，后续消息使用新工作区。
+- **默认目录与未分组会话**：所有使用默认值的机器人共用 `$DSH_HOME/im`，但各自保存聊天与会话的绑定。插件不会为该目录创建工作区分组；`/sessions` 可以列出该目录的未分组会话，`/session <Session ID>`、`/session N` 或 `/session <标题关键词>` 可以绑定普通会话。切换到其他目录后，新会话按现有机制加入对应工作区分组；切回默认目录后新会话归入「未分组」。已有机器人的目录不会自动迁移。
 - **在机器人卡片选择模型与思考强度**：每个 IM 渠道的每张机器人卡片都在工作区下方提供模型与思考强度入口，采用 DSH 风格的分组列表、档位说明和选中标记。先选择 Host 当前可用模型，再选择其支持的强度，或跟随模型默认；未选模型时整体跟随 Host 默认。设置按机器人独立保存，只用于之后新建的 Session；已有 Session 和正在生成的回复不受影响。
 - **在机器人卡片选择 Agent Preset**：设置页中的每张机器人卡片都可以选择 Host 已有的 Agent Preset，或跟随 Host 默认。切换只作用于该机器人，并且只影响之后新建的会话；已有会话和正在生成的回复不受影响。
 - **检查连接并发送测试消息**：机器人在线时，点击卡片上的「检查连接」会检查平台连接，并向该机器人最近记录的私聊发送一条“DeepSeek Harness 连接测试成功”消息；WhatsApp 会发送到账号自聊。测试消息不会创建 Harness Session，也不会调用模型。机器人必须至少收到过一条私聊才能记住测试目标，否则页面会提示尚无可用的测试会话。
 - **重试连接和移除接入**：机器人离线时，卡片上的操作会变为「重试连接」；不再使用时可以点击「移除接入」。这些操作都只作用于所选机器人，不影响其他机器人或渠道。
 - **多机器人独立管理**：同一渠道可以接入多个机器人。每个机器人分别保存凭据、连接状态、工作区、模型、Agent Preset 和聊天会话映射，卡片上的工作区、模型、Preset、连接检查、重试和移除操作互不影响。
 - **流式回复和进度提示**：插件会按各平台能力显示正在思考、工具执行和逐步生成的回答；不支持原生流式接口的平台会通过编辑消息、卡片更新或最终消息完成回复。
+- **飞书语音交互（可选渠道能力）**：在每张机器人卡片的「更多设置 → 语音交互」中独立配置，默认关闭。开启后，语音消息经 ffmpeg 转码、DashScope `qwen3-asr-flash` 转写为文字，按正常文字流水线处理（命令识别、会话、模型与回传均一致），同一回合的答案同时经 `qwen3-tts-flash` 合成为语音回复原消息；转写失败时明确降级为原有的“仅支持文字、图片和文件”提示，不影响其他能力。凭据在插件凭据库中以环境变量名（`secretRef`，默认 `DASHSCOPE_API_KEY`）管理，密钥本身不进入机器人配置；转写模型、合成模型、回复音色和 ffmpeg 路径可按机器人调整，音色支持 `qwen3-tts-flash` 官方音色（如 Cherry、Serena、Bella、Chelsie、Momo、Katerina）。需要本机可用 ffmpeg 与可访问 DashScope 的密钥。
+
+微信、飞书、钉钉、企业微信、QQ、Slack、Telegram、Discord、WhatsApp、企业微信应用、iMessage、邮箱和 AI Office 的绑定、连接或移除失败时，可展开页面中的「诊断详情」并点击「复制诊断信息」。反馈时附上操作步骤、Desktop/Web 运行方式和实际 DSH 版本；使用页面中的 `WX-CONN-…`、`DT-CONN-…` 或 `IM-CONN-…` 参考号查找同一次故障的渠道 Host 日志。诊断会保留失败阶段、已识别的底层原因、HTTP 状态及可用的耗时等安全信息；多个原因会一并列出，无法识别时明确标为「暂未识别」，不包含登录令牌、二维码或原始响应内容。账号已移除但本机清理未完成时，页面会保留清理警告。消息故障沿用 `MF-…` 参考号；若页面提示 DSH 管理接口无法访问且没有 Host 参考号，请检查 DSH 管理连接。网络排查应以运行 DSH 的机器为准。
+
+微信启动配置校验失败时，诊断还会提供 `file`、`field`、`issue`，定位 `config.json` 或 `workspaces.json` 中第一个未通过校验的位置。字段中的序号从 0 开始，按文件条目顺序计数，例如 `workspaces[0].value` 表示第一条工作区配置的值，不包含真实账号标识。默认目录为 `DSH_HOME/integrations/dsh-weixin`（未设置 `DSH_HOME` 时为 `~/.dsh/integrations/dsh-weixin`），自定义路径以插件配置为准。修复后需要重启 DSH；页面「重新读取」仅查询状态，不会重新加载配置文件。
 
 ## 设计
 
 - Harness 一级设置菜单中只注册一个「IM机器人」设置页，其中包含内置 IM 渠道和一个 AI Office Connector；
 - 内置渠道及 Office Connector 的 Host、客户端与运行时源码都在本仓库维护，不依赖外部独立插件；
 - 设置页跟随 DeepSeek Harness 的语言选择，在中文和 English 之间即时切换；机器人发出的聊天消息、命令帮助和 Telegram 命令菜单同样跟随该界面语言并即时切换，中文始终为兜底，未收录的文案原样输出；
-- 左侧使用 Logo 切换微信、飞书、钉钉、企业微信、企业微信应用、QQ、Slack、Telegram、Discord、WhatsApp、iMessage 和 AI Office，不使用启用/停用开关；
+- 左侧使用 Logo 切换微信、飞书、钉钉、企业微信、企业微信应用、QQ、Slack、Telegram、Discord、WhatsApp、iMessage、Matrix 和 AI Office，不使用启用/停用开关；
 - 各 IM 渠道保持独立的 RPC、凭据、连接监督和会话映射；Office Connector 另行维护设备凭据、Job 租约、审批等待与并发上限；
-- 浏览器只获得二维码、Manifest、脱敏状态，以及用户为当前 Telegram 或 WhatsApp 机器人主动保存的访问模式和白名单标识；手动输入的 Secret 或 Token 仅单向提交给本机 Host，任何 RPC 响应都不会返回 App Secret、`bot_token`、钉钉 `client_secret`、企业微信 Secret、QQ `app_secret`、Slack Bot/App Token、Telegram/Discord Bot Token、WhatsApp 关联设备密钥、AI Office Device Token，或从平台消息中观察到的其他原始用户标识。
+- 浏览器只获得二维码、Manifest、脱敏状态，以及用户为当前 Telegram 或 WhatsApp 机器人主动保存的访问模式和白名单标识；手动输入的 Secret 或 Token 仅单向提交给本机 Host，任何 RPC 响应都不会返回 App Secret、`bot_token`、钉钉 `client_secret`、企业微信 Secret、QQ `app_secret`、Slack Bot/App Token、Telegram/Discord Bot Token、WhatsApp 关联设备密钥、Matrix 访问令牌与密码、AI Office Device Token，或从平台消息中观察到的其他原始用户标识。
 
 ## 本地开发
 
-Web profile 已验证兼容原版 DSH `0.1.2-alpha.4`、`0.1.2-alpha.5`、`0.1.2-rc.1`、`0.1.3-alpha.1` 和 `0.1.5-alpha.1`。这些版本共用 dsh-im 的管理 RPC 适配，通过 Connection 的公开 `/api` Fetch 注册接口工作，无需修改或重新编译 DSH。升级插件后重启 Host 并刷新设置页，使 Host 和客户端使用同一版插件。
+最新版 dsh-im 跟随最新版 DSH，本次支持基线为 DSH `0.2.1-rc.2`（Session 格式 v4）。后续功能和修复不再增加旧版 DSH 的兼容分支，已有其他兼容逻辑暂时保留；旧宿主请使用对应的历史插件版本。`package.json` 只声明当前实际验证的宿主版本，不承诺未经验证的未来版本。升级插件后重启 Host 并刷新设置页，使 Host 和客户端使用同一版插件。
+
+DSH `0.2.1-rc.2` 要求内部网关请求携带调用方 `peer`。所有渠道共用的适配层通过 Host Connection 创建并复用该身份，同时用于普通调用和流式调用，在插件卸载时释放。微信和 QQ 的新会话、已有会话收发已完成真机验证。
+
+上下文增强中的来源信息、引导词和引用回复使用 v4 的 `plugin:dsh-im` 来源字段，修复了它们触发的 `SessionFormatError: format v4 message requires a producer-owned source kind`。消息顺序、用户正文和会话级引导词去重沿用原有机制，历史会话由宿主负责迁移。
 
 ```sh
 npm install
@@ -250,7 +425,19 @@ node bin/dsh-im.mjs install --source .
 
 `npm run check` 运行单元测试、构建 Host/Client 产物，并验证发布包不包含凭据或独立渠道设置页注册。
 
+构建后运行 `node scripts/verify-injected-context.mjs /path/to/built/deepseek-harness`，验证发布产物中的上下文钩子能通过真实 DSH v4 JSONL 持久化，覆盖普通消息、来源信息、引导词、引用、组合和多段文本，以及关闭后重新读取、继续写入下一轮。脚本从指定宿主加载组件，使用并清理临时会话目录，无需机器人凭据或模型请求。
+
 IM 管理接口默认沿用 Harness 的浏览器认证和 Host／Origin 信任检查。只要 Harness 已允许并认证当前局域网访问，便可直接查看和配置 IM 机器人，无需额外修改 dsh-im 配置。
+
+通过自定义域名访问时，如果 IM 设置页出现 `transport failure for /api/dsh-im/...: HTTP 403`，请在原 DSH 启动命令中添加浏览器访问的域名，并重启 DSH：
+
+```sh
+dsh web --trusted-host dsh.example.com
+```
+
+将 `dsh.example.com` 替换为实际访问域名，不带 `http://`、`https://` 或路径。只写域名允许该域名的任意端口；如需限制到指定访问端口，使用 `--trusted-host dsh.example.com:8443`。多个域名可重复传入 `--trusted-host`。这个参数属于 DSH；dsh-im 的 `rpcAuthority: trusted-host` 本身不会把域名加入 DSH 信任列表。本机通过 `localhost` 或 `127.0.0.1` 访问通常不需要额外配置。
+
+使用反向代理时，代理传给 DSH 的 `Host` 应保留浏览器访问的域名及端口；浏览器携带的 `Origin` 解析出的 host（含非默认端口）必须与该 `Host` 一致，仅将两者分别加入信任列表仍会返回 403。`--trusted-host` 只配置访问校验，浏览器仍需通过有效启动链接完成认证。
 
 如需将 IM 管理额外限制为仅本机访问，可在当前 Web profile 的 `cordis.patch.yml` 中设置：
 
@@ -260,7 +447,9 @@ IM 管理接口默认沿用 Harness 的浏览器认证和 Host／Origin 信任�
     rpcAuthority: loopback
 ```
 
-`rpcAuthority` 默认为 `trusted-host`；显式设置 `loopback` 会额外要求回环 Host 和 Origin。更新与入站 TTL 管理始终仅允许回环访问。
+`rpcAuthority` 默认为 `trusted-host`，统一适用于渠道管理、通用设置（群记录保留、附件保留与清理、图片限制）和插件更新。通过 DSH 认证与 Host／Origin 校验的局域网或 NAS／Docker 访问可直接使用这些接口；显式设置 `loopback` 会额外要求回环 Host，以及存在时的回环 Origin。
+
+管理请求返回 401 时，请通过有效启动链接重新登录；403 表示访问被拒，应检查 DSH 可信地址、代理的 Host／Origin 和插件的 `rpcAuthority` 配置。远程访问 NAS 时，不要将浏览器地址改为自己电脑的 localhost。接口可访问不代表当前安装方式允许按钮更新：源码／链接安装、不支持的执行环境等仍沿用现有限制；确认安装、版本校验、并发锁和手动重启流程不变。
 
 局域网管理的 HTTP 集成测试可在构建插件后运行 `node scripts/verify-lan-management.mjs /path/to/built/deepseek-harness`。脚本启动原版 DSH CLI，使用独立临时 profile 和空机器人配置，检查默认访问、登录认证、Host／Origin 检查以及显式 `loopback` 策略，结束后停止服务并清理临时目录。测试通过回环 TCP 发送局域网 Host／Origin，不替代跨设备浏览器验收；原版 `0.1.5-alpha.1` CLI 本身拒绝 `--host 0.0.0.0`，跨设备测试需使用支持局域网访问的 Harness 环境。
 
@@ -294,13 +483,12 @@ IM 管理接口默认沿用 Harness 的浏览器认证和 Host／Origin 信任�
 
 ## 联系方式
 
-欢迎加入企业微信群，或通过邮箱、微信、小红书或 WhatsApp 联系我。
+欢迎加入 QQ群，或通过邮箱、小红书或 WhatsApp 联系我。
 
 <table>
   <tr>
     <th align="center">邮箱</th>
-    <th align="center">企业微信群</th>
-    <th align="center">微信</th>
+    <th align="center">QQ群</th>
     <th align="center">小红书</th>
     <th align="center">WhatsApp</th>
   </tr>
@@ -309,10 +497,7 @@ IM 管理接口默认沿用 Harness 的浏览器认证和 Host／Origin 信任�
       <a href="mailto:longmanr307@gmail.com">longmanr307@gmail.com</a>
     </td>
     <td align="center" valign="top">
-      <a href="docs/images/wecom.png"><img src="docs/images/wecom.png" alt="dsh-im 企业微信群二维码" width="240"></a>
-    </td>
-    <td align="center" valign="top">
-      <a href="docs/images/weixin.jpg"><img src="docs/images/weixin.jpg" alt="微信二维码" width="240"></a>
+      <a href="docs/images/QQ.png"><img src="docs/images/QQ.png" alt="dsh-im QQ群二维码" width="240"></a>
     </td>
     <td align="center" valign="top">
       <a href="docs/images/xhs.jpg"><img src="docs/images/xhs.jpg" alt="小红书二维码" width="240"></a>
@@ -340,47 +525,68 @@ IM 管理接口默认沿用 Harness 的浏览器认证和 Host／Origin 信任�
   <tbody>
     <tr>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/alpacachen" title="alpacachen"><img src="https://avatars.githubusercontent.com/u/21093036?s=80" width="80" alt="alpacachen"/><br /><sub><b>alpacachen</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/9d7ff2db1e44e2a7fdc5c344a662fbedcbad97d4" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/commit/9d7ff2db1e44e2a7fdc5c344a662fbedcbad97d4" title="Documentation">📖</a> <a href="https://github.com/xmanrui/dsh-im/commit/9d7ff2db1e44e2a7fdc5c344a662fbedcbad97d4" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/baijian" title="baijian"><img src="https://avatars.githubusercontent.com/u/1487653?s=80" width="80" alt="baijian"/><br /><sub><b>baijian</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/pull/195" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/pull/195" title="Tests">⚠️</a> <a href="https://github.com/xmanrui/dsh-im/pull/195" title="Documentation">📖</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/bitxeno" title="bitxeno"><img src="https://avatars.githubusercontent.com/u/137328844?s=80" width="80" alt="bitxeno"/><br /><sub><b>bitxeno</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/60e00bbca9f43a9a7dc5947d5146036e9916a84a" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/commit/60e00bbca9f43a9a7dc5947d5146036e9916a84a" title="Tests">⚠️</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/bulingbuling688" title="bulingbuling688"><img src="https://avatars.githubusercontent.com/u/147490150?s=80" width="80" alt="wang shi zhuo"/><br /><sub><b>wang shi zhuo</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/a3d36784f30a3e88934b2afda846f86a492346de" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/commit/a3d36784f30a3e88934b2afda846f86a492346de" title="Tests">⚠️</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/BuvkB" title="BuvkB"><img src="https://avatars.githubusercontent.com/u/19549719?s=80" width="80" alt="BuvkB"/><br /><sub><b>BuvkB</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/pull/171" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/commit/80589c1c6578ccf79124348417b8013487fb3093" title="Documentation">📖</a> <a href="https://github.com/xmanrui/dsh-im/commit/f929ab54702920e96b4187a3071329dd9eb469cd" title="Tests">⚠️</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/C3H3-AI" title="C3H3-AI"><img src="https://avatars.githubusercontent.com/u/256468226?s=80" width="80" alt="C3H3-AI"/><br /><sub><b>C3H3-AI</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/3bc642bb82125c0ce438e153b1b830e50c90f23b" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/commit/64ba1463a847f83f087bea2d5d6db454f791e596" title="Documentation">📖</a> <a href="https://github.com/xmanrui/dsh-im/commit/7d2c93da8681c86ea0eee7d6ca8baa00b3063577" title="Tests">⚠️</a> <a href="https://github.com/xmanrui/dsh-im/commit/65b9cdbe3d39352c656937233276df2a86e9ed05" title="Infrastructure (Hosting, Build-Tools, etc)">🚇</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/Chan-0312" title="Chan-0312"><img src="https://avatars.githubusercontent.com/u/50688173?s=80" width="80" alt="Chan"/><br /><sub><b>Chan</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/3562b9244e4201421113678292a5e4682b6eea75" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/commit/3562b9244e4201421113678292a5e4682b6eea75" title="Documentation">📖</a> <a href="https://github.com/xmanrui/dsh-im/commit/3562b9244e4201421113678292a5e4682b6eea75" title="Tests">⚠️</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/cherryFloris" title="cherryFloris"><img src="https://avatars.githubusercontent.com/u/79453414?s=80" width="80" alt="cherryFloris"/><br /><sub><b>cherryFloris</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/ff865f9c7942c8b9275efa014306d5c208d9063e" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/commit/ff865f9c7942c8b9275efa014306d5c208d9063e" title="Documentation">📖</a> <a href="https://github.com/xmanrui/dsh-im/commit/ff865f9c7942c8b9275efa014306d5c208d9063e" title="Tests">⚠️</a></td>
     </tr>
     <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/chentianhai4" title="chentianhai4"><img src="https://avatars.githubusercontent.com/u/181718696?s=80" width="80" alt="chentianhai4"/><br /><sub><b>chentianhai4</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/pull/392" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/pull/392" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/cherryFloris" title="cherryFloris"><img src="https://avatars.githubusercontent.com/u/79453414?s=80" width="80" alt="cherryFloris"/><br /><sub><b>cherryFloris</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/ff865f9c7942c8b9275efa014306d5c208d9063e" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/commit/ff865f9c7942c8b9275efa014306d5c208d9063e" title="Documentation">📖</a> <a href="https://github.com/xmanrui/dsh-im/commit/ff865f9c7942c8b9275efa014306d5c208d9063e" title="Tests">⚠️</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/claude" title="claude"><img src="https://avatars.githubusercontent.com/u/81847?s=80" width="80" alt="Claude"/><br /><sub><b>Claude</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/5da749be757c602c83e465482f5e2b75e3c1e679" title="Documentation">📖</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/CodeBuddy-Official-Account" title="CodeBuddy-Official-Account"><img src="https://avatars.githubusercontent.com/u/214620440?s=80" width="80" alt="CodeBuddy-Official-Account"/><br /><sub><b>CodeBuddy-Official-Account</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/c51e8591016886e7ff2102351fc360bf4f16d5fb" title="Documentation">📖</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/codex" title="codex"><img src="https://avatars.githubusercontent.com/u/267193182?s=80" width="80" alt="Codex"/><br /><sub><b>Codex</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/cfd90a41053e66c0f917ae03dd8fac765c2c3fd1" title="Documentation">📖</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/Diluka" title="Diluka"><img src="https://avatars.githubusercontent.com/u/3766084?s=80" width="80" alt="Diluka"/><br /><sub><b>Diluka</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/5efcfa67251582c401872b7a9166301a3b525d13" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/commit/5efcfa67251582c401872b7a9166301a3b525d13" title="Tests">⚠️</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/divingleee" title="divingleee"><img src="https://avatars.githubusercontent.com/u/39144947?s=80" width="80" alt="divingleee"/><br /><sub><b>divingleee</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/7d5bc94f64e223c610b01d4da3bd16682d99011a" title="Code">💻</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/evanfang0054" title="evanfang0054"><img src="https://avatars.githubusercontent.com/u/34673339?s=80" width="80" alt="Evan Fang"/><br /><sub><b>Evan Fang</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/da4114dfe3240f614aa573b366668db517f45d8d" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/commit/45ef019a1f2fa7233b6331313804f864ff1dfda5" title="Documentation">📖</a> <a href="https://github.com/xmanrui/dsh-im/commit/da4114dfe3240f614aa573b366668db517f45d8d" title="Tests">⚠️</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/evilh2019" title="evilh2019"><img src="https://avatars.githubusercontent.com/u/261342086?s=80" width="80" alt="Evilh2019"/><br /><sub><b>Evilh2019</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/adeab2dec870d646426056feee16cad0956e7b3e" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/commit/adeab2dec870d646426056feee16cad0956e7b3e" title="Tests">⚠️</a></td>
     </tr>
     <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/Dong09" title="Dong09"><img src="https://avatars.githubusercontent.com/u/45942487?s=80" width="80" alt="Dong09"/><br /><sub><b>Dong09</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/pull/210" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/pull/210" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/DoodleBears" title="DoodleBears"><img src="https://avatars.githubusercontent.com/u/62061729?s=80" width="80" alt="DoodleBear"/><br /><sub><b>DoodleBear</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/pull/293" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/pull/293" title="Documentation">📖</a> <a href="https://github.com/xmanrui/dsh-im/pull/293" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/evanfang0054" title="evanfang0054"><img src="https://avatars.githubusercontent.com/u/34673339?s=80" width="80" alt="Evan Fang"/><br /><sub><b>Evan Fang</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/da4114dfe3240f614aa573b366668db517f45d8d" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/commit/45ef019a1f2fa7233b6331313804f864ff1dfda5" title="Documentation">📖</a> <a href="https://github.com/xmanrui/dsh-im/commit/da4114dfe3240f614aa573b366668db517f45d8d" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/evilh2019" title="evilh2019"><img src="https://avatars.githubusercontent.com/u/261342086?s=80" width="80" alt="Evilh2019"/><br /><sub><b>Evilh2019</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/adeab2dec870d646426056feee16cad0956e7b3e" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/commit/adeab2dec870d646426056feee16cad0956e7b3e" title="Tests">⚠️</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/ferocknew" title="ferocknew"><img src="https://avatars.githubusercontent.com/u/2178683?s=80" width="80" alt="ferocknew"/><br /><sub><b>ferocknew</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/81884173df4479c82dc4c44fdf4a3d9769c3431c" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/commit/81884173df4479c82dc4c44fdf4a3d9769c3431c" title="Tests">⚠️</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/geekyfoxlab" title="geekyfoxlab"><img src="https://avatars.githubusercontent.com/u/124858191?s=80" width="80" alt="geekyfox"/><br /><sub><b>geekyfox</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/583bfc9160f06893f60309b5603f481efa166d48" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/commit/583bfc9160f06893f60309b5603f481efa166d48" title="Tests">⚠️</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/gemini-code-assist" title="gemini-code-assist"><img src="https://avatars.githubusercontent.com/u/200291788?s=80" width="80" alt="Gemini"/><br /><sub><b>Gemini</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/63aced1fce292b6f9ff633d0dd1ee11ad322efc2" title="Documentation">📖</a></td>
+    </tr>
+    <tr>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/GoldJohnKing" title="GoldJohnKing"><img src="https://avatars.githubusercontent.com/u/26923626?s=80" width="80" alt="Gold John King"/><br /><sub><b>Gold John King</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/0851e8cf30f639bb3599d5e58dfcfe499bacd0da" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/commit/0851e8cf30f639bb3599d5e58dfcfe499bacd0da" title="Documentation">📖</a> <a href="https://github.com/xmanrui/dsh-im/commit/0851e8cf30f639bb3599d5e58dfcfe499bacd0da" title="Tests">⚠️</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/grloper" title="grloper"><img src="https://avatars.githubusercontent.com/u/72247422?s=80" width="80" alt="grloper"/><br /><sub><b>grloper</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/badeef25f1feff2238e1c47880734bf28cbdcba0" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/commit/af27a23299583d51360bd97e0ce02d1753135b14" title="Documentation">📖</a> <a href="https://github.com/xmanrui/dsh-im/commit/a42c5704e1e0387fb6a9956f1c100b572bec4ed4" title="Tests">⚠️</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/iamyaojie" title="iamyaojie"><img src="https://avatars.githubusercontent.com/u/15206127?s=80" width="80" alt="iamyaojie"/><br /><sub><b>iamyaojie</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/3161816cc441220196f310ab4944eef07fc7b05b" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/commit/3161816cc441220196f310ab4944eef07fc7b05b" title="Documentation">📖</a> <a href="https://github.com/xmanrui/dsh-im/commit/3161816cc441220196f310ab4944eef07fc7b05b" title="Tests">⚠️</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/iJetLi" title="iJetLi"><img src="https://avatars.githubusercontent.com/u/33075485?s=80" width="80" alt="iJetLi"/><br /><sub><b>iJetLi</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/9a2956ce0a4ef1be45d13e07a64e14d7e9c347c5" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/commit/9a2956ce0a4ef1be45d13e07a64e14d7e9c347c5" title="Tests">⚠️</a></td>
-    </tr>
-    <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/johnslee1207-commits" title="johnslee1207-commits"><img src="https://avatars.githubusercontent.com/u/243954471?s=80" width="80" alt="Johnslee1207"/><br /><sub><b>Johnslee1207</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/pull/214" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/pull/214" title="Tests">⚠️</a> <a href="https://github.com/xmanrui/dsh-im/pull/214" title="Infrastructure (Hosting, Build-Tools, etc)">🚇</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/kimi-agent-bot" title="kimi-agent-bot"><img src="https://avatars.githubusercontent.com/u/317908118?s=80" width="80" alt="Kimi Agent"/><br /><sub><b>Kimi Agent</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/b64e78d1138b0b5100cd47526bc57f5a6f3e26c8" title="Documentation">📖</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/LAN-SHH" title="LAN-SHH"><img src="https://avatars.githubusercontent.com/u/273559466?s=80" width="80" alt="LAN-SHH"/><br /><sub><b>LAN-SHH</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/9d3700b1cd89a811bceeb69bedfac2715c9a1df1" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/commit/9d3700b1cd89a811bceeb69bedfac2715c9a1df1" title="Tests">⚠️</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/lKolabrodl" title="lKolabrodl"><img src="https://avatars.githubusercontent.com/u/36865467?s=80" width="80" alt="Kolabrod"/><br /><sub><b>Kolabrod</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/98c1e482719d38e0cd0b8d7c76fd20e5a1915f0a" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/commit/98c1e482719d38e0cd0b8d7c76fd20e5a1915f0a" title="Documentation">📖</a> <a href="https://github.com/xmanrui/dsh-im/commit/98c1e482719d38e0cd0b8d7c76fd20e5a1915f0a" title="Tests">⚠️</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/luochen211" title="luochen211"><img src="https://avatars.githubusercontent.com/u/188724350?s=80" width="80" alt="落尘"/><br /><sub><b>落尘</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/860faad380696b5533e98672686ed00953f6a87d" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/commit/860faad380696b5533e98672686ed00953f6a87d" title="Documentation">📖</a> <a href="https://github.com/xmanrui/dsh-im/commit/860faad380696b5533e98672686ed00953f6a87d" title="Tests">⚠️</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/masucc" title="masucc"><img src="https://avatars.githubusercontent.com/u/143188027?s=80" width="80" alt="masucc"/><br /><sub><b>masucc</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/34bae7c4ee5ea04b28ef7f3108479651b56c78b8" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/commit/34bae7c4ee5ea04b28ef7f3108479651b56c78b8" title="Tests">⚠️</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/NIU-001-LIU" title="NIU-001-LIU"><img src="https://avatars.githubusercontent.com/u/133982393?s=80" width="80" alt="WENBO LIU"/><br /><sub><b>WENBO LIU</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/6366404c42f7163712bbc44c5011dbdafa63e9bd" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/commit/6366404c42f7163712bbc44c5011dbdafa63e9bd" title="Tests">⚠️</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/penggaolai" title="penggaolai"><img src="https://avatars.githubusercontent.com/u/44097312?s=80" width="80" alt="penggaolai"/><br /><sub><b>penggaolai</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/03565e5a69bfd03dc246990c3376fbd794caea6e" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/commit/03565e5a69bfd03dc246990c3376fbd794caea6e" title="Tests">⚠️</a></td>
     </tr>
     <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/Librazy" title="Librazy"><img src="https://avatars.githubusercontent.com/u/2211542?s=80" width="80" alt="Liqueur Librazy"/><br /><sub><b>Liqueur Librazy</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/pull/205" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/pull/205" title="Documentation">📖</a> <a href="https://github.com/xmanrui/dsh-im/pull/205" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/lKolabrodl" title="lKolabrodl"><img src="https://avatars.githubusercontent.com/u/36865467?s=80" width="80" alt="Kolabrod"/><br /><sub><b>Kolabrod</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/98c1e482719d38e0cd0b8d7c76fd20e5a1915f0a" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/commit/98c1e482719d38e0cd0b8d7c76fd20e5a1915f0a" title="Documentation">📖</a> <a href="https://github.com/xmanrui/dsh-im/commit/98c1e482719d38e0cd0b8d7c76fd20e5a1915f0a" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/luochen211" title="luochen211"><img src="https://avatars.githubusercontent.com/u/188724350?s=80" width="80" alt="落尘"/><br /><sub><b>落尘</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/860faad380696b5533e98672686ed00953f6a87d" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/commit/860faad380696b5533e98672686ed00953f6a87d" title="Documentation">📖</a> <a href="https://github.com/xmanrui/dsh-im/commit/860faad380696b5533e98672686ed00953f6a87d" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/lysgithub0302" title="lysgithub0302"><img src="https://avatars.githubusercontent.com/u/91652711?s=80" width="80" alt="木鱼和尚"/><br /><sub><b>木鱼和尚</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/pull/387" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/lyzhu86" title="lyzhu86"><img src="https://avatars.githubusercontent.com/u/276197423?s=80" width="80" alt="lyzhu86"/><br /><sub><b>lyzhu86</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/pull/195" title="Ideas, Planning, & Feedback">🤔</a> <a href="https://github.com/xmanrui/dsh-im/pull/195" title="Documentation">📖</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/masucc" title="masucc"><img src="https://avatars.githubusercontent.com/u/143188027?s=80" width="80" alt="masucc"/><br /><sub><b>masucc</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/34bae7c4ee5ea04b28ef7f3108479651b56c78b8" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/commit/34bae7c4ee5ea04b28ef7f3108479651b56c78b8" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/NIU-001-LIU" title="NIU-001-LIU"><img src="https://avatars.githubusercontent.com/u/133982393?s=80" width="80" alt="WENBO LIU"/><br /><sub><b>WENBO LIU</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/6366404c42f7163712bbc44c5011dbdafa63e9bd" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/commit/6366404c42f7163712bbc44c5011dbdafa63e9bd" title="Tests">⚠️</a></td>
+    </tr>
+    <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/Pegasus02" title="Pegasus02"><img src="https://avatars.githubusercontent.com/u/102945996?s=80" width="80" alt="Tianjun Cai"/><br /><sub><b>Tianjun Cai</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/pull/279" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/pull/279" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/penggaolai" title="penggaolai"><img src="https://avatars.githubusercontent.com/u/44097312?s=80" width="80" alt="penggaolai"/><br /><sub><b>penggaolai</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/03565e5a69bfd03dc246990c3376fbd794caea6e" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/commit/03565e5a69bfd03dc246990c3376fbd794caea6e" title="Tests">⚠️</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/qwencoder" title="qwencoder"><img src="https://avatars.githubusercontent.com/u/224605497?s=80" width="80" alt="Qwen-Coder"/><br /><sub><b>Qwen-Coder</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/64b9ac8b6e4ba760bc0e182f700cc5be7fffb94f" title="Documentation">📖</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/resetsix" title="resetsix"><img src="https://avatars.githubusercontent.com/u/85431995?s=80" width="80" alt="twinkle"/><br /><sub><b>twinkle</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/pull/288" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/pull/288" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/rosalynthompson32-a11y" title="rosalynthompson32-a11y"><img src="https://avatars.githubusercontent.com/u/313334391?s=80" width="80" alt="Biertolovisk"/><br /><sub><b>Biertolovisk</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/pull/271" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/pull/271" title="Documentation">📖</a> <a href="https://github.com/xmanrui/dsh-im/pull/271" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/ShawnKung" title="ShawnKung"><img src="https://avatars.githubusercontent.com/u/42027195?s=80" width="80" alt="ShawnKung"/><br /><sub><b>ShawnKung</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/pull/224" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/pull/224" title="Documentation">📖</a> <a href="https://github.com/xmanrui/dsh-im/pull/224" title="Tests">⚠️</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/trae-agent" title="trae-agent"><img src="https://avatars.githubusercontent.com/u/220387035?s=80" width="80" alt="Trae"/><br /><sub><b>Trae</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/ed47ae7db87d08a12fc6412083ece05669372929" title="Documentation">📖</a></td>
+    </tr>
+    <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/unera" title="unera"><img src="https://avatars.githubusercontent.com/u/538980?s=80" width="80" alt="Dmitry E. Oboukhov"/><br /><sub><b>Dmitry E. Oboukhov</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/pull/414" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/pull/414" title="Tests">⚠️</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/WE-Technology" title="WE-Technology"><img src="https://avatars.githubusercontent.com/u/109900108?s=80" width="80" alt="WE-Technology"/><br /><sub><b>WE-Technology</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/b0606159e01bbb0a171323e52578324b5faea97a" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/commit/b0606159e01bbb0a171323e52578324b5faea97a" title="Documentation">📖</a> <a href="https://github.com/xmanrui/dsh-im/commit/b0606159e01bbb0a171323e52578324b5faea97a" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/wings1848" title="wings1848"><img src="https://avatars.githubusercontent.com/u/120104016?s=80" width="80" alt="Wings Butterfly"/><br /><sub><b>Wings Butterfly</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/pull/206" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/pull/206" title="Documentation">📖</a> <a href="https://github.com/xmanrui/dsh-im/pull/206" title="Tests">⚠️</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/xmanrui" title="xmanrui"><img src="https://avatars.githubusercontent.com/u/4094054?s=80" width="80" alt="xiemanR"/><br /><sub><b>xiemanR</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/b8bd681a793a87ff2a7b8d282cb4944a0ce769c3" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/commit/b8bd681a793a87ff2a7b8d282cb4944a0ce769c3" title="Documentation">📖</a> <a href="https://github.com/xmanrui/dsh-im/commit/b8bd681a793a87ff2a7b8d282cb4944a0ce769c3" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/yangzhe1991" title="yangzhe1991"><img src="https://avatars.githubusercontent.com/u/860739?s=80" width="80" alt="Zhe (Phil) Yang"/><br /><sub><b>Zhe (Phil) Yang</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commits/main/?author=yangzhe1991" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/commits/main/?author=yangzhe1991" title="Documentation">📖</a> <a href="https://github.com/xmanrui/dsh-im/commits/main/?author=yangzhe1991" title="Tests">⚠️</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/yhay81" title="yhay81"><img src="https://avatars.githubusercontent.com/u/11132792?s=80" width="80" alt="Yusuke Hayashi"/><br /><sub><b>Yusuke Hayashi</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/91f49a603b504762fc0c5daf50d4385bf604ce93" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/commit/91f49a603b504762fc0c5daf50d4385bf604ce93" title="Documentation">📖</a> <a href="https://github.com/xmanrui/dsh-im/commit/91f49a603b504762fc0c5daf50d4385bf604ce93" title="Tests">⚠️</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/yzxxy010" title="yzxxy010"><img src="https://avatars.githubusercontent.com/u/98270201?s=80" width="80" alt="星曜"/><br /><sub><b>星曜</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/7a68e94f547a2412e602772dfef82af779750b5f" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/commit/f27c0c3018a4c26c6d29885ba0cf2b44be947a4f" title="Documentation">📖</a> <a href="https://github.com/xmanrui/dsh-im/commit/7a68e94f547a2412e602772dfef82af779750b5f" title="Tests">⚠️</a></td>
+    </tr>
+    <tr>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/zaakirio" title="zaakirio"><img src="https://avatars.githubusercontent.com/u/90780598?s=80" width="80" alt="zaakir"/><br /><sub><b>zaakir</b></sub></a><br /><a href="https://github.com/xmanrui/dsh-im/commit/dcd7cd64d80bd246e5e85912a7ee62a2d4572c05" title="Code">💻</a> <a href="https://github.com/xmanrui/dsh-im/commit/dcd7cd64d80bd246e5e85912a7ee62a2d4572c05" title="Documentation">📖</a> <a href="https://github.com/xmanrui/dsh-im/commit/dcd7cd64d80bd246e5e85912a7ee62a2d4572c05" title="Tests">⚠️</a> <a href="https://github.com/xmanrui/dsh-im/commit/dcd7cd64d80bd246e5e85912a7ee62a2d4572c05" title="Translation">🌍</a></td>
     </tr>
   </tbody>

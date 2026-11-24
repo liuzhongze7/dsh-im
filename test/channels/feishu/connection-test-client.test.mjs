@@ -72,18 +72,19 @@ test('Feishu connection check requests and displays test-message feedback', asyn
   assert.equal(repairButton.props['aria-describedby'], repairTooltip.props.id);
   assert.match(textOf(repairTooltip), /card\.action\.trigger/);
   assert.match(textOf(repairTooltip), /im:message:readonly/);
+  assert.match(textOf(repairTooltip), /im:message\.group_msg/);
   assert.match(textOf(repairTooltip), /im:resource/);
   await act(async () => renderer.unmount());
 
   assert.match(markup, /补全权限/);
   assert.match(markup, /aria-label="为飞书测试机器人补全权限与回调"/);
   assert.doesNotMatch(markup, /aria-label="群聊响应方式"/);
-  assert.doesNotMatch(markup, /aria-label="群聊以话题方式回复"/);
+  assert.doesNotMatch(markup, /aria-label="被 @ 时以话题方式回复"/);
 });
 
 test('Feishu group settings page saves both migrated group controls', async () => {
   let groupResponseMode = 'mention';
-  let groupTopicReply = false;
+  let mentionTopicReply = false;
   const calls = [];
   const snapshot = () => ({
     schemaVersion: 2,
@@ -94,7 +95,7 @@ test('Feishu group settings page saves both migrated group controls', async () =
       state: 'connected',
       connected: true,
       groupResponseMode,
-      groupTopicReply,
+      mentionTopicReply,
       groupMessagePermissionGranted: true,
       bot: { name: '响应模式机器人' },
       health: { status: 'healthy', summary: '长连接运行正常' },
@@ -107,8 +108,8 @@ test('Feishu group settings page saves both migrated group controls', async () =
       groupResponseMode = payload.groupResponseMode;
       return { ok: true, value: snapshot() };
     }
-    if (endpoint === FEISHU_ENDPOINTS.setGroupTopicReply) {
-      groupTopicReply = payload.groupTopicReply;
+    if (endpoint === FEISHU_ENDPOINTS.setMentionTopicReply) {
+      mentionTopicReply = payload.mentionTopicReply;
       return { ok: true, value: snapshot() };
     }
     throw new Error(`Unexpected endpoint: ${endpoint}`);
@@ -144,19 +145,19 @@ test('Feishu group settings page saves both migrated group controls', async () =
   )));
   assert.equal(renderer.root.findByProps({ 'aria-label': '群聊响应方式' }).props.value, 'all');
 
-  const topicSelect = renderer.root.findByProps({ 'aria-label': '群聊以话题方式回复' });
+  const topicSelect = renderer.root.findByProps({ 'aria-label': '被 @ 时以话题方式回复' });
   assert.equal(topicSelect.props.value, 'off');
   await act(async () => {
     topicSelect.props.onChange({ target: { value: 'on' } });
     await flushMicrotasks();
   });
   assert.ok(calls.some(({ endpoint, payload }) => (
-    endpoint === FEISHU_ENDPOINTS.setGroupTopicReply
+    endpoint === FEISHU_ENDPOINTS.setMentionTopicReply
       && payload.botId === 'bot-mode-test'
-      && payload.groupTopicReply === true
+      && payload.mentionTopicReply === true
   )));
   assert.equal(
-    renderer.root.findByProps({ 'aria-label': '群聊以话题方式回复' }).props.value,
+    renderer.root.findByProps({ 'aria-label': '被 @ 时以话题方式回复' }).props.value,
     'on',
   );
   await act(async () => renderer.unmount());
@@ -486,6 +487,8 @@ test('Feishu callback repair keeps a Host-submitted attempt when a stale QR canc
   );
   assert.match(textOf(renderer.toJSON()), /不会创建新应用/);
   assert.match(textOf(renderer.toJSON()), /im:message:readonly/);
+  assert.match(textOf(renderer.toJSON()), /im:message\.group_msg/);
+  assert.match(textOf(renderer.toJSON()), /群回复方式保持不变，实际收到的群消息和文件会自动保存/);
   assert.match(textOf(renderer.toJSON()), /im:resource/);
   assert.match(textOf(renderer.toJSON()), /获取单聊、群组消息/);
   assert.match(textOf(renderer.toJSON()), /当前缺少/);

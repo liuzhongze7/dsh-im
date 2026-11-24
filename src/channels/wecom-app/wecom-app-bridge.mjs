@@ -1,3 +1,5 @@
+import { BusyMessageDispatcher, canAutomaticallySteer } from '../shared/busy-message-dispatcher.mjs';
+import { SESSION_NAV_HELP_LINES } from '../shared/command-catalog.mjs';
 import { createDeferredDeliveryCoordinator, deferredOutcomeText } from '../shared/deferred-delivery-coordinator.mjs';
 import {
   harnessAnswerForQuestion,
@@ -11,6 +13,8 @@ import {
   isBatchInputCommand,
 } from '../shared/batch-input.mjs';
 import { runCompactCommand } from '../shared/compact-command.mjs';
+import { isClearCommand, runClearCommand } from '../shared/clear-command.mjs';
+import { isResetCommand, runResetCommand } from '../shared/reset-command.mjs';
 import { isHistoryCommand, runHistoryCommand } from '../shared/history-command.mjs';
 import {
   isControlCommand,
@@ -26,7 +30,16 @@ import {
 } from '../shared/preset-command.mjs';
 import { runWorkspaceCommand } from '../shared/workspace-command.mjs';
 import { askInWorkspaceSession } from '../shared/workspace-session.mjs';
-import { captureContextEnhancement, enhanceContextContent } from '../shared/context-enhancement.mjs';
+import {
+  isSessionNavCommand,
+  runSessionNavTextCommand,
+} from '../shared/session-nav-command.mjs';
+import { createConversationSession, isNewCommand, newCommandTitle } from '../shared/new-command.mjs';
+import {
+  captureContextEnhancement,
+  captureContextEnhancementSource,
+  enhanceContextContent,
+} from '../shared/context-enhancement.mjs';
 import {
   DEFAULT_IMAGE_PROMPT,
   hasInboundImages,
@@ -48,6 +61,7 @@ import {
   promptContentForInboundMessage,
 } from '../shared/semantic/reply-reference.mjs';
 import {
+  messageFailureDiagnostic,
   channelDeliveryFailure,
   clearLastMessageFailure,
   messageFailureText,
@@ -70,13 +84,16 @@ const HELP_TEXT = () => [
   t('直接发送文字或图片即可继续当前会话。'),
   t('/new  开启一个全新会话'),
   t('/compact  压缩当前会话的较早上下文'),
+  t('/clear  清空当前会话上下文（保留 Session 绑定和历史记录）'),
   t('/history [数量]  查看最近历史消息（默认 3 条，最多 5 条）'),
   t('/workspace 工作区序号或绝对路径  切换工作区'),
   t('/workspacelist  列出工作区绝对路径'),
   t('/ws、/wsl、/workspaces  工作区命令别名'),
   t('/sessionlist 或 /sessions [工作区序号或绝对路径]  列出会话 ID 和标题'),
+  t('/sessionlist --all  跨工作区汇总会话（每个工作区默认显示 10 个，可用 --limit N 调整）'),
   t('/sessionlist --limit N  仅列出当前工作区前 N 个会话'),
-  t('/session Session ID 或当前工作区序号  将当前聊天绑定到指定会话'),
+  t('/session Session ID、当前工作区序号或标题关键词  将当前聊天绑定到指定会话'),
+  ...SESSION_NAV_HELP_LINES.map((line) => t(line)),
   t('/models  按序号列出所有可用模型'),
   t('/reasoninglist 或 /reasonings  按序号列出当前模型可用推理等级'),
   t('/reasoning [序号、等级ID或 --default]  查看或切换当前推理等级'),
@@ -197,6 +214,7 @@ export class WecomAppBridge {
   #streamRegistry;
   #maxChunkBytes;
   #queues = new Map();
+  #busyMessages = new BusyMessageDispatcher();
   #acceptedMessageIds = new Map();
   #commandTasks = new Set();
   #approvalTasks = new Set();
@@ -306,7 +324,9 @@ export class WecomAppBridge {
         return this.#finishBatchResult(messageId, key, sender, result);
       }
     }
-    const commandRunner = isHistoryCommand(commandText) ? runHistoryCommand
+    const commandRunner = isClearCommand(commandText) ? runClearCommand
+      : isResetCommand(commandText) ? runResetCommand
+      : isHistoryCommand(commandText) ? runHistoryCommand
       : isControlCommand(commandText)
       ? runControlCommand
       : (isModelCommand(commandText)
@@ -321,7 +341,7 @@ export class WecomAppBridge {
           const failure = setLastMessageFailure(this.#status, error);
           this.#logger.error?.(
             `[dsh-im:wecom-app] failed to process a command [${failure.referenceId}]:`,
-            error,
+            messageFailureDiagnostic(error, failure),
           );
           return this.#send(sender, messageFailureText(failure)).catch(() => undefined);
         })
@@ -380,7 +400,24 @@ export class WecomAppBridge {
       pending.queue = current;
       return current;
     }
-    return this.#enqueueMessage(message, messageId, key, { sink });
+    return this.#busyMessages.dispatch({
+      key, messageId, text: commandText,
+      eligible: () => message.msgtype === 'text' && !hasImages
+        && !hasReplyReference(wecomAppInboundMessage(message, this.#api))
+        && canAutomaticallySteer(this.#accessPolicy, 'direct', sender),
+      harness: this.#harness, state: this.#state, status: this.#status,
+      signal: this.#signal, control: { owner: this, key }, logger: this.#logger,
+      acceptedMessageIds: this.#acceptedMessageIds,
+      pendingInteraction: () => this.#pendingInteractions.has(key) || this.#approvals.hasPending(key),
+      enhancement: {
+        snapshot: this.#acceptedMessageIds.get(messageId),
+        source: () => ({ channel: 'wecom-app', senderId: sender, chatId: sender }),
+      },
+      isQueued: () => this.#queues.has(key),
+      enqueue: (options) => this.#enqueueMessage(message, messageId, key, { ...options, sink }),
+      send: (reply) => this.#send(sender, reply),
+      onError: (error) => this.#handleInteractionFailure(message, messageId, error),
+    });
   }
 
   #enqueueMessage(message, messageId, key, {
@@ -422,7 +459,7 @@ export class WecomAppBridge {
       const failure = setLastMessageFailure(this.#status, error);
       this.#logger.error?.(
         `[dsh-im:wecom-app] failed to process a batch input message [${failure.referenceId}]:`,
-        error,
+        messageFailureDiagnostic(error, failure),
       );
       await this.#send(sender, messageFailureText(failure)).catch(() => undefined);
     }).finally(() => {
@@ -467,6 +504,7 @@ export class WecomAppBridge {
   }
 
   async waitForIdle() {
+    await this.#busyMessages.whenIdle();
     await Promise.allSettled([
       ...this.#queues.values(),
       ...[...this.#pendingInteractions.values()].flatMap((pending) => (
@@ -496,8 +534,14 @@ export class WecomAppBridge {
       hasFiles: false,
       pendingInteraction: this.#pendingInteractions.has(key)
         || this.#approvals.hasPending(key),
+      busy: this.#queues.has(key) || this.#batchInputs.status(key).phase !== 'idle',
       control: { owner: this, key },
       deferredDelivery: this.#deferred,
+      enhancement: captureContextEnhancementSource(
+        this.#contextEnhancement,
+        'direct',
+        () => ({ channel: 'wecom-app', senderId: sender, chatId: sender }),
+      ),
     });
     if (result?.stopped) {
       await Promise.allSettled([
@@ -554,9 +598,39 @@ export class WecomAppBridge {
         await this.#state.markSeen(messageId);
         return;
       }
-      if (!hasImages && !hasFiles && command === '/new') {
-        await this.#state.clearSession(key);
-        await this.#send(sender, t('已开启新会话。请发送你的问题。'));
+      if (!hasImages && !hasFiles && isNewCommand(text)) {
+        const created = await createConversationSession({ state: this.#state, harness: this.#harness, key, title: newCommandTitle(text) });
+        await this.#send(sender, created.failed ? t('暂时无法创建新会话，请稍后重试。') : t('已开启新会话。请发送你的问题。'));
+        await this.#state.markSeen(messageId);
+        return;
+      }
+      if (!hasImages && !hasFiles && isSessionNavCommand(text)) {
+        const nav = await runSessionNavTextCommand(text, this.#harness, this.#state, key, {
+          signal: this.#signal,
+        });
+        if (nav) {
+          for (const reply of nav.messages ?? [nav.message]) {
+            await this.#send(sender, reply);
+          }
+          if (nav.askText) {
+            const followUp = this.#enqueueMessage(
+              {
+                ...message,
+                msgtype: 'text',
+                text: { content: nav.askText },
+                image: undefined,
+                mediaId: undefined,
+              },
+              `${messageId}-ask`,
+              key,
+              { sink },
+            );
+            followUp.catch((error) => {
+              this.#logger.warn?.(`[dsh-im:wecom-app] follow-up ask after a nav command failed:`, error?.message ?? error);
+              this.#send(sender, t('切换后的提问发送失败，请重试。')).catch(() => undefined);
+            });
+          }
+        }
         await this.#state.markSeen(messageId);
         return;
       }
@@ -583,7 +657,7 @@ export class WecomAppBridge {
       let artifacts = [];
       try {
         let content = hasImages || hasReply
-          ? await promptContentForInboundMessage(promptMessage, { signal: this.#signal })
+          ? await promptContentForInboundMessage(promptMessage, { signal: this.#signal, deferImages: true })
           : undefined;
         const snapshot = this.#acceptedMessageIds.get(messageId);
         let contextEnhanced = false;
@@ -599,12 +673,15 @@ export class WecomAppBridge {
         await this.#state.markSeen(messageId);
         promptRecorded = true;
         ({ answer, artifacts = [] } = await askInWorkspaceSession({
+          onNotice: (notice) => this.#send(sender, notice),
           deferredDelivery: () => ({ coordinator: this.#deferred, target: { toUserId: sender } }),
           harness: this.#harness,
           state: this.#state,
           key,
           text,
           content,
+          titleText: batchSubmission?.title,
+          sourceGuidance: snapshot?.config?.guidance,
           contextEnhanced,
           createOptions: { signal: this.#signal },
           existsOptions: { signal: this.#signal },
@@ -627,6 +704,7 @@ export class WecomAppBridge {
               await this.#handleInteractionResolved(resolution);
             },
             files: promptMessage.files,
+            images: promptMessage.images,
           },
         }));
         if (batchSubmission) {
@@ -709,7 +787,7 @@ export class WecomAppBridge {
       });
       this.#logger.error?.(
         `[dsh-im:wecom-app] failed to process an inbound message [${failure.referenceId}]:`,
-        error,
+        messageFailureDiagnostic(error, failure),
       );
       try {
         await this.#send(
@@ -840,6 +918,12 @@ export class WecomAppBridge {
       this.#logger.error?.('[dsh-im:wecom-app] failed to answer a Harness interaction');
       await this.#send(pending.actor, t('回答提交失败，请重新发送当前问题的答案。')).catch(() => undefined);
     }
+  }
+
+  async presentSessionSyncApproval(interaction, context, options = {}) {
+    return this.#approvals.handleSessionSyncRequested(interaction, context, {
+      ...options, runtimeSignal: this.#signal, accessPolicy: this.#accessPolicy,
+    });
   }
 
   async #handleInteraction(interaction, { key, actor }) {
@@ -995,7 +1079,7 @@ export class WecomAppBridge {
     const failure = setLastMessageFailure(this.#status, error);
     this.#logger.error?.(
       `[dsh-im:wecom-app] failed to process an interaction reply [${failure.referenceId}]:`,
-      error,
+      messageFailureDiagnostic(error, failure),
     );
     if (!this.#state.hasSeen(messageId)) {
       await this.#state.markSeen(messageId).catch(() => undefined);

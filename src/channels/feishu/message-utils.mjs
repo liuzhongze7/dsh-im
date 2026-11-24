@@ -1,7 +1,11 @@
+import { addAbortSignal, Readable } from 'node:stream';
+import { downloadFeishuResourceRanges } from './resource-download.mjs';
+import { imageDownloadLimitMessage } from '../shared/image-prompt.mjs';
 import { ImagePromptError } from '../shared/image-prompt.mjs';
 import { t } from '../shared/i18n.mjs';
 
 const FEISHU_MISSING_MESSAGE_SCOPE_CODE = 99991672;
+const FEISHU_RESOURCE_SIZE_LIMIT_CODE = 234037;
 const FEISHU_CARD_MESSAGE_CONTENT_TYPE = 'raw_card_content';
 const FEISHU_ERROR_BODY_LIMIT = 64 * 1024;
 const FEISHU_ERROR_BODY_TIMEOUT_MS = 1_000;
@@ -13,20 +17,43 @@ const FEISHU_CARD_UNAVAILABLE_TEXTS = new Set([
 const FEISHU_IMAGE_PERMISSION_MESSAGE =
   '飞书机器人缺少图片读取权限 im:message:readonly（飞书显示为“获取单聊、群组消息”）。请私聊机器人执行 /repair 命令，或者在「IM机器人」设置页点击“补全权限”按钮并扫码。按飞书提示发布新版本、完成必要审批后，再重新发送图片。';
 
-/** Managed-topic group key: one per Feishu topic auto-rooted at a message. */
-export function managedGroupKey(chatId, rootMessageId) {
-  if (!chatId) throw new Error('Feishu managed-topic key needs a chat_id');
+/**
+ * Managed-topic key: one per Feishu topic the bot auto-rooted at a message.
+ * `scope` is the conversation the topic belongs to (`group:<chat_id>` for a
+ * group, `p2p:<open_id>` for a direct chat).
+ */
+export function managedTopicKey(scope, rootMessageId) {
+  if (!scope) throw new Error('Feishu managed-topic key needs a conversation scope');
   if (!rootMessageId) throw new Error('Feishu managed-topic key needs a root message id');
-  return `group:${chatId}:managed:${rootMessageId}`;
+  return `${scope}:managed:${rootMessageId}`;
 }
 
-/** Whether a key denotes a topic-isolated group conversation (thread or managed). */
-export function isTopicGroupKey(key) {
-  return typeof key === 'string' && key.startsWith('group:')
+/** Root message id encoded in a managed-topic key, or null for any other key. */
+export function managedTopicRoot(key) {
+  if (typeof key !== 'string') return null;
+  const marker = ':managed:';
+  const at = key.lastIndexOf(marker);
+  if (at <= 0) return null;
+  return key.slice(at + marker.length) || null;
+}
+
+/**
+ * Whether a key denotes a topic-isolated conversation: either a thread the
+ * platform created (a topic group, a topic the reader opened, or the topic the
+ * bot's own reply opened) or a managed topic the bot rooted at one message.
+ */
+export function isTopicKey(key) {
+  return typeof key === 'string'
+    && (key.startsWith('group:') || key.startsWith('p2p:'))
     && (key.includes(':thread:') || key.includes(':managed:'));
 }
 
-export function conversationKey(event) {
+/**
+ * The conversation a message belongs to, without the topic dimension: the
+ * stable identity a managed-topic key is built on. Group events are identified
+ * by chat id; a direct chat is identified by its peer.
+ */
+export function conversationScope(event) {
   const chatType = event?.message?.chat_type;
   if (chatType === 'p2p') {
     const senderId = event?.sender?.sender_id?.open_id || event?.sender?.sender_id?.user_id;
@@ -35,12 +62,25 @@ export function conversationKey(event) {
   }
   const chatId = event?.message?.chat_id;
   if (!chatId) throw new Error('Feishu group event has no chat id');
+  return `group:${chatId}`;
+}
+
+export function conversationKey(event) {
+  const scope = conversationScope(event);
   // Topic groups: every message belongs to a thread, so key the session per
   // thread to keep each topic's Harness conversation isolated. Regular group
   // chats carry no thread_id and keep the single shared `group:<chat_id>` key.
+  //
+  // Direct chats deliberately keep one key per peer: their thread_id must not
+  // split the session, or an answer typed inside a thread would no longer reach
+  // the question the bot asked in the main window. A direct chat only leaves
+  // its main session for a topic the bot itself opened (a managed topic key).
   const threadId = event?.message?.thread_id;
-  if (typeof threadId === 'string' && threadId.trim()) return `group:${chatId}:thread:${threadId}`;
-  return `group:${chatId}`;
+  if (event?.message?.chat_type !== 'p2p'
+    && typeof threadId === 'string' && threadId.trim()) {
+    return `${scope}:thread:${threadId}`;
+  }
+  return scope;
 }
 
 function parsedMessageContent(event) {
@@ -256,34 +296,9 @@ async function readBoundedStream(stream, { signal, maxBytes }) {
         throw new ImagePromptError(
           'image-too-large',
           `Feishu image exceeds ${maxBytes} bytes`,
-          t('图片超过 5 MB，请压缩后重试。'),
+          imageDownloadLimitMessage(maxBytes),
         );
       }
-      chunks.push(data);
-    }
-    signal?.throwIfAborted();
-    return Buffer.concat(chunks, size);
-  } finally {
-    signal?.removeEventListener('abort', abort);
-  }
-}
-
-async function readStream(stream, { signal }) {
-  if (!stream || typeof stream[Symbol.asyncIterator] !== 'function') {
-    throw new Error('Feishu file download returned no readable stream');
-  }
-  signal?.throwIfAborted();
-  const abort = () => stream.destroy?.(
-    signal.reason ?? new DOMException('Feishu file download aborted', 'AbortError'),
-  );
-  signal?.addEventListener('abort', abort, { once: true });
-  const chunks = [];
-  let size = 0;
-  try {
-    for await (const chunk of stream) {
-      signal?.throwIfAborted();
-      const data = Buffer.from(chunk);
-      size += data.length;
       chunks.push(data);
     }
     signal?.throwIfAborted();
@@ -338,7 +353,7 @@ async function feishuProviderCode(error, signal) {
     seen.add(value);
     const directCode = providerCode(value);
     const data = value.response?.data ?? value.data;
-    if (directCode === FEISHU_MISSING_MESSAGE_SCOPE_CODE) {
+    if (directCode === FEISHU_MISSING_MESSAGE_SCOPE_CODE || directCode === FEISHU_RESOURCE_SIZE_LIMIT_CODE) {
       data?.destroy?.();
       return directCode;
     }
@@ -346,21 +361,22 @@ async function feishuProviderCode(error, signal) {
       const body = await readFeishuErrorBody(data, signal);
       try {
         const parsedCode = providerCode(JSON.parse(body));
-        if (parsedCode === FEISHU_MISSING_MESSAGE_SCOPE_CODE) return parsedCode;
+        if (parsedCode === FEISHU_MISSING_MESSAGE_SCOPE_CODE || parsedCode === FEISHU_RESOURCE_SIZE_LIMIT_CODE) return parsedCode;
       } catch {
         // Non-JSON provider failures keep the generic image download message.
       }
     } else {
       const dataCode = providerCode(data);
-      if (dataCode === FEISHU_MISSING_MESSAGE_SCOPE_CODE) return dataCode;
+      if (dataCode === FEISHU_MISSING_MESSAGE_SCOPE_CODE || dataCode === FEISHU_RESOURCE_SIZE_LIMIT_CODE) return dataCode;
     }
     pending.push(value.cause);
   }
   return null;
 }
 
-async function feishuImageDownloadError(error, signal) {
-  if (await feishuProviderCode(error, signal) !== FEISHU_MISSING_MESSAGE_SCOPE_CODE) return error;
+async function feishuImageDownloadError(error, signal, code = undefined) {
+  if (code === undefined) code = await feishuProviderCode(error, signal);
+  if (code !== FEISHU_MISSING_MESSAGE_SCOPE_CODE) return error;
   return new ImagePromptError(
     'feishu-image-permission-required',
     'Feishu image download requires the im:message:readonly tenant scope',
@@ -369,33 +385,59 @@ async function feishuImageDownloadError(error, signal) {
   );
 }
 
+async function feishuResourceStream(event, client, key, type, { signal, maxBytes } = {}) {
+  signal?.throwIfAborted();
+  const path = { message_id: event.message.message_id, file_key: key };
+  let resource;
+  try {
+    resource = await client?.im?.v1?.messageResource?.get?.({ path, params: { type } });
+  } catch (error) {
+    if (signal?.aborted) {
+      error?.response?.data?.destroy?.();
+      signal.throwIfAborted();
+    }
+    const code = await feishuProviderCode(error, signal);
+    if (code !== FEISHU_RESOURCE_SIZE_LIMIT_CODE) {
+      throw type === 'image' ? await feishuImageDownloadError(error, signal, code) : error;
+    }
+    return Readable.from((async function* ranges() {
+      try {
+        yield* downloadFeishuResourceRanges(client, path, type, { signal, maxBytes });
+      } catch (error) {
+        try {
+          throw type === 'image' ? await feishuImageDownloadError(error, signal) : error;
+        } finally {
+          error?.response?.data?.destroy?.();
+        }
+      }
+    }()), { objectMode: false, signal });
+  }
+  const stream = resource?.getReadableStream?.();
+  try {
+    signal?.throwIfAborted();
+    const size = declaredSize(resource?.headers);
+    if (size !== null && size > maxBytes) {
+      throw new ImagePromptError(
+        'image-too-large',
+        `Feishu image declares ${size} bytes; the limit is ${maxBytes}`,
+        imageDownloadLimitMessage(maxBytes),
+      );
+    }
+    if (!stream || typeof stream[Symbol.asyncIterator] !== 'function') {
+      throw new Error(`Feishu ${type} download returned no readable stream`);
+    }
+    return signal ? addAbortSignal(signal, stream) : stream;
+  } catch (error) {
+    stream?.destroy?.();
+    throw error;
+  }
+}
+
 function feishuImageSource(event, client, key) {
   return {
     async load({ signal, maxBytes }) {
-      signal?.throwIfAborted();
-      let resource;
-      try {
-        resource = await client?.im?.v1?.messageResource?.get?.({
-          path: {
-            message_id: event.message.message_id,
-            file_key: key,
-          },
-          params: { type: 'image' },
-        });
-      } catch (error) {
-        throw await feishuImageDownloadError(error, signal);
-      }
-      signal?.throwIfAborted();
-      const size = declaredSize(resource?.headers);
-      if (size !== null && size > maxBytes) {
-        resource?.getReadableStream?.().destroy?.();
-        throw new ImagePromptError(
-          'image-too-large',
-          `Feishu image declares ${size} bytes; the limit is ${maxBytes}`,
-          t('图片超过 5 MB，请压缩后重试。'),
-        );
-      }
-      return readBoundedStream(resource?.getReadableStream?.(), { signal, maxBytes });
+      const stream = await feishuResourceStream(event, client, key, 'image', { signal, maxBytes });
+      return readBoundedStream(stream, { signal, maxBytes });
     },
   };
 }
@@ -406,16 +448,8 @@ function feishuFileSource(event, client, file) {
   return {
     name: nonEmptyString(file?.file_name) ?? 'file',
     async load({ signal } = {}) {
-      signal?.throwIfAborted();
-      const resource = await client?.im?.v1?.messageResource?.get?.({
-        path: {
-          message_id: event.message.message_id,
-          file_key: key,
-        },
-        params: { type: 'file' },
-      });
-      signal?.throwIfAborted();
-      return readStream(resource?.getReadableStream?.(), { signal });
+      const stream = await feishuResourceStream(event, client, key, 'file', { signal });
+      return { stream };
     },
   };
 }
@@ -450,6 +484,48 @@ function feishuReplyAttachments(messageType, parsed, post) {
   return [];
 }
 
+/**
+ * A card can reach the bot in two shapes:
+ *  - a quoted card, whose payload is re-read when the reply is resolved;
+ *  - an inbound `interactive` event, whose `message.content` carries only the
+ *    card header title (`⚙️ 任务过程`) while the body stays behind the same
+ *    `im.v1.message.get` call.
+ * Reading with `card_msg_content_type: raw_card_content` yields the full card
+ * for both, so the two paths share one implementation.
+ */
+async function loadCardMessage(messageId, client, { signal } = {}) {
+  signal?.throwIfAborted();
+  let response;
+  try {
+    response = await client?.im?.v1?.message?.get?.({
+      path: { message_id: messageId },
+      params: {
+        with_sender_name: true,
+        card_msg_content_type: FEISHU_CARD_MESSAGE_CONTENT_TYPE,
+      },
+    });
+  } catch (error) {
+    signal?.throwIfAborted();
+    if (await feishuProviderCode(error, signal) === FEISHU_MISSING_MESSAGE_SCOPE_CODE) {
+      return { unavailableReason: 'permission-denied' };
+    }
+    throw error;
+  }
+  signal?.throwIfAborted();
+  if (providerCode(response) === FEISHU_MISSING_MESSAGE_SCOPE_CODE) {
+    return { unavailableReason: 'permission-denied' };
+  }
+  if (providerCode(response) !== null && providerCode(response) !== 0) {
+    return { unavailableReason: 'not-delivered' };
+  }
+  const item = response?.data?.items?.find?.(
+    (candidate) => nonEmptyString(candidate?.message_id) === messageId,
+  );
+  if (!item) return { unavailableReason: 'not-found' };
+  if (item.deleted) return { unavailableReason: 'deleted' };
+  return { item, messageType: nonEmptyString(item.msg_type) ?? '' };
+}
+
 function feishuReplyReference(event, client) {
   const messageId = feishuReplyTargetId(event);
   if (!messageId) return null;
@@ -457,41 +533,14 @@ function feishuReplyReference(event, client) {
   return {
     messageId,
     async load({ signal } = {}) {
-      signal?.throwIfAborted();
-      let response;
-      try {
-        response = await client?.im?.v1?.message?.get?.({
-          path: { message_id: messageId },
-          params: {
-            with_sender_name: true,
-            card_msg_content_type: FEISHU_CARD_MESSAGE_CONTENT_TYPE,
-          },
-        });
-      } catch (error) {
-        signal?.throwIfAborted();
-        if (await feishuProviderCode(error, signal) === FEISHU_MISSING_MESSAGE_SCOPE_CODE) {
-          return { messageId, unavailableReason: 'permission-denied' };
-        }
-        throw error;
-      }
-      signal?.throwIfAborted();
-      if (providerCode(response) === FEISHU_MISSING_MESSAGE_SCOPE_CODE) {
-        return { messageId, unavailableReason: 'permission-denied' };
-      }
-      if (providerCode(response) !== null && providerCode(response) !== 0) {
-        return { messageId, unavailableReason: 'not-delivered' };
-      }
-      const item = response?.data?.items?.find?.(
-        (candidate) => nonEmptyString(candidate?.message_id) === messageId,
-      );
-      if (!item) return { messageId, unavailableReason: 'not-found' };
-      if (item.deleted) return { messageId, unavailableReason: 'deleted' };
+      const loaded = await loadCardMessage(messageId, client, { signal });
+      if (!loaded.item) return { messageId, unavailableReason: loaded.unavailableReason };
+      const { item, messageType } = loaded;
       const itemChatId = nonEmptyString(item.chat_id);
       if (!chatId || !itemChatId || itemChatId !== chatId) {
         return { messageId, unavailableReason: 'not-found' };
       }
 
-      const messageType = nonEmptyString(item.msg_type) ?? '';
       const quotedEvent = {
         message: {
           message_id: messageId,
@@ -515,6 +564,7 @@ function feishuReplyReference(event, client) {
           : {}),
         ...(content ? { content } : {}),
         attachments,
+        ...(quoted.files?.length ? { files: quoted.files } : {}),
         ...(messageType === 'interactive' && !content && attachments.length === 0
           ? { unavailableReason: 'unsupported' }
           : {}),
@@ -523,6 +573,13 @@ function feishuReplyReference(event, client) {
   };
 }
 
+/**
+ * Inbound cards need the same second read as quoted ones: the delivered event
+ * only carries the card header title, so `content` would be `⚙️ 任务过程`
+ * instead of the body. The text parsed from the event stays the synchronous
+ * answer, and `card.load()` re-reads the full payload on demand — mirroring
+ * how `replyTo.load()` resolves a quoted card.
+ */
 export function extractInboundMessage(event, client) {
   const messageType = event?.message?.message_type;
   const parsed = parsedMessageContent(event);
@@ -533,11 +590,41 @@ export function extractInboundMessage(event, client) {
   const imageKeys = standaloneImageKey ? [standaloneImageKey] : post?.imageKeys ?? [];
   const file = messageType === 'file' ? feishuFileSource(event, client, parsed) : null;
   const replyTo = feishuReplyReference(event, client);
+  // A forwarded card arrives as `interactive`. Without this branch its text was
+  // dropped entirely, so the message looked empty and the reader got the
+  // "text, image and file only" notice — even though the same extraction is
+  // already trusted for quoted cards (`feishuReplyReference`).
+  const cardText = messageType === 'interactive' ? interactiveCardText(parsed) : '';
+  const messageId = nonEmptyString(event?.message?.message_id);
+  const card = messageType === 'interactive' && messageId
+    ? {
+      messageId,
+      async load({ signal } = {}) {
+        const loaded = await loadCardMessage(messageId, client, { signal });
+        if (!loaded.item) return { messageId, unavailableReason: loaded.unavailableReason };
+        return {
+          messageId,
+          content: interactiveCardText(parsedMessageContent({
+            message: {
+              message_id: messageId,
+              message_type: 'interactive',
+              content: loaded.item.body?.content,
+            },
+          })),
+        };
+      },
+    }
+    : null;
   return {
-    content: messageType === 'text' ? extractText(event) ?? '' : post?.text ?? '',
+    content: messageType === 'text'
+      ? extractText(event) ?? ''
+      : messageType === 'interactive'
+        ? cardText
+        : post?.text ?? '',
     images: imageKeys.map((key) => feishuImageSource(event, client, key)),
     files: file ? [file] : [],
     ...(replyTo ? { replyTo } : {}),
+    ...(card ? { card } : {}),
   };
 }
 
@@ -553,6 +640,39 @@ export function splitText(text, maxChars = 9000) {
   }
   if (remaining) chunks.push(remaining);
   return chunks;
+}
+
+// Feishu cards parse Markdown images into `img` elements whose key must be an
+// uploaded Feishu image key. A local path (macOS `/tmp/x.png`, `~/x.png`,
+// `file:///x.png`, Windows `C:\\x.png`) is not one, and the whole card update is
+// rejected with 230099 / 200570 "card contains invalid image keys" — which
+// silently freezes a step card. Degrade those images to their alt text.
+// Feishu renders an image element only from a hosted URL or an uploaded
+// `img_key`. Everything else — absolute paths, `file:` URLs, Windows drives,
+// bare relative paths such as `06-log/shot.png`, `data:` URIs — reaches the
+// card as an invalid image key: the whole card is rejected and the answer
+// degrades to plain text, so those targets become their alt text instead.
+const REMOTE_IMAGE_TARGET = /^(?:https?:)?\/\//i;
+const FEISHU_IMAGE_KEY = /^img_[A-Za-z0-9_-]+$/;
+
+export function isLocalImageTarget(target) {
+  if (typeof target !== 'string') return false;
+  const trimmed = target.trim();
+  if (!trimmed) return false;
+  return !REMOTE_IMAGE_TARGET.test(trimmed) && !FEISHU_IMAGE_KEY.test(trimmed);
+}
+
+export function stripLocalImageMarkdown(text) {
+  if (typeof text !== 'string' || !text.includes('![')) return text;
+  return text.replace(/!\[([^\]]*)\]\(([^)\n]*)\)/g, (match, rawAlt, rawTarget) => {
+    const target = rawTarget.trim()
+      .replace(/\s+"[^"]*"\s*$/, '')
+      .trim()
+      .replace(/^<(.*)>$/, '$1')
+      .trim();
+    if (!isLocalImageTarget(target)) return match;
+    return rawAlt.trim() || target;
+  });
 }
 
 export function isBotSender(event) {

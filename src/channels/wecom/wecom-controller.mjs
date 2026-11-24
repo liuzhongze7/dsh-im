@@ -1,3 +1,4 @@
+import { extractConnectionEvidence, atConnectionStage, createConnectionDiagnostics } from '../shared/connection-error.mjs';
 import { randomUUID } from 'node:crypto';
 
 import { deriveWecomBotIdentity, maskWecomBotId } from './config-store.mjs';
@@ -10,6 +11,27 @@ import { publicMessageFailure } from '../shared/message-failure.mjs';
 
 const ACTIVE_ATTEMPT_STATES = new Set(['pending', 'connecting']);
 const TERMINAL_ATTEMPT_STATES = new Set(['connected', 'failed', 'cancelled', 'expired']);
+
+// A runtime may legitimately sit in 'connecting' while the SDK retries with
+// backoff: every retry emits 'reconnecting', which refreshes lastCheckedAt at
+// least once per reconnect cycle. After a server-side disconnect, however, the
+// SDK marks the close manual and stops for good without emitting anything
+// else, so 'connecting' goes stale forever and initialize() below would keep
+// skipping the bot on every supervisor pass. A 'connecting' status whose last
+// transition is older than this grace is treated as stalled and restarted.
+const STALLED_CONNECTING_GRACE_MS = 120_000;
+// Two deployments holding the same credential keep kicking each other, and
+// every restart authenticates successfully (so failure-based backoff never
+// triggers) while only surviving one reconnect cycle. A connection that
+// dropped again within this window of being established counts as short-lived
+// and its restarts are paced; a connection that stays healthy this long
+// proves the bot is not in a kick loop and clears the pacing.
+const STABLE_CONNECTION_MS = 300_000;
+// Automatic restarts are paced per bot: when the same credential is held by
+// another connection, each side kicks the other, and restarting at supervisor
+// cadence would storm the provider and fight the legitimate holder.
+const RESTART_BACKOFF_INITIAL_MS = 60_000;
+const RESTART_BACKOFF_MAX_MS = 600_000;
 
 function cleanString(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
@@ -40,6 +62,7 @@ export class WecomController {
   #createRuntime;
   #deleteState;
   #logger;
+  #diagnostics;
   #runtimes = new Map();
   #errors = new Map();
   #attempts = new Map();
@@ -47,6 +70,8 @@ export class WecomController {
   #transitions = new Map();
   #revision = 0;
   #closed = false;
+  #now;
+  #restartBackoff = new Map();
 
   constructor({
     qrAuth,
@@ -55,6 +80,7 @@ export class WecomController {
     createRuntime,
     deleteState = async () => {},
     logger = console,
+    nowImpl = Date.now,
   }) {
     if (!qrAuth || typeof qrAuth.start !== 'function' || typeof qrAuth.poll !== 'function') {
       throw new TypeError('Enterprise WeChat QR auth is required');
@@ -68,12 +94,22 @@ export class WecomController {
       throw new TypeError('WecomController requires a config store');
     }
     if (typeof createRuntime !== 'function') throw new TypeError('createRuntime is required');
+    if (typeof nowImpl !== 'function') throw new TypeError('nowImpl must be a function');
     this.#qrAuth = qrAuth;
     this.#credentials = credentials;
     this.#configStore = configStore;
     this.#createRuntime = createRuntime;
     this.#deleteState = deleteState;
     this.#logger = logger;
+    this.#now = nowImpl;
+    this.#diagnostics = createConnectionDiagnostics({ channel: 'wecom', logger });
+  }
+
+  get diagnostics() { return this.#diagnostics; }
+
+  #failure(error, code, message) {
+    const stage = code.startsWith('qr-') ? 'qr.begin' : code === 'activation-failed' ? 'activation' : 'connection.start';
+    return this.#diagnostics.report(error, { reuse: true, stage, publicError: { code, message } }).publicError;
   }
 
   async initialize() {
@@ -81,17 +117,47 @@ export class WecomController {
     for (const config of this.#configStore.list()) {
       await this.#withBotTransition(config.botId, async () => {
         const existing = this.#runtimes.get(config.botId)?.status;
-        if (this.#closed || existing?.ready || existing?.wecomConnectionState === 'connecting') return;
-        const secret = await this.#resolveSecret(config.secretRef);
-        if (!secret) {
-          this.#errors.set(config.botId, safeError('missing-secret', t('企业微信机器人凭据缺失，请移除后重新扫码。')));
+        if (this.#closed || existing?.ready) {
+          // A single successful authenticate does not prove the bot is back
+          // for good: in a kick loop every restart authenticates and is
+          // dropped again one cycle later. Only a connection that has now
+          // held healthy past the stability window clears the pacing.
+          if (existing?.ready && this.#connectionStable(existing)) this.#restartBackoff.delete(config.botId);
+          return;
+        }
+        if (existing?.wecomConnectionState === 'connecting' && !this.#stalledConnecting(existing)) return;
+        const stalled = this.#stalledConnecting(existing);
+        const shortLived = stalled && this.#shortLivedConnecting(existing);
+        const backoff = this.#restartBackoff.get(config.botId);
+        if (backoff && backoff.nextAttemptAt > this.#now()) return;
+        if (shortLived && !backoff) {
+          // First short-lived drop: schedule one pacing window before
+          // contending for the credential again, instead of grabbing it back
+          // at supervisor cadence and immediately kicking the other side.
+          this.#scheduleRestartBackoff(config.botId);
+          this.#logger.warn?.(`[dsh-im:wecom] bot ${config.botId} connection was short-lived; deferring reconnect`);
           return;
         }
         try {
+          const secret = await this.#resolveSecret(config.secretRef);
+          if (!secret) {
+            this.#errors.set(config.botId, safeError('missing-secret', t('企业微信机器人凭据缺失，请移除后重新扫码。')));
+            return;
+          }
+          if (stalled) {
+            if (shortLived) {
+              // The pacing window has elapsed; contend again. The schedule
+              // above doubles the next window first, so a renewed kick loop
+              // slows down instead of cycling at supervisor cadence.
+              this.#scheduleRestartBackoff(config.botId);
+            }
+            this.#logger.warn?.(`[dsh-im:wecom] bot ${config.botId} connection stalled in 'connecting'; restarting`);
+          }
           await this.#startRuntime(config, secret);
           this.#errors.delete(config.botId);
         } catch (error) {
-          this.#errors.set(config.botId, safeError('connection-failed', t('企业微信连接未就绪，插件会自动重试。')));
+          this.#errors.set(config.botId, this.#failure(error, 'connection-failed', t('企业微信连接未就绪，插件会自动重试。')));
+          this.#scheduleRestartBackoff(config.botId);
           this.#logger.warn?.(`[dsh-im:wecom] bot ${config.botId} failed to initialize`);
         } finally {
           this.#touch();
@@ -99,6 +165,38 @@ export class WecomController {
       });
     }
     return this.status();
+  }
+
+  #stalledConnecting(status) {
+    if (status?.wecomConnectionState !== 'connecting') return false;
+    const { lastCheckedAt } = status;
+    return typeof lastCheckedAt === 'number' && this.#now() - lastCheckedAt > STALLED_CONNECTING_GRACE_MS;
+  }
+
+  // Whether the connection that just went silent had been established for
+  // less than the stability window: the signature of a credential contested
+  // by another deployment, as opposed to an ordinary healthy connection that
+  // dropped. Based on the timestamps of the drop (lastCheckedAt) and of the
+  // last successful authenticate (lastConnectedAt), so it does not change as
+  // time passes without a new connection.
+  #shortLivedConnecting(status) {
+    const { lastCheckedAt, lastConnectedAt } = status ?? {};
+    return typeof lastCheckedAt === 'number' && typeof lastConnectedAt === 'number'
+      && lastCheckedAt > lastConnectedAt
+      && lastCheckedAt - lastConnectedAt < STABLE_CONNECTION_MS;
+  }
+
+  #connectionStable(status) {
+    const { lastConnectedAt } = status ?? {};
+    return typeof lastConnectedAt === 'number' && this.#now() - lastConnectedAt >= STABLE_CONNECTION_MS;
+  }
+
+  #scheduleRestartBackoff(botId) {
+    const entry = this.#restartBackoff.get(botId) ?? { consecutive: 0, nextAttemptAt: 0 };
+    entry.consecutive += 1;
+    entry.nextAttemptAt = this.#now()
+      + Math.min(RESTART_BACKOFF_INITIAL_MS * 2 ** (entry.consecutive - 1), RESTART_BACKOFF_MAX_MS);
+    this.#restartBackoff.set(botId, entry);
   }
 
   async startProvisioning() {
@@ -137,7 +235,7 @@ export class WecomController {
       record.state = record.controller.signal.aborted ? 'cancelled' : 'failed';
       record.error = record.controller.signal.aborted
         ? safeError('cancelled', t('扫码绑定已取消。'))
-        : safeError('qr-start-failed', t('无法生成企业微信二维码，请稍后重试。'));
+        : this.#failure(error, 'qr-start-failed', t('无法生成企业微信二维码，请稍后重试。'));
       this.#finishAttempt(record);
       throw error;
     }
@@ -180,7 +278,7 @@ export class WecomController {
     await this.#withBotTransition(identity.botId, async () => {
       if (this.#closed) throw new Error('Enterprise WeChat controller is closed');
       const previousConfig = this.#configStore.getByRemoteBotId(remoteBotId);
-      const previousSecret = await this.#credentials.resolve(identity.secretRef).catch(() => undefined);
+      const previousSecret = await atConnectionStage('credential.read', () => this.#credentials.resolve(identity.secretRef), 'credential-store');
       if (this.#closed) throw new Error('Enterprise WeChat controller is closed');
       const config = {
         botId: identity.botId,
@@ -189,9 +287,9 @@ export class WecomController {
         createdAt: previousConfig?.createdAt ?? new Date().toISOString(),
         connectedAt: new Date().toISOString(),
       };
-      await this.#credentials.set(identity.secretRef, normalizedSecret);
+      await atConnectionStage('credential.save', () => this.#credentials.set(identity.secretRef, normalizedSecret), 'credential-store');
       try {
-        await this.#configStore.save(config);
+        await atConnectionStage('account.save', () => this.#configStore.save(config), 'account-config');
       } catch (error) {
         await this.#restoreCredential(identity.secretRef, previousSecret);
         throw error;
@@ -234,7 +332,7 @@ export class WecomController {
         await this.#startRuntime(config, secret);
         this.#errors.delete(botId);
       } catch (error) {
-        this.#errors.set(botId, safeError('connection-failed', t('企业微信连接仍未就绪，请稍后重试。')));
+        this.#errors.set(botId, this.#failure(error, 'connection-failed', t('企业微信连接仍未就绪，请稍后重试。')));
         throw error;
       } finally {
         this.#touch();
@@ -271,29 +369,47 @@ export class WecomController {
     });
   }
 
+  async presentSessionSyncApproval(botId, target, interaction, options = {}) {
+    const config = this.#configStore.get(botId);
+    if (!config) throw new Error('Unknown Enterprise WeChat bot');
+    return this.#withBotTransition(botId, async () => {
+      const runtime = this.#runtimes.get(botId);
+      if (!runtime?.status?.ready || typeof runtime.presentSessionSyncApproval !== 'function') {
+        const error = new Error(t('企业微信连接当前离线'));
+        error.code = 'bot-not-connected';
+        throw error;
+      }
+      return runtime.presentSessionSyncApproval(target, interaction, options);
+    });
+  }
+
   async deleteBot(botId) {
+    const warnings = [];
     const config = this.#configStore.get(botId);
     if (!config) throw new Error('Unknown Enterprise WeChat bot');
     await this.#withBotTransition(botId, async () => {
-      const previous = await this.#credentials.resolve(config.secretRef).catch(() => undefined);
+      const previous = await atConnectionStage('credential.read', () => this.#credentials.resolve(config.secretRef), 'credential-store');
       await this.#stopRuntime(botId);
       try {
-        await this.#credentials.unset(config.secretRef);
-        await this.#configStore.remove(botId);
+        await atConnectionStage('credential.remove', () => this.#credentials.unset(config.secretRef), 'credential-store');
+        await atConnectionStage('account.remove', () => this.#configStore.remove(botId), 'account-config');
       } catch (error) {
-        if (previous?.value) {
-          await this.#credentials.set(config.secretRef, previous.value).catch(() => undefined);
-          await this.#startRuntime(config, previous.value).catch(() => undefined);
+        if (!this.#configStore.get(botId)) {
+          warnings.push(this.#diagnostics.report(error, { operation: 'bot.delete', stage: 'workspace.cleanup', warning: true,
+            publicError: { code: 'workspace-cleanup-failed', message: '账号已移除，但本地状态清理失败。' } }).publicError);
+        } else {
+          if (previous?.value) {
+            await atConnectionStage('credential.save', () => this.#credentials.set(config.secretRef, previous.value), 'credential-store').catch(() => undefined);
+            await this.#startRuntime(config, previous.value).catch(() => undefined);
+          }
+          throw new Error('Unable to remove the Enterprise WeChat bot safely.', { cause: error });
         }
-        throw new Error('Unable to remove the Enterprise WeChat bot safely.', { cause: error });
       }
-      await this.#deleteState({ botId, config }).catch((error) => {
-        this.#logger.warn?.(`[dsh-im:wecom] bot ${botId} state cleanup failed:`, error);
-      });
+      await this.#deleteState({ botId, config }).catch(error => { warnings.push(this.#diagnostics.report(error, { reuse: true, operation: 'bot.delete', stage: 'state.cleanup', resource: 'account-state', warning: true, publicError: { code: 'cleanup-failed', message: '账号已移除，但本地状态清理失败。' } }).publicError); });
       this.#errors.delete(botId);
       this.#touch();
     });
-    return this.status();
+    return { ...this.status(), ...(warnings.length ? { warnings } : {}) };
   }
 
   status() {
@@ -324,7 +440,7 @@ export class WecomController {
           messagesReplied: runtimeStatus?.messagesReplied ?? 0,
         },
         lastMessageError: publicMessageFailure(runtimeStatus?.lastMessageError),
-        error: structuredClone(this.#errors.get(config.botId) ?? null),
+        error: structuredClone(runtimeStatus?.error ?? this.#errors.get(config.botId) ?? null),
       };
     });
     const connectedCount = bots.filter((bot) => bot.connected).length;
@@ -379,7 +495,7 @@ export class WecomController {
     } catch (error) {
       if (record.controller.signal.aborted) return;
       record.state = 'failed';
-      record.error = safeError('qr-connect-failed', t('企业微信扫码服务暂时不可用，请重新生成二维码。'));
+      record.error = this.#failure(error, 'qr-connect-failed', t('企业微信扫码服务暂时不可用，请重新生成二维码。'));
       this.#logger.warn?.('[dsh-im:wecom] QR polling failed');
       this.#finishAttempt(record);
     }
@@ -399,7 +515,7 @@ export class WecomController {
         record.error = safeError('cancelled', t('扫码绑定已取消。'));
       } else {
         record.state = 'failed';
-        record.error = safeError('activation-failed', t('企业微信已授权，但无法安全保存接入配置。'));
+        record.error = this.#failure(error, 'activation-failed', t('企业微信已授权，但无法安全保存接入配置。'));
         this.#logger.error?.('[dsh-im:wecom] provisioning failed');
       }
     } finally {
@@ -410,7 +526,7 @@ export class WecomController {
   async #activateBot(record, { remoteBotId, secret }) {
     const identity = deriveWecomBotIdentity(remoteBotId);
     const previousConfig = this.#configStore.getByRemoteBotId(remoteBotId);
-    const previousSecret = await this.#credentials.resolve(identity.secretRef).catch(() => undefined);
+    const previousSecret = await atConnectionStage('credential.read', () => this.#credentials.resolve(identity.secretRef), 'credential-store');
     const config = {
       botId: identity.botId,
       remoteBotId,
@@ -419,10 +535,10 @@ export class WecomController {
       connectedAt: new Date().toISOString(),
     };
     return this.#withBotTransition(identity.botId, async () => {
-      await this.#credentials.set(identity.secretRef, secret);
+      await atConnectionStage('credential.save', () => this.#credentials.set(identity.secretRef, secret), 'credential-store');
       try {
         if (record.controller.signal.aborted) throw new DOMException('Cancelled', 'AbortError');
-        await this.#configStore.save(config);
+        await atConnectionStage('account.save', () => this.#configStore.save(config), 'account-config');
       } catch (error) {
         await this.#restoreCredential(identity.secretRef, previousSecret);
         throw error;
@@ -434,19 +550,19 @@ export class WecomController {
       } catch (error) {
         if (record.controller.signal.aborted) {
           await this.#stopRuntime(identity.botId);
-          if (previousConfig) await this.#configStore.save(previousConfig).catch(() => undefined);
+          if (previousConfig) await atConnectionStage('account.save', () => this.#configStore.save(previousConfig), 'account-config').catch(() => undefined);
           else {
-            const removed = await this.#configStore.remove(identity.botId).catch(() => null);
+            const removed = await atConnectionStage('account.remove', () => this.#configStore.remove(identity.botId), 'account-config').catch(() => null);
             if (removed) {
               await this.#deleteState({ botId: identity.botId, config }).catch((cleanupError) => {
-                this.#logger.warn?.('[dsh-im:wecom] cancelled bot state cleanup failed:', cleanupError);
+                this.#logger.warn?.('[dsh-im:wecom] cancelled bot state cleanup failed:', extractConnectionEvidence(cleanupError).details);
               });
             }
           }
           await this.#restoreCredential(identity.secretRef, previousSecret);
           throw error;
         }
-        this.#errors.set(identity.botId, safeError('connection-failed', t('企业微信机器人已绑定，消息连接暂未就绪。')));
+        this.#errors.set(identity.botId, this.#failure(error, 'connection-failed', t('企业微信机器人已绑定，消息连接暂未就绪。')));
         this.#logger.warn?.(`[dsh-im:wecom] bot ${identity.botId} activation connection failed`);
       }
       this.#touch();
@@ -458,7 +574,7 @@ export class WecomController {
     if (this.#closed) throw new Error('Enterprise WeChat controller is closed');
     await this.#stopRuntime(config.botId);
     if (this.#closed) throw new Error('Enterprise WeChat controller is closed');
-    const runtime = await this.#createRuntime({ botId: config.botId, config, secret });
+    const runtime = await atConnectionStage('runtime.prepare', () => this.#createRuntime({ botId: config.botId, config, secret }));
     if (!runtime || typeof runtime.start !== 'function' || typeof runtime.stop !== 'function') {
       throw new TypeError('createRuntime returned an invalid Enterprise WeChat runtime');
     }
@@ -476,18 +592,18 @@ export class WecomController {
     const runtime = this.#runtimes.get(botId);
     this.#runtimes.delete(botId);
     await runtime?.stop().catch((error) => {
-      this.#logger.warn?.(`[dsh-im:wecom] bot ${botId} failed to stop cleanly:`, error);
+      this.#logger.warn?.(`[dsh-im:wecom] bot ${botId} failed to stop cleanly:`, extractConnectionEvidence(error).details);
     });
   }
 
   async #resolveSecret(ref) {
-    const result = await this.#credentials.resolve(ref).catch(() => undefined);
+    const result = await atConnectionStage('credential.read', () => this.#credentials.resolve(ref), 'credential-store');
     return cleanString(result?.value);
   }
 
   async #restoreCredential(ref, previous) {
-    if (previous?.value) await this.#credentials.set(ref, previous.value).catch(() => undefined);
-    else await this.#credentials.unset(ref).catch(() => undefined);
+    if (previous?.value) await atConnectionStage('credential.save', () => this.#credentials.set(ref, previous.value), 'credential-store').catch(() => undefined);
+    else await atConnectionStage('credential.remove', () => this.#credentials.unset(ref), 'credential-store').catch(() => undefined);
   }
 
   #withBotTransition(botId, operation) {

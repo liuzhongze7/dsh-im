@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { StateStore } from '../../../src/channels/feishu/state-store.mjs';
@@ -16,6 +16,37 @@ test('StateStore persists sessions and dedupe ids', async () => {
   assert.equal(second.sessionFor('group:one'), 'session-one');
   assert.equal(second.hasSeen('message-one'), true);
   assert.equal(JSON.parse(await readFile(path, 'utf8')).version, 1);
+});
+
+test('StateStore resumes writes after a rename failure and persists queued changes', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-feishu-state-recovery-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, 'state.json');
+  const backup = join(dir, 'state.backup.json');
+  const store = await new StateStore(path).load();
+  await store.setSession('group:one', 'session-before');
+
+  // A directory at the destination makes rename fail on every supported OS.
+  await rename(path, backup);
+  await mkdir(path);
+  await assert.rejects(store.markSeen('message-failed'), (error) => error.syscall === 'rename');
+  assert.deepEqual(JSON.parse(await readFile(backup, 'utf8')).seenMessageIds, []);
+  assert.deepEqual(JSON.parse(await readFile(`${path}.tmp`, 'utf8')).seenMessageIds, ['message-failed']);
+
+  await rm(path, { recursive: true });
+  await rename(backup, path);
+  // Reuse the same instance: recovery must not depend on a bot restart.
+  await Promise.all([
+    store.markSeen('message-after'),
+    store.setSession('group:one', 'session-after'),
+    store.markSeen('message-last'),
+  ]);
+
+  const reloaded = await new StateStore(path).load();
+  assert.equal(reloaded.sessionFor('group:one'), 'session-after');
+  assert.deepEqual(reloaded.snapshot().seenMessageIds, [
+    'message-failed', 'message-after', 'message-last',
+  ]);
 });
 
 test('StateStore persists managed-topic roots (thread_id → root message)', async () => {

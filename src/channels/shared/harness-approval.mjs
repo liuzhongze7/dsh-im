@@ -1,4 +1,5 @@
 import { t } from './i18n.mjs';
+import { evaluateInboundAccess } from './inbound-access.mjs';
 
 const APPROVAL_REPLIES = new Map([
   ['批准', 'allowed-once'],
@@ -9,11 +10,41 @@ const APPROVAL_REPLIES = new Map([
   ['no', 'rejected'],
 ]);
 
+export const COMPETITIVE_APPROVAL_CHANNELS = Object.freeze([
+  'feishu', 'weixin', 'dingtalk', 'wecom', 'wecom-app', 'qq',
+  'telegram', 'slack', 'discord', 'whatsapp', 'matrix',
+]);
+
+const APPROVAL_UNAVAILABLE_TEXT = '机器人端无法处理这次审批，请到 Web 查看。';
 const APPROVAL_PROMPT = '请精准回复「批准」或「拒绝」（也支持：同意 / 不同意 / yes / no）。';
 const APPROVAL_AFTER_QUESTION_PROMPT = '请先完成当前问题，再精准回复「批准」或「拒绝」。';
 const APPROVAL_RESOLVED_TEXT = '该审批已处理，无需再次回复。';
+const APPROVAL_TIMEOUT_TEXT = '审批已超时，已自动拒绝此次操作。';
+const APPROVAL_TIMEOUT_UNCONFIRMED_TEXT = '审批已超时，正在自动拒绝，但暂未得到确认，稍后会自动重试。';
+const DEFAULT_APPROVAL_TIMEOUT_MS = 60 * 60_000;
+const EXPIRY_RETRY_BASE_MS = 30_000;
+const EXPIRY_RETRY_MAX_MS = 5 * 60_000;
 const RESOLVED_ROUTE_TTL_MS = 5 * 60_000;
 const MAX_RESOLVED_ROUTES = 2_048;
+
+/**
+ * How a card-driven decision ended, so a channel card can tell "the decision is
+ * in" from "still submitting", "try again" and "this card can never work again".
+ *
+ * A transient Host/RPC failure keeps the approval pending, which makes the
+ * press retryable: the card must hand its keyboard back instead of staying
+ * `claimed` forever behind a "still submitting" toast.
+ */
+export const APPROVAL_SUBMIT_RESULT = Object.freeze({
+  /** The Host accepted the decision; the approval is gone from the queue. */
+  SUBMITTED: 'submitted',
+  /** Another decision is in flight; keep the card until its outcome is known. */
+  BUSY: 'busy',
+  /** Nothing was decided and the approval is still pending: press again. */
+  RETRYABLE: 'retryable',
+  /** The approval is no longer decidable here (resolved, expired, closed). */
+  GONE: 'gone',
+});
 
 function cleanText(value) {
   return typeof value === 'string' ? value.trim() : '';
@@ -60,6 +91,7 @@ export function harnessApprovalText(payload, {
   toolCall,
   requiresMention = false,
   maxArgumentsLength = 6_000,
+  hasButtons = false,
 } = {}) {
   if (!validHarnessApproval(payload)) return null;
   const callId = cleanText(payload.callId);
@@ -78,8 +110,13 @@ export function harnessApprovalText(payload, {
   ];
   const reason = printableText(payload.reason);
   if (reason) lines.push(t('原因：{reason}', { reason }));
-  lines.push('', t(APPROVAL_PROMPT));
-  if (requiresMention) lines.push('', t('群聊中请 @机器人 后发送审批决定。'));
+  // A button card carries the intent itself: asking the user to type a decision
+  // (or to @ the bot in a group) would be misleading next to the buttons. The
+  // plain-text path below stays byte-identical to what it has always sent.
+  if (!hasButtons) {
+    lines.push('', t(APPROVAL_PROMPT));
+    if (requiresMention) lines.push('', t('群聊中请 @机器人 后发送审批决定。'));
+  }
   return lines.join('\n');
 }
 
@@ -95,6 +132,8 @@ function approvalResult(pending, outcome) {
 }
 
 function approvalOutcomeText(outcome) {
+  if (outcome === 'expired') return t(APPROVAL_TIMEOUT_TEXT);
+  if (outcome === 'unavailable') return t(APPROVAL_UNAVAILABLE_TEXT);
   if (outcome === 'allowed-once') return t('已批准，仅对本次操作有效。');
   if (outcome === 'rejected') return t('已拒绝此次操作。');
   return t(APPROVAL_RESOLVED_TEXT);
@@ -106,14 +145,37 @@ export class HarnessApprovalQueue {
   #byId = new Map();
   #routes = new Map();
   #resolvedRoutes = new Map();
+  #approvalTimeoutMs;
 
-  constructor({ label = 'IM', logger = console } = {}) {
+  constructor({ label = 'IM', logger = console, approvalTimeoutMs = DEFAULT_APPROVAL_TIMEOUT_MS } = {}) {
     this.#label = label;
     this.#logger = logger;
+    this.#approvalTimeoutMs = Number.isFinite(approvalTimeoutMs) && approvalTimeoutMs > 0
+      ? approvalTimeoutMs
+      : DEFAULT_APPROVAL_TIMEOUT_MS;
   }
 
   hasPending(key) {
     return this.#routes.get(key)?.items.some((pending) => !pending.inactive) === true;
+  }
+
+  /**
+   * Reject the active approvals of one route: the sender moved on to a new
+   * addressed request instead of deciding the tool call, and the conversation
+   * must not wait behind a decision that is not coming.
+   * @param {string} key The route key.
+   * @returns {Promise<number>} How many approvals were rejected.
+   */
+  async rejectRoute(key) {
+    const route = this.#routes.get(key);
+    if (!route) return 0;
+    let rejected = 0;
+    for (const pending of [...route.items]) {
+      if (pending.inactive || pending.resolving) continue;
+      await this.#submit(pending, 'rejected').catch(() => undefined);
+      rejected += 1;
+    }
+    return rejected;
   }
 
   claimReply({
@@ -176,6 +238,10 @@ export class HarnessApprovalQueue {
             }
             await pending.activationTask?.catch(() => undefined);
             await pending.presentationTask?.catch(() => undefined);
+            if (!pending.inactive && pending.expiring) {
+              await send(t(APPROVAL_TIMEOUT_UNCONFIRMED_TEXT));
+              return;
+            }
             if (pending.inactive || pending.resolving) {
               await send(t(APPROVAL_RESOLVED_TEXT));
               return;
@@ -195,7 +261,9 @@ export class HarnessApprovalQueue {
               return;
             }
             if (!decision) {
-              await send(t(APPROVAL_PROMPT));
+              // A button card already tells the user how to decide; repeating
+              // the type-the-decision prompt would contradict its buttons.
+              if (!pending.interactiveCard) await send(t(APPROVAL_PROMPT));
               return;
             }
             await this.#submit(pending, decision);
@@ -208,6 +276,51 @@ export class HarnessApprovalQueue {
         }
       },
     };
+  }
+
+  /** Present a bound private-chat approval without creating an IM prompt. */
+  async handleSessionSyncRequested(interaction, context, { signal, completion, runtimeSignal, accessPolicy } = {}) {
+    if (signal?.aborted || runtimeSignal?.aborted) return false;
+    const validateRoute = context.validate;
+    context = { ...context, validate: async () => {
+      await validateRoute?.();
+      if (!context.actor || !evaluateInboundAccess(accessPolicy, {
+        conversationType: 'direct', senderIds: [context.actor], text: 'yes',
+      }).allowed) throw new Error('Approval recipient is no longer allowed');
+    } };
+    await context.validate();
+    if (signal?.aborted || runtimeSignal?.aborted) return false;
+    let resolved = false;
+    const finish = (outcome) => this.handleResolved({
+      kind: 'approval', interactionId: interaction.interactionId, outcome,
+    });
+    const onStop = () => {
+      queueMicrotask(async () => {
+        if (resolved) return;
+        try {
+          await interaction.withdraw?.();
+          await finish('unavailable');
+        } catch (error) {
+          this.#logger.warn?.(`[dsh-im:${this.#label}] failed to withdraw a stopped approval:`, error);
+        }
+      });
+    };
+    runtimeSignal?.addEventListener('abort', onStop, { once: true });
+    Promise.resolve(completion).then(async (outcome) => {
+      resolved = true;
+      runtimeSignal?.removeEventListener('abort', onStop);
+      await finish(outcome);
+    }).catch((error) => this.#logger.warn?.(`[dsh-im:${this.#label}] failed to retire a synced approval:`, error));
+    try {
+      await this.handleRequested(interaction, context);
+      if (runtimeSignal?.aborted) onStop();
+      return this.#byId.has(interaction.interactionId);
+    } catch (error) {
+      runtimeSignal?.removeEventListener('abort', onStop);
+      await interaction.withdraw?.();
+      await finish('unavailable');
+      throw error;
+    }
   }
 
   async handleRequested(interaction, context) {
@@ -257,7 +370,7 @@ export class HarnessApprovalQueue {
     if (!text) {
       const rejected = await this.#rejectInteraction(interaction, payload);
       await send(rejected
-        ? t('无法完整展示这次操作，已安全拒绝此次审批。')
+        ? (interaction.withdraw ? t(APPROVAL_UNAVAILABLE_TEXT) : t('无法完整展示这次操作，已安全拒绝此次审批。'))
         : t(APPROVAL_RESOLVED_TEXT));
       return true;
     }
@@ -272,22 +385,39 @@ export class HarnessApprovalQueue {
       requiresMention: context.requiresMention === true,
       send,
       render,
+      validate: context.validate,
+      onResolved: typeof context.onResolved === 'function' ? context.onResolved : null,
       text,
       presented: false,
       presentationTask: null,
       deliveryCompleted: false,
       replyTail: null,
       submitting: false,
+      // Set by a channel renderer once an interactive card really reached the
+      // user. It means the card owns the decision guidance and the receipt, so
+      // the plain-text prompts/receipts below must stay quiet.
+      interactiveCard: false,
       inactive: false,
       resolving: false,
       closedOutcome: null,
       resolutionNotified: false,
       activationTask: null,
+      timeoutTimer: null,
+      expired: false,
+      expiring: false,
+      expiryAttempts: 0,
+      expiryNoticeSent: false,
     };
     this.#byId.set(approvalId, pending);
     const route = this.#routes.get(key) ?? { items: [] };
     route.items.push(pending);
     this.#routes.set(key, route);
+    pending.timeoutTimer = setTimeout(() => {
+      void this.#expire(pending).catch((error) => {
+        this.#logger.warn?.(`[dsh-im:${this.#label}] failed to expire an approval:`, error);
+      });
+    }, this.#approvalTimeoutMs);
+    pending.timeoutTimer.unref?.();
     if (route.items[0] === pending) await this.#present(pending);
     return true;
   }
@@ -297,13 +427,20 @@ export class HarnessApprovalQueue {
    * (e.g. Feishu approve/reject). Returns false when no matching pending
    * approval is found. Callers may pass the acting user to enforce that only
    * the originating actor can decide.
+   *
+   * Pass `{ detailed: true }` to get an {@link APPROVAL_SUBMIT_RESULT} instead of
+   * a boolean: an interactive card has to tell a retryable submission failure
+   * apart from an in-flight decision, one that landed, or an invalid card.
    */
-  async submitByApprovalId(approvalId, outcome, { actor } = {}) {
+  async submitByApprovalId(approvalId, outcome, { actor, detailed = false } = {}) {
     const pending = this.#byId.get(cleanText(approvalId));
-    if (!pending || pending.inactive || pending.resolving || pending.submitting) return false;
-    if (actor !== undefined && pending.actor !== actor) return false;
-    await this.#submit(pending, outcome);
-    return true;
+    const gone = detailed ? APPROVAL_SUBMIT_RESULT.GONE : false;
+    if (!pending || pending.inactive || pending.resolving) return gone;
+    if (actor !== undefined && pending.actor !== actor) return gone;
+    if (pending.submitting) return detailed ? APPROVAL_SUBMIT_RESULT.BUSY : false;
+    const result = await this.#submit(pending, outcome);
+    if (!detailed) return true;
+    return result ?? APPROVAL_SUBMIT_RESULT.RETRYABLE;
   }
 
   async handleResolved(resolution) {
@@ -322,14 +459,15 @@ export class HarnessApprovalQueue {
     const shouldNotify = pending.presented || presentationTask;
     const send = pending.send;
     const next = this.#remove(pending);
+    // The host reports our own timeout rejection as a plain rejection.
+    const outcome = pending.expiring && resolution.outcome === 'rejected' ? 'expired' : resolution.outcome;
     await this.#transition(next, async () => {
       let delivered = pending.presented;
       if (presentationTask) {
         delivered = await presentationTask.then(() => true, () => false);
       }
       if (shouldNotify && delivered) {
-        pending.resolutionNotified = true;
-        await send(approvalOutcomeText(resolution.outcome)).catch(() => undefined);
+        await this.#notifyResolved(pending, outcome, send);
       }
     });
     return true;
@@ -342,21 +480,20 @@ export class HarnessApprovalQueue {
     for (const pending of pendingItems) this.#remove(pending);
     await Promise.all(pendingItems.map(async (pending) => {
       try {
-        await pending.interaction.respond(
+        if (pending.interaction.withdraw) await pending.interaction.withdraw();
+        else await pending.interaction.respond(
           approvalResult(pending, 'rejected'),
           { signal: AbortSignal.timeout(5_000) },
         );
-        pending.closedOutcome = 'rejected';
-        if ((pending.presented || pending.deliveryCompleted) && !pending.resolutionNotified) {
-          pending.resolutionNotified = true;
-          await pending.send(approvalOutcomeText('rejected')).catch(() => undefined);
+        pending.closedOutcome = pending.interaction.withdraw ? 'unavailable' : 'rejected';
+        if (pending.presented || pending.deliveryCompleted) {
+          await this.#notifyResolved(pending, pending.closedOutcome);
         }
       } catch (error) {
         if (error?.code === 'interaction-not-pending') {
           pending.closedOutcome = 'resolved';
-          if ((pending.presented || pending.deliveryCompleted) && !pending.resolutionNotified) {
-            pending.resolutionNotified = true;
-            await pending.send(t(APPROVAL_RESOLVED_TEXT)).catch(() => undefined);
+          if (pending.presented || pending.deliveryCompleted) {
+            await this.#notifyResolved(pending, 'resolved');
           }
         } else {
           this.#logger.warn?.(`[dsh-im:${this.#label}] failed to reject a closing approval:`, error);
@@ -374,53 +511,156 @@ export class HarnessApprovalQueue {
     if (pending.presentationTask) return pending.presentationTask;
     // A channel-provided renderer shows the approval as an interactive card
     // (e.g. approve/reject buttons); otherwise fall back to plain text.
-    const task = pending.render
-      ? Promise.resolve().then(() => pending.render(pending, pending.send))
-      : Promise.resolve().then(() => pending.send(pending.text));
+    const task = Promise.resolve().then(async () => {
+      await pending.validate?.();
+      if (pending.inactive || pending.resolving) return;
+      if (pending.render) await pending.render(pending, pending.send);
+      else await pending.send(pending.text);
+    });
     pending.presentationTask = task;
     try {
       await task;
       pending.deliveryCompleted = true;
       if (!pending.inactive) {
         pending.presented = true;
-      } else if (pending.closedOutcome && !pending.resolutionNotified) {
-        pending.resolutionNotified = true;
-        await pending.send(approvalOutcomeText(pending.closedOutcome)).catch(() => undefined);
+      } else if (pending.closedOutcome) {
+        await this.#notifyResolved(pending, pending.closedOutcome);
       }
+    } catch (error) {
+      if (!pending.interaction.withdraw) throw error;
+      pending.presentationTask = null;
+      await pending.interaction.withdraw();
+      await this.handleResolved({ kind: 'approval', interactionId: pending.approvalId, outcome: 'unavailable' });
+      this.#logger.warn?.(`[dsh-im:${this.#label}] approval presentation unavailable:`, error);
     } finally {
       if (pending.presentationTask === task) pending.presentationTask = null;
     }
   }
 
+  async #expire(pending) {
+    pending.timeoutTimer = null;
+    pending.expired = true;
+    // An in-flight decision wins; #submit expires the approval if it fails.
+    if (pending.inactive || pending.resolving || pending.submitting) return;
+    pending.resolving = true;
+    pending.expiring = true;
+    // Keep the route barrier: an earlier confirmation must finish before a
+    // later approval can be presented.
+    await pending.activationTask?.catch(() => undefined);
+    if (pending.inactive || this.#byId.get(pending.approvalId) !== pending) return;
+    await this.#releaseExpired(pending);
+  }
+
+  async #releaseExpired(pending) {
+    pending.timeoutTimer = null;
+    if (pending.inactive) return;
+    let outcome = 'expired';
+    try {
+      // Reject rather than withdraw: a withdrawal only retires the IM side and
+      // would leave a shared Web approval waiting without a bound.
+      await pending.interaction.respond(
+        approvalResult(pending, 'rejected'),
+        { signal: AbortSignal.timeout(5_000) },
+      );
+    } catch (error) {
+      if (error?.code !== 'interaction-not-pending') {
+        if (pending.inactive) return;
+        this.#logger.warn?.(`[dsh-im:${this.#label}] failed to release an expired approval:`, error);
+        this.#retryExpiry(pending);
+        if (!pending.expiryNoticeSent && pending.presented) {
+          pending.expiryNoticeSent = true;
+          await pending.send(t(APPROVAL_TIMEOUT_UNCONFIRMED_TEXT)).catch(() => undefined);
+        }
+        return;
+      }
+      outcome = 'resolved';
+    }
+    if (pending.inactive) return;
+    const presentationTask = pending.presentationTask;
+    const shouldNotify = pending.presented || presentationTask;
+    const send = pending.send;
+    const next = this.#remove(pending);
+    pending.closedOutcome = outcome;
+    await this.#transition(next, async () => {
+      let delivered = pending.presented;
+      if (presentationTask) {
+        delivered = await presentationTask.then(() => true, () => false);
+      }
+      if (shouldNotify && delivered) await this.#notifyResolved(pending, outcome, send);
+    });
+  }
+
+  #retryExpiry(pending) {
+    const delay = Math.min(EXPIRY_RETRY_BASE_MS * 2 ** pending.expiryAttempts, EXPIRY_RETRY_MAX_MS);
+    pending.expiryAttempts += 1;
+    pending.timeoutTimer = setTimeout(() => {
+      void this.#releaseExpired(pending).catch((error) => {
+        this.#logger.warn?.(`[dsh-im:${this.#label}] failed to expire an approval:`, error);
+      });
+    }, delay);
+    pending.timeoutTimer.unref?.();
+  }
+
   async #submit(pending, outcome) {
     pending.submitting = true;
     try {
+      if (pending.validate) {
+        try { await pending.validate(); }
+        catch (error) {
+          await pending.interaction.withdraw?.();
+          throw Object.assign(new Error('Approval route is no longer available', { cause: error }), {
+            code: 'interaction-not-pending',
+          });
+        }
+      }
       await pending.interaction.respond(approvalResult(pending, outcome));
     } catch (error) {
       if (error?.code === 'interaction-not-pending') {
         const send = pending.send;
         const next = this.#remove(pending);
         await this.#transition(next, async () => {
-          if (!pending.resolutionNotified) {
-            await send(t(APPROVAL_RESOLVED_TEXT)).catch(() => undefined);
-          }
+          await this.#notifyResolved(pending, 'resolved', send);
         });
-        return;
+        return APPROVAL_SUBMIT_RESULT.GONE;
       }
-      if (pending.inactive) return;
+      if (pending.inactive) return APPROVAL_SUBMIT_RESULT.GONE;
       pending.submitting = false;
       this.#logger.error?.(`[dsh-im:${this.#label}] failed to submit an approval:`, error);
+      // The deadline passed while this decision was in flight.
+      if (pending.expired) {
+        await this.#expire(pending);
+        return APPROVAL_SUBMIT_RESULT.GONE;
+      }
       await pending.send(t('审批提交失败，请重新回复「批准」或「拒绝」。')).catch(() => undefined);
-      return;
+      // The approval is still pending: the caller may offer the press again.
+      return APPROVAL_SUBMIT_RESULT.RETRYABLE;
     }
 
     const send = pending.send;
     const next = this.#remove(pending);
     await this.#transition(next, async () => {
-      if (!pending.resolutionNotified) {
-        await send(approvalOutcomeText(outcome)).catch(() => undefined);
-      }
+      await this.#notifyResolved(pending, outcome, send);
     });
+    return APPROVAL_SUBMIT_RESULT.SUBMITTED;
+  }
+
+  async #notifyResolved(pending, outcome, send = pending.send) {
+    if (pending.resolutionNotified) return;
+    // Claim notification before awaiting the channel, so a concurrent close or
+    // resolved event cannot replace the confirmed result or notify twice.
+    pending.resolutionNotified = true;
+    const text = approvalOutcomeText(outcome);
+    let deliveredByPresentation = false;
+    try {
+      // A card renderer returns true when it already edited the original message
+      // into the receipt; the separate terminal text would then be a duplicate
+      // (and the pending.send may have been swapped by an interim text reply).
+      deliveredByPresentation = (await pending.onResolved?.(text, outcome)) === true;
+    } catch (error) {
+      this.#logger.warn?.(`[dsh-im:${this.#label}] failed to update a resolved approval:`, error);
+    }
+    if (deliveredByPresentation) return;
+    await send(text).catch(() => undefined);
   }
 
   async #transition(next, work) {
@@ -456,6 +696,10 @@ export class HarnessApprovalQueue {
   #remove(pending) {
     if (pending.inactive) return null;
     pending.inactive = true;
+    if (pending.timeoutTimer) {
+      clearTimeout(pending.timeoutTimer);
+      pending.timeoutTimer = null;
+    }
     this.#rememberResolvedRoute(pending.key);
     this.#byId.delete(pending.approvalId);
     const route = this.#routes.get(pending.key);
@@ -484,6 +728,10 @@ export class HarnessApprovalQueue {
 
   async #rejectInteraction(interaction, payload) {
     try {
+      if (interaction.withdraw) {
+        await interaction.withdraw();
+        return true;
+      }
       await interaction.respond({
         ok: true,
         value: {

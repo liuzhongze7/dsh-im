@@ -7,8 +7,9 @@ import {
   extractText,
   isAllowedSender,
   isBotSender,
-  isTopicGroupKey,
-  managedGroupKey,
+  isTopicKey,
+  managedTopicKey,
+  managedTopicRoot,
   splitText,
 } from '../../../src/channels/feishu/message-utils.mjs';
 
@@ -28,6 +29,41 @@ test('extractText removes bot mentions', () => {
   assert.equal(extractText(event), '你好');
 });
 
+test('extractInboundMessage exposes an inbound card body that the event only titles', async () => {
+  const cardContent = JSON.stringify({
+    schema: '2.0',
+    header: { title: { tag: 'plain_text', content: '⚙️ 任务过程' } },
+    body: { elements: [{ tag: 'markdown', content: '清单已生成' }] },
+  });
+  let reads = 0;
+  const client = { im: { v1: { message: { get: async ({ path, params }) => {
+    reads += 1;
+    assert.equal(path.message_id, 'om_card');
+    assert.equal(params.card_msg_content_type, 'raw_card_content');
+    return { code: 0, data: { items: [{
+      message_id: 'om_card',
+      chat_id: 'oc_same',
+      msg_type: 'interactive',
+      body: { content: cardContent },
+    }] } };
+  } } } } };
+  const message = extractInboundMessage({
+    message: {
+      message_id: 'om_card',
+      chat_id: 'oc_same',
+      message_type: 'interactive',
+      content: JSON.stringify({ title: '⚙️ 任务过程' }),
+    },
+  }, client);
+  // The event itself only carries the title, so the synchronous answer stays short.
+  assert.equal(message.content, '⚙️ 任务过程');
+  assert.equal(reads, 0);
+  assert.deepEqual(await message.card.load(), {
+    messageId: 'om_card',
+    content: '⚙️ 任务过程\n清单已生成',
+  });
+  assert.equal(reads, 1);
+});
 test('extractInboundMessage lazily downloads a Feishu image resource as a bounded stream', async () => {
   const calls = [];
   const event = {
@@ -521,7 +557,18 @@ test('Feishu does not treat the current thread root as its own reply reference',
   assert.equal('replyTo' in message, false);
 });
 
-test('extractInboundMessage exposes a native Feishu file as a lazy unbounded resource download', async () => {
+test('Feishu topic parsing is stateless across admission, handling and later messages', () => {
+  const event = (id) => ({ message: {
+    message_id: id, chat_type: 'group', chat_id: 'oc_topic',
+    thread_id: 'omt_topic', root_id: 'om_root', parent_id: 'om_root',
+    message_type: 'text', content: JSON.stringify({ text: 'continue' }),
+  } });
+  for (const id of ['om_first', 'om_first', 'om_second']) {
+    assert.equal(extractInboundMessage(event(id), {}).replyTo.messageId, 'om_root');
+  }
+});
+
+test('extractInboundMessage exposes a native Feishu file as a lazy streaming resource download', async () => {
   const calls = [];
   const bytes = Buffer.from('ordinary-file-payload');
   const event = {
@@ -544,7 +591,10 @@ test('extractInboundMessage exposes a native Feishu file as a lazy unbounded res
   assert.equal(message.files.length, 1);
   assert.equal(message.files[0].name, 'report.bin');
   assert.equal(calls.length, 0, 'file download stays lazy');
-  assert.deepEqual(await message.files[0].load({}), bytes);
+  const { stream } = await message.files[0].load({});
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  assert.deepEqual(Buffer.concat(chunks), bytes);
   assert.deepEqual(calls, [{
     path: { message_id: 'om_file', file_key: 'file_test' },
     params: { type: 'file' },
@@ -675,19 +725,42 @@ test('conversationKey isolates topic-group threads without affecting regular gro
   }), 'group:oc_group');
 });
 
-test('managedGroupKey builds per-topic managed keys and requires ids', () => {
-  assert.equal(managedGroupKey('oc_group', 'om_root'), 'group:oc_group:managed:om_root');
-  assert.throws(() => managedGroupKey('', 'om_root'), /chat_id/);
-  assert.throws(() => managedGroupKey('oc_group', ''), /message id/);
+test('managedTopicKey builds a key from a conversation scope and requires both parts', () => {
+  assert.equal(managedTopicKey('group:oc_group', 'om_root'), 'group:oc_group:managed:om_root');
+  assert.equal(managedTopicKey('p2p:ou_test', 'om_root'), 'p2p:ou_test:managed:om_root');
+  assert.throws(() => managedTopicKey('', 'om_root'), /conversation scope/);
+  assert.throws(() => managedTopicKey('group:oc_group', ''), /message id/);
 });
 
-test('isTopicGroupKey recognizes thread and managed group keys only', () => {
-  assert.equal(isTopicGroupKey('group:oc_group:thread:omt_a'), true);
-  assert.equal(isTopicGroupKey('group:oc_group:managed:om_root'), true);
-  assert.equal(isTopicGroupKey('group:oc_group'), false);
-  assert.equal(isTopicGroupKey('p2p:ou_test'), false);
-  assert.equal(isTopicGroupKey(null), false);
-  assert.equal(isTopicGroupKey(''), false);
+test('managedTopicRoot reads the root back out of a managed key only', () => {
+  assert.equal(managedTopicRoot('group:oc_group:managed:om_root'), 'om_root');
+  assert.equal(managedTopicRoot('p2p:ou_test:managed:om_root'), 'om_root');
+  assert.equal(managedTopicRoot('group:oc_group:thread:omt_a'), null);
+  assert.equal(managedTopicRoot('p2p:ou_test'), null);
+  assert.equal(managedTopicRoot(':managed:'), null);
+  assert.equal(managedTopicRoot(null), null);
+});
+
+test('isTopicKey recognizes thread and managed keys in both chat types', () => {
+  assert.equal(isTopicKey('group:oc_group:thread:omt_a'), true);
+  assert.equal(isTopicKey('group:oc_group:managed:om_root'), true);
+  assert.equal(isTopicKey('p2p:ou_test:managed:om_root'), true);
+  assert.equal(isTopicKey('p2p:ou_test:thread:omt_a'), true);
+  assert.equal(isTopicKey('group:oc_group'), false);
+  assert.equal(isTopicKey('p2p:ou_test'), false);
+  assert.equal(isTopicKey(null), false);
+  assert.equal(isTopicKey(''), false);
+});
+
+test('conversationKey keeps a direct chat in one session even inside a thread', () => {
+  // A direct chat's thread_id must not split the session: an answer typed in a
+  // thread has to keep matching the question asked in the main window. Only a
+  // managed topic (a topic the bot itself opened) leaves the shared key.
+  assert.equal(conversationKey({
+    sender: { sender_id: { open_id: 'ou_test' } },
+    message: { chat_type: 'p2p', chat_id: 'oc_private', thread_id: 'omt_a' },
+  }), 'p2p:ou_test');
+  assert.equal(isTopicKey('p2p:ou_test:thread:omt_a'), true);
 });
 
 test('splitText preserves all text', () => {
@@ -708,4 +781,41 @@ test('isAllowedSender enforces an open-id allowlist', () => {
   assert.equal(isAllowedSender(event, new Set(['ou_allowed'])), true);
   assert.equal(isAllowedSender(event, new Set(['ou_other'])), false);
   assert.equal(isAllowedSender(event, new Set(['*'])), true);
+});
+
+test('extractInboundMessage reads the text of a forwarded card', async () => {
+  // A forwarded card arrives as `interactive`. Without a branch for it the text
+  // was dropped, the message looked empty, and the reader got the
+  // "text, image and file only" notice — even though the same extraction is
+  // already used for quoted cards.
+  const event = {
+    message: {
+      message_id: 'om_card',
+      message_type: 'interactive',
+      content: JSON.stringify({
+        card_schema: 2,
+        header: { title: { tag: 'plain_text', content: '系统告警' } },
+        body: {
+          elements: [{ tag: 'div', text: { tag: 'lark_md', content: 'CPU 使用率 95%' } }],
+        },
+      }),
+    },
+  };
+  const message = extractInboundMessage(event, {});
+  assert.match(message.content, /系统告警/, 'the card title is read');
+  assert.match(message.content, /CPU 使用率 95%/, 'the card body is read');
+});
+
+test('a card with no readable text still reports nothing', async () => {
+  // An image-only card genuinely carries no text; it must not invent one.
+  const event = {
+    message: {
+      message_id: 'om_img_card',
+      message_type: 'interactive',
+      content: JSON.stringify({ card_schema: 2, body: { elements: [{ tag: 'img', img_key: 'img_x' }] } }),
+    },
+  };
+  const message = extractInboundMessage(event, {});
+  assert.equal(message.content, '');
+  assert.equal(message.images.length, 0);
 });

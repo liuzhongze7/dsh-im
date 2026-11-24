@@ -1,3 +1,7 @@
+import { BusyMessageDispatcher, canAutomaticallySteer } from '../shared/busy-message-dispatcher.mjs';
+import { SESSION_NAV_HELP_LINES } from '../shared/command-catalog.mjs';
+import { imageInputLimits } from '../shared/image-input-policy.mjs';
+import { imageDownloadLimitMessage } from '../shared/image-prompt.mjs';
 import { createDeferredDeliveryCoordinator, deferredOutcomeText } from '../shared/deferred-delivery-coordinator.mjs';
 import { generateReqId } from '@wecom/aibot-node-sdk';
 import { randomUUID } from 'node:crypto';
@@ -18,7 +22,11 @@ import {
   isBatchInputCommand,
 } from '../shared/batch-input.mjs';
 import { runCompactCommand } from '../shared/compact-command.mjs';
+import { isSharedLocalCommand } from '../shared/command-permission.mjs';
+import { isClearCommand, runClearCommand } from '../shared/clear-command.mjs';
+import { isResetCommand, runResetCommand } from '../shared/reset-command.mjs';
 import { isHistoryCommand, runHistoryCommand } from '../shared/history-command.mjs';
+import { isPermissionCommand, runPermissionCommand } from '../shared/permission-command.mjs';
 import {
   isControlCommand,
   runControlCommand,
@@ -31,9 +39,18 @@ import {
   isPresetCommand,
   runPresetCommand,
 } from '../shared/preset-command.mjs';
-import { runWorkspaceCommand, workspacePathSnapshot } from '../shared/workspace-command.mjs';
+import { conversationSessionWorkspace, runWorkspaceCommand, workspacePathSnapshot } from '../shared/workspace-command.mjs';
 import { askInWorkspaceSession } from '../shared/workspace-session.mjs';
-import { captureContextEnhancement, enhanceContextContent } from '../shared/context-enhancement.mjs';
+import {
+  isSessionNavCommand,
+  runSessionNavTextCommand,
+} from '../shared/session-nav-command.mjs';
+import { createConversationSession, isNewCommand, newCommandTitle } from '../shared/new-command.mjs';
+import {
+  captureContextEnhancement,
+  captureContextEnhancementSource,
+  enhanceContextContent,
+} from '../shared/context-enhancement.mjs';
 import {
   hasInboundImages,
   ImagePromptError,
@@ -64,6 +81,7 @@ import {
   evaluateInboundAccess,
 } from '../shared/inbound-access.mjs';
 import { t } from '../shared/i18n.mjs';
+import { createWecomStreamSupervisor } from './stream-supervisor.mjs';
 
 const DEFAULT_FILE_UPLOAD_TIMEOUT_MS = 120_000;
 
@@ -76,13 +94,18 @@ function helpText() {
     t('/menu 或 /m  打开可点击的功能菜单'),
     t('/new  开启一个全新会话'),
     t('/compact  压缩当前会话的较早上下文'),
+    t('/clear  清空当前会话上下文（保留 Session 绑定和历史记录）'),
+    t('/permissionlist  按序号列出权限档位'),
+    t('/permission [序号或完整ID]  查看或切换当前会话权限'),
     t('/history [数量]  查看最近历史消息（默认 3 条，最多 5 条）'),
     t('/workspace 工作区序号或绝对路径  切换工作区'),
     t('/workspacelist  列出工作区绝对路径'),
     t('/ws、/wsl、/workspaces  工作区命令别名'),
     t('/sessionlist 或 /sessions [工作区序号或绝对路径]  列出会话 ID 和标题'),
+    t('/sessionlist --all  跨工作区汇总会话（每个工作区默认显示 10 个，可用 --limit N 调整）'),
     t('/sessionlist --limit N  仅列出当前工作区前 N 个会话'),
-    t('/session Session ID 或当前工作区序号  将当前聊天绑定到指定会话'),
+    t('/session Session ID、当前工作区序号或标题关键词  将当前聊天绑定到指定会话'),
+    ...SESSION_NAV_HELP_LINES.map((line) => t(line)),
     t('/models  按序号列出所有可用模型'),
     t('/reasoninglist 或 /reasonings  按序号列出当前模型可用推理等级'),
     t('/reasoning [序号、等级ID或 --default]  查看或切换当前推理等级'),
@@ -145,10 +168,9 @@ function messageText(frame) {
     : text;
 }
 
-function imageContents(frame) {
-  const body = bodyOf(frame);
-  if (body.msgtype === 'image') return [body.image];
-  if (body.msgtype !== 'mixed' || !Array.isArray(body.mixed?.msg_item)) return [];
+function imageContents(body) {
+  if (body?.msgtype === 'image') return [body.image];
+  if (body?.msgtype !== 'mixed' || !Array.isArray(body.mixed?.msg_item)) return [];
   return body.mixed.msg_item
     .filter((item) => item?.msgtype === 'image')
     .map((item) => item.image);
@@ -212,7 +234,7 @@ function imageSource(client, image) {
         throw new ImagePromptError(
           'image-too-large',
           `Enterprise WeChat image exceeds ${maxBytes} bytes`,
-          t('图片超过 5 MB，请压缩后重试。'),
+          imageDownloadLimitMessage(maxBytes),
         );
       }
       return { data, name: result?.filename };
@@ -250,7 +272,7 @@ export function wecomInboundMessage(frame, client) {
   const replyTo = replyReferenceForBody(body);
   return {
     content: messageText(frame),
-    images: imageContents(frame).map((image) => imageSource(client, image)).filter(Boolean),
+    images: imageContents(body).map((image) => imageSource(client, image)).filter(Boolean),
     files: fileContents(frame).map((file) => fileSource(client, file)).filter(Boolean),
     ...(replyTo ? { replyTo } : {}),
   };
@@ -276,12 +298,17 @@ function prefetchInboundFiles(message, signal) {
   };
 }
 
-function prefetchInboundImages(message, signal) {
+function prefetchInboundImages(message, signal, limitsPromise) {
   if (!hasInboundImages(message)) return message;
   return {
     ...message,
     images: message.images.map((source) => {
-      const download = source.load({ signal, maxBytes: MAX_IMAGE_BYTES });
+      const download = Promise.resolve(limitsPromise).then((limits) => {
+        if (message.images.length > limits.maxImages) throw new ImagePromptError(
+          'too-many-images', 'Too many inbound images',
+          t('一次最多只能处理 {maxImages} 张图片。', { maxImages: limits.maxImages }));
+        return source.load({ signal, maxBytes: limits.maxDownloadBytes });
+      });
       // The conversation queue may not consume this promise immediately. Keep
       // an attached rejection handler while preserving the original outcome.
       download.catch(() => undefined);
@@ -297,7 +324,7 @@ function prefetchInboundImages(message, signal) {
             throw new ImagePromptError(
               'image-too-large',
               `Enterprise WeChat image exceeds ${maxBytes} bytes`,
-              t('图片超过 5 MB，请压缩后重试。'),
+              imageDownloadLimitMessage(maxBytes),
             );
           }
           return result;
@@ -321,6 +348,25 @@ function imageQueueFullMessage(message) {
       },
     })),
   };
+}
+
+function quotedImageGuidance(message) {
+  const lines = [];
+  const directCount = message.images.length;
+  const quotedCount = message.quotedImages?.length ?? 0;
+  if (quotedCount > 0) {
+    if (directCount > 0) lines.push(t('图片 {indexes} 来自当前消息。', {
+      indexes: Array.from({ length: directCount }, (_, index) => index + 1).join(', '),
+    }));
+    lines.push(t('图片 {indexes} 来自被引用消息。图片序号与本轮附件清单一致。', {
+      indexes: Array.from({ length: quotedCount }, (_, index) => directCount + index + 1).join(', '),
+    }));
+  }
+  if (message.missingQuotedImageCount > 0) lines.push(t(
+    '有 {count} 张引用图片未提供可下载资源，未附上这些图片；需要看图时请用户重新发送。',
+    { count: message.missingQuotedImageCount },
+  ));
+  return lines.join('\n');
 }
 
 function interactionReplyText(frame) {
@@ -550,10 +596,13 @@ export class WecomHarnessBridge {
   #status;
   #logger;
   #replyTimeoutMs;
+  #streamRotateAfterMs;
+  #streamSilentProbeMs;
   #generateReqId;
   #signal;
   #fileUploadTimeoutMs;
   #queues = new Map();
+  #busyMessages = new BusyMessageDispatcher();
   #pendingInteractions = new Map();
   #interactionKeys = new Map();
   // Keep the accepted configuration through the existing queue/reply lifecycle.
@@ -576,6 +625,8 @@ export class WecomHarnessBridge {
     status = createWecomBridgeStatus(),
     logger = console,
     replyTimeoutMs = 600_000,
+    streamRotateAfterMs = 510_000,
+    streamSilentProbeMs = 120_000,
     generateStreamId = generateReqId,
     fileUploadTimeoutMs = DEFAULT_FILE_UPLOAD_TIMEOUT_MS,
     signal,
@@ -595,6 +646,8 @@ export class WecomHarnessBridge {
     this.#status = status;
     this.#logger = logger;
     this.#replyTimeoutMs = replyTimeoutMs;
+    this.#streamRotateAfterMs = streamRotateAfterMs;
+    this.#streamSilentProbeMs = streamSilentProbeMs;
     this.#generateReqId = generateStreamId;
     this.#fileUploadTimeoutMs = Math.min(fileUploadTimeoutMs, DEFAULT_FILE_UPLOAD_TIMEOUT_MS);
     this.#signal = signal;
@@ -608,27 +661,18 @@ export class WecomHarnessBridge {
     return structuredClone(this.#status);
   }
 
-  #mainMenu() {
-    return wecomMenu({
-      workspace: this.#harness.currentWorkspace?.(),
-      workspaces: [[t('更多选项…'), '/menu workspaces']],
-    });
-  }
-
-  async #showMain(frame, { welcome = false } = {}) {
+  async #showMain(frame) {
     const previousFailure = this.#status.lastMessageError;
     const key = conversationKey(frame);
     const workspace = this.#harness.currentWorkspace?.();
     const sessionId = this.#state.sessionFor(key);
-    // The welcome reply has a five-second deadline. Show immediate controls,
-    // then load the selectors independently of that reply window.
-    if (welcome) await this.#sendMenu(frame, this.#mainMenu(), { welcome: true });
     const options = { signal: this.#signal };
     const settled = await Promise.allSettled([
       workspacePathSnapshot(this.#harness, options),
-      this.#harness.listWorkspaceSessions?.(workspace, options),
+      conversationSessionWorkspace(this.#harness, key, options)
+        .then((path) => this.#harness.listWorkspaceSessions?.(path, options)),
       (async () => {
-        const session = sessionId ? this.#harness.workspaceSession?.(sessionId) : null;
+        const session = sessionId ? this.#harness.workspaceSession?.(sessionId, key) : null;
         return typeof session?.models === 'function'
           ? session.models(options) : this.#harness.listModels?.(options);
       })(),
@@ -650,12 +694,10 @@ export class WecomHarnessBridge {
       currentPreset: currentPreset ? `/preset ${/^\d+$/u.test(currentPreset) ? 'id:' : ''}${currentPreset}` : '/preset --default',
       presetLabel: settings?.agentPresetCatalog?.items.find((item) => item.id === currentPreset)?.label,
     });
-    await this.#sendMenu(frame, settingsMenu, { active: welcome });
-    if (!welcome) {
-      await this.#sendMenu(frame, wecomMenu({ workspace,
-        workspaces: (paths?.paths ?? (workspace ? [workspace] : [])).map((path) => [path, `/workspace ${path}`]),
-      }), { active: true });
-    }
+    await this.#sendMenu(frame, settingsMenu);
+    await this.#sendMenu(frame, wecomMenu({ workspace,
+      workspaces: (paths?.paths ?? (workspace ? [workspace] : [])).map((path) => [path, `/workspace ${path}`]),
+    }), { active: true });
     this.#clearMenuFailure(previousFailure);
   }
 
@@ -682,17 +724,14 @@ export class WecomHarnessBridge {
     return wecomTemplateCard(menu, taskId);
   }
 
-  async #sendMenu(frame, menu, { welcome = false, active = false } = {}) {
+  async #sendMenu(frame, menu, { active = false } = {}) {
     this.#signal?.throwIfAborted();
     const body = bodyOf(frame);
     const chatId = body.chattype === 'group' ? body.chatid : body.from.userid;
     const card = this.#rememberMenu(frame, menu);
-    const operation = welcome ? 'replyWelcome'
-      : active || this.#cardFrames.has(frame) ? 'sendMessage' : 'replyTemplateCard';
+    const operation = active || this.#cardFrames.has(frame) ? 'sendMessage' : 'replyTemplateCard';
     try {
-      if (welcome) {
-        await this.#client.replyWelcome(frame, { msgtype: 'template_card', template_card: card });
-      } else if (active || this.#cardFrames.has(frame)) {
+      if (active || this.#cardFrames.has(frame)) {
         await this.#client.sendMessage(chatId, { msgtype: 'template_card', template_card: card });
       } else {
         await this.#client.replyTemplateCard(frame, card);
@@ -704,16 +743,7 @@ export class WecomHarnessBridge {
       // Only a definite card rejection can safely fall back to text.
       if (error.code !== 'channel-delivery-failed' || error.providerCode === undefined) throw error;
       this.#logger.warn?.('[dsh-im:wecom] menu delivery failed; using text:', wecomSendDiagnostic(error));
-      if (welcome) {
-        const content = wecomMenuText(menu);
-        try {
-          await this.#client.replyWelcome(frame, { msgtype: 'text', text: { content } });
-        } catch (cause) {
-          throw wecomSendError(cause, 'replyWelcome');
-        }
-      } else {
-        await this.#sendImmediate(frame, chatId, wecomMenuText(menu));
-      }
+      await this.#sendImmediate(frame, chatId, wecomMenuText(menu));
     }
   }
 
@@ -744,7 +774,7 @@ export class WecomHarnessBridge {
     const body = bodyOf(frame);
     const senderId = nonEmptyString(body.from?.userid);
     const type = body.event?.eventtype;
-    if (!senderId || !['enter_chat', 'template_card_event'].includes(type)) return;
+    if (!senderId || type !== 'template_card_event') return;
     const chattype = body.chattype ?? (body.chatid ? 'group' : 'single');
     if (!['single', 'group'].includes(chattype) || (chattype === 'group' && !body.chatid)) return;
     const normalized = { ...frame, body: { ...body, chattype } };
@@ -753,17 +783,13 @@ export class WecomHarnessBridge {
       conversationType: chattype === 'single' ? 'direct' : 'group', senderIds: senderId, isCommand: true,
     });
     if (!access.allowed) {
-      if (type === 'template_card_event' && access.reason === 'command-not-allowed') {
+      if (access.reason === 'command-not-allowed') {
         await this.#sendActive(chatId, t(COMMAND_PERMISSION_DENIED_MESSAGE));
       }
       return;
     }
     await this.#state.markSeen(body.msgid);
     const key = conversationKey(normalized);
-    if (type === 'enter_chat') {
-      if (chattype === 'single') await this.#showMain(normalized, { welcome: true });
-      return;
-    }
     // Live callbacks nest these fields; older SDK examples show them flat.
     const callback = body.event.template_card_event ?? body.event;
     const entry = this.#menus.get(callback.task_id);
@@ -807,7 +833,7 @@ export class WecomHarnessBridge {
     const navigation = commands.find((command) => parseWecomMenu(command));
     if (navigation) commands = [navigation];
     if (!navigation && entry.workspace !== this.#harness.currentWorkspace?.()) {
-      await this.#sendActive(chatId, t('工作区已变化，请从新菜单重新选择。'));
+      await this.#sendActive(chatId, t('工作区已变化，请发送 /m 重新打开菜单后选择。'));
     } else {
       for (const [index, command] of commands.entries()) {
         const commandFrame = { ...normalized, body: { ...normalized.body,
@@ -817,10 +843,6 @@ export class WecomHarnessBridge {
         await this.accept(commandFrame);
       }
       if (!commands.length) await this.#sendActive(chatId, t('设置未改变。'));
-    }
-    if (!navigation) {
-      this.#cardFrames.add(normalized);
-      await this.#showMain(normalized);
     }
   }
 
@@ -840,7 +862,8 @@ export class WecomHarnessBridge {
         let description = '';
         if (menu.section === 'sessions') {
           title = t('📋 会话列表');
-          const listed = await this.#harness.listWorkspaceSessions(this.#harness.currentWorkspace(), options);
+          const workspace = await conversationSessionWorkspace(this.#harness, key, options);
+          const listed = await this.#harness.listWorkspaceSessions(workspace, options);
           entries = listed.sessions.map((session) => [
             `${session.sessionId === this.#state.sessionFor(key) ? '✓ ' : ''}${session.title || t('暂无标题')}`,
             `/session ${session.sessionId}`,
@@ -852,7 +875,7 @@ export class WecomHarnessBridge {
         } else if (menu.section === 'models') {
           title = t('🧠 切换模型');
           const sessionId = this.#state.sessionFor(key);
-          const session = sessionId ? this.#harness.workspaceSession?.(sessionId) : null;
+          const session = sessionId ? this.#harness.workspaceSession?.(sessionId, key) : null;
           const catalog = typeof session?.models === 'function'
             ? await session.models(options) : await this.#harness.listModels(options);
           entries = catalog.groups.flatMap((group) => group.models.map((model) => [
@@ -887,10 +910,12 @@ export class WecomHarnessBridge {
       return { message: t('当前任务仍在运行，请先停止任务或等待任务完成后再开启新会话。') };
     }
     if (command === '/new') {
-      await this.#state.clearSession(key);
-      return { message: t('已开启新会话。请发送你的问题。') };
+      const created = await createConversationSession({ state: this.#state, harness: this.#harness, key });
+      return { message: created.failed ? t('暂时无法创建新会话，请稍后重试。') : t('已开启新会话。请发送你的问题。') };
     }
     return await runWorkspaceCommand(text, this.#harness, key)
+      ?? await runClearCommand(text, this.#harness, this.#state, key, options)
+      ?? await runResetCommand(text, this.#harness, this.#state, key, options)
       ?? await runCompactCommand(text, this.#harness, this.#state, key, options);
   }
 
@@ -918,7 +943,8 @@ export class WecomHarnessBridge {
       text: commandText,
       hasImages: hasInboundImages(commandMessage),
       hasFiles: hasInboundFiles(commandMessage),
-      ...(parseWecomMenu(commandText) && !hasInboundImages(commandMessage) && !hasInboundFiles(commandMessage)
+      ...(isPermissionCommand(commandText)
+        || (parseWecomMenu(commandText) && !hasInboundImages(commandMessage) && !hasInboundFiles(commandMessage))
         ? { isCommand: true } : {}),
     });
     if (!access.allowed) {
@@ -960,6 +986,9 @@ export class WecomHarnessBridge {
               ...body,
               msgtype: 'text',
               text: { content: result.prompt },
+              // The submission is exactly the collected text, so a quote on the
+              // command itself must not become part of it.
+              quote: undefined,
             },
           }, messageId, key, { batchSubmission: result });
         }
@@ -969,7 +998,10 @@ export class WecomHarnessBridge {
     const menuCommand = !hasInboundImages(commandMessage) && !hasInboundFiles(commandMessage)
       && (parseWecomMenu(commandText) || ['/help', '/status', '/new'].includes(commandText.toLowerCase())
         || this.#cardFrames.has(frame));
-    const commandRunner = isHistoryCommand(commandText) ? runHistoryCommand
+    const commandRunner = isClearCommand(commandText) ? runClearCommand
+      : isResetCommand(commandText) ? runResetCommand
+      : isPermissionCommand(commandText) ? runPermissionCommand
+      : isHistoryCommand(commandText) ? runHistoryCommand
       : hasInboundFiles(commandMessage) ? null : isControlCommand(commandText)
       ? runControlCommand
       : (isModelCommand(commandText)
@@ -1066,7 +1098,23 @@ export class WecomHarnessBridge {
       pending.queue = current;
       return current;
     }
-    return this.#enqueueMessage(frame, messageId, key);
+    return this.#busyMessages.dispatch({
+      key, messageId, text: commandText,
+      eligible: () => isNativeWecomText(frame) && !hasReplyReference(commandMessage)
+        && !parseWecomMenu(commandText) && !this.#cardFrames.has(frame)
+        && canAutomaticallySteer(this.#accessPolicy, conversationType, senderId),
+      harness: this.#harness, state: this.#state, status: this.#status,
+      signal: this.#signal, control: { owner: this, key }, logger: this.#logger,
+      acceptedMessageIds: this.#acceptedMessageIds,
+      pendingInteraction: () => this.#pendingInteractions.has(key) || this.#approvals.hasPending(key),
+      enhancement: {
+        snapshot: this.#acceptedMessageIds.get(messageId),
+        source: () => ({ channel: 'wecom', senderId, chatId }),
+      },
+      isQueued: () => this.#queues.has(key),
+      enqueue: (options) => this.#enqueueMessage(frame, messageId, key, options),
+      send: (reply) => this.#sendImmediate(frame, chatId, reply),
+    });
   }
 
   #enqueueMessage(frame, messageId, key, {
@@ -1078,18 +1126,33 @@ export class WecomHarnessBridge {
     // may legally stay queued longer. Start the authenticated SDK download as
     // soon as the validated callback is accepted, then consume it in order.
     const inboundMessage = wecomInboundMessage(frame, this.#client);
-    const imageCount = inboundMessage.images.length;
+    const directCount = inboundMessage.images.length;
+    const quoteContents = isSharedLocalCommand(inboundMessage.content, {
+      hasImages: hasInboundImages(inboundMessage),
+      hasFiles: hasInboundFiles(inboundMessage),
+    }) ? [] : imageContents(bodyOf(frame).quote);
+    const quotedImages = quoteContents.map((image) => imageSource(this.#client, image)).filter(Boolean);
+    const combinedMessage = { ...inboundMessage, images: [...inboundMessage.images, ...quotedImages] };
+    const imageCount = combinedMessage.images.length;
     let reservedImages = 0;
-    let preparedMessage = inboundMessage;
+    let preparedMessage = combinedMessage;
     if (imageCount > 0) {
       if (this.#prefetchedImageCount + imageCount <= MAX_PREFETCHED_IMAGES) {
         reservedImages = imageCount;
         this.#prefetchedImageCount += reservedImages;
-        preparedMessage = prefetchInboundImages(inboundMessage, this.#signal);
+        preparedMessage = prefetchInboundImages(combinedMessage, this.#signal,
+          this.#harness.getImageInputLimits?.() ?? imageInputLimits());
       } else {
-        preparedMessage = imageQueueFullMessage(inboundMessage);
+        preparedMessage = imageQueueFullMessage(combinedMessage);
       }
     }
+    // Keep quoted media separate until local command and interaction routing is done.
+    preparedMessage = {
+      ...preparedMessage,
+      images: preparedMessage.images.slice(0, directCount),
+      quotedImages: preparedMessage.images.slice(directCount),
+      missingQuotedImageCount: quoteContents.length - quotedImages.length,
+    };
     preparedMessage = prefetchInboundFiles(preparedMessage, this.#signal);
     const previous = this.#queues.get(key) ?? Promise.resolve();
     const current = previous
@@ -1168,6 +1231,7 @@ export class WecomHarnessBridge {
   }
 
   async waitForIdle() {
+    await this.#busyMessages.whenIdle();
     await Promise.allSettled([
       ...this.#queues.values(),
       ...[...this.#pendingInteractions.values()].flatMap((pending) => (
@@ -1193,8 +1257,14 @@ export class WecomHarnessBridge {
       hasFiles: hasInboundFiles(message),
       pendingInteraction: this.#pendingInteractions.has(key)
         || this.#approvals.hasPending(key),
+      busy: this.#queues.has(key) || this.#batchInputs.status(key).phase !== 'idle',
       control: { owner: this, key },
       deferredDelivery: this.#deferred,
+      enhancement: captureContextEnhancementSource(
+        this.#contextEnhancement,
+        bodyOf(frame).chattype === 'single' ? 'direct' : 'group',
+        () => ({ channel: 'wecom', senderId: bodyOf(frame).from?.userid, chatId }),
+      ),
     });
     if (result?.stopped) {
       await Promise.allSettled([
@@ -1309,6 +1379,7 @@ export class WecomHarnessBridge {
     const key = conversationKey(frame);
     let streamId = null;
     let streamStarted = false;
+    let streamCtl = null;
     let streamThinkingText = t('正在思考中…');
     let streamAnswerText = '';
     let batchSettled = batchSubmission === null;
@@ -1331,9 +1402,42 @@ export class WecomHarnessBridge {
         await this.#state.markSeen(messageId);
         return;
       }
-      if (!hasImages && !hasFiles && command === '/new') {
-        await this.#state.clearSession(key);
-        await this.#sendImmediate(frame, chatId, t('已开启新会话。请发送你的问题。'));
+      if (!hasImages && !hasFiles && isNewCommand(text)) {
+        const created = await createConversationSession({ state: this.#state, harness: this.#harness, key, title: newCommandTitle(text) });
+        await this.#sendImmediate(frame, chatId, created.failed ? t('暂时无法创建新会话，请稍后重试。') : t('已开启新会话。请发送你的问题。'));
+        await this.#state.markSeen(messageId);
+        return;
+      }
+      if (!hasImages && !hasFiles && isSessionNavCommand(text)) {
+        const nav = await runSessionNavTextCommand(text, this.#harness, this.#state, key, {
+          signal: this.#signal,
+        });
+        if (nav) {
+          for (const reply of nav.messages ?? [nav.message]) {
+            await this.#sendImmediate(frame, chatId, reply);
+          }
+          if (nav.askText) {
+            const followUp = this.#enqueueMessage(
+              {
+                ...frame,
+                body: {
+                  ...(frame?.body ?? {}),
+                  msgtype: 'text',
+                  text: { content: nav.askText },
+                  mixed: undefined,
+                  image: undefined,
+                  voice: undefined,
+                },
+              },
+              `${messageId}-ask`,
+              key,
+            );
+            followUp.catch((error) => {
+              this.#logger.warn?.(`[dsh-im:wecom] follow-up ask after a nav command failed:`, error?.message ?? error);
+              this.#sendImmediate(frame, chatId, t('切换后的提问发送失败，请重试。')).catch(() => undefined);
+            });
+          }
+        }
         await this.#state.markSeen(messageId);
         return;
       }
@@ -1374,10 +1478,23 @@ export class WecomHarnessBridge {
       } catch (error) {
         this.#logger.warn?.('[dsh-im:wecom] unable to start a stream; using an active reply:', error);
       }
+      streamCtl = createWecomStreamSupervisor({
+        client: this.#client,
+        frame,
+        chatId,
+        generateStreamId: () => this.#generateReqId('stream'),
+        previewText: () => splitUtf8(streamContent(streamThinkingText, streamAnswerText))[0],
+        logger: this.#logger,
+        rotateAfterMs: this.#streamRotateAfterMs,
+        silentProbeMs: this.#streamSilentProbeMs,
+      });
+      if (streamStarted) streamCtl.start(streamId);
 
       let content = hasImages || hasReply
-        ? await promptContentForInboundMessage(message, { signal: this.#signal })
+        ? await promptContentForInboundMessage(message, { signal: this.#signal, deferImages: true })
         : undefined;
+      const imageGuidance = quotedImageGuidance(message);
+      if (imageGuidance) content.push({ type: 'text', text: imageGuidance });
       const snapshot = this.#acceptedMessageIds.get(messageId);
       let contextEnhanced = false;
       if (snapshot) {
@@ -1392,12 +1509,15 @@ export class WecomHarnessBridge {
       await this.#state.markSeen(messageId);
       promptRecorded = true;
       const { answer, artifacts = [] } = await askInWorkspaceSession({
+        onNotice: (notice) => this.#sendActive(chatId, notice),
         deferredDelivery: () => ({ coordinator: this.#deferred, target: { chatId } }),
         harness: this.#harness,
         state: this.#state,
         key,
         text,
         content,
+        titleText: batchSubmission?.title,
+        sourceGuidance: snapshot?.config?.guidance,
         contextEnhanced,
         createOptions: { signal: this.#signal },
         existsOptions: { signal: this.#signal },
@@ -1415,7 +1535,7 @@ export class WecomHarnessBridge {
                 const preview = splitUtf8(
                   streamContent(streamThinkingText, streamAnswerText),
                 )[0];
-                if (preview) await this.#client.replyStreamNonBlocking(frame, streamId, preview, false);
+                if (preview) await streamCtl.progress(preview);
               }
             : undefined,
           onInteraction: (interaction) => this.#handleInteraction(interaction, {
@@ -1426,6 +1546,7 @@ export class WecomHarnessBridge {
           }),
           onInteractionResolved: (resolution) => this.#handleInteractionResolved(resolution),
           files: message.files,
+          images: [...message.images, ...(message.quotedImages ?? [])],
         },
       });
       if (batchSubmission) {
@@ -1445,7 +1566,7 @@ export class WecomHarnessBridge {
         if (streamStarted && streamChunks.length > 0) {
           try {
             const providerMessageIds = [];
-            const streamed = await this.#client.replyStream(frame, streamId, streamChunks[0], true);
+            const streamed = await streamCtl.finishStream(streamChunks[0]);
             const streamedMessageId = providerMessageId(streamed);
             if (streamedMessageId) providerMessageIds.push(streamedMessageId);
             for (const chunk of streamChunks.slice(1)) {
@@ -1511,11 +1632,8 @@ export class WecomHarnessBridge {
       }
       if (error?.code === 'turn-stopped') {
         if (streamStarted && streamId) {
-          await this.#client.replyStream(
-            frame,
-            streamId,
+          await streamCtl.finishStream(
             streamContent(streamThinkingText, t('已停止。'), { finish: true }),
-            true,
           )
             .catch(() => undefined);
         }
@@ -1539,12 +1657,9 @@ export class WecomHarnessBridge {
         ? `${errorText}\n\n${batchFailureMessage}`
         : errorText;
       try {
-        if (streamStarted && streamId) {
-          await this.#client.replyStream(
-            frame,
-            streamId,
+        if (streamStarted && streamId && streamCtl.isAlive()) {
+          await streamCtl.finishStream(
             streamContent(streamThinkingText, visibleError, { finish: true }),
-            true,
           );
         } else {
           await this.#sendImmediate(frame, chatId, visibleError);
@@ -1554,6 +1669,7 @@ export class WecomHarnessBridge {
         this.#logger.error?.('[dsh-im:wecom] failed to send the safe error reply');
       }
     } finally {
+      streamCtl?.stop();
       await Promise.allSettled([
         this.#cancelPendingInteraction(key),
         this.#approvals.closeRoute(key),
@@ -1675,6 +1791,12 @@ export class WecomHarnessBridge {
       await this.#sendImmediate(frame, chatId, t('回答提交失败，请重新发送当前问题的答案。'))
         .catch(() => undefined);
     }
+  }
+
+  async presentSessionSyncApproval(interaction, context, options = {}) {
+    return this.#approvals.handleSessionSyncRequested(interaction, context, {
+      ...options, runtimeSignal: this.#signal, accessPolicy: this.#accessPolicy,
+    });
   }
 
   async #handleInteraction(interaction, {

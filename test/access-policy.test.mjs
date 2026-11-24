@@ -582,3 +582,35 @@ test('workspace-aware controller cannot write a policy into a same-id rebound bo
   await assert.rejects(updating, { code: 'workspace-bot-not-found' });
   assert.deepEqual(store.accessPolicyFor('bot_rebound'), reboundPolicy);
 });
+
+test('channel policy validation completes before projection and commit, and errors preserve the live policy', async (t) => {
+  const { path, defaultWorkspace } = await fixture(t);
+  const store = await new BotWorkspaceStore(path, { defaultWorkspace }).load();
+  const initial = policy();
+  await store.ensure('bot_one', { initialAccessPolicy: initial });
+  let projectCalls = 0;
+  let fail = true;
+  const controller = createWorkspaceAwareController({
+    status: () => ({ bots: [{ botId: 'bot_one' }] }),
+  }, {
+    workspaces: store, stateFor: async () => ({}),
+    async validateAccessPolicyForBot(botId, value) {
+      assert.equal(botId, 'bot_one');
+      assert.equal(value.direct.mode, 'allowlist');
+      assert.deepEqual(store.accessPolicyFor(botId), initial);
+      if (fail) throw Object.assign(new Error('invalid channel identity'), { code: 'access-policy-invalid' });
+    },
+  });
+  const update = () => controller.updateAccessPolicy('bot_one', policy({ direct: allowlistScope() }), (value) => {
+    projectCalls += 1;
+    return value;
+  });
+  const original = await readFile(path, 'utf8');
+  await assert.rejects(update(), { code: 'access-policy-invalid' });
+  assert.equal(projectCalls, 0);
+  assert.equal(await readFile(path, 'utf8'), original);
+  fail = false;
+  await update();
+  assert.equal(projectCalls, 1);
+  assert.equal(store.accessPolicyFor('bot_one').direct.mode, 'allowlist');
+});

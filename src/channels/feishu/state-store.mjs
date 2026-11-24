@@ -1,4 +1,5 @@
 import { deferredStateAccess, normalizeDeferredState } from '../shared/deferred-state.mjs';
+import { createSessionRingSupport, normalizePendingTitles, normalizeSessionRings } from '../shared/session-ring-support.mjs';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
@@ -32,6 +33,12 @@ export class StateStore {
 
   constructor(path) {
     this.#path = path;
+    // The navigation ring is a view over this store's state, shared with the
+    // channels that inherit `ConversationStateStore`.
+    Object.assign(this, createSessionRingSupport({
+      state: () => this.#state,
+      persist: () => this.#persist(),
+    }));
   }
 
   async load() {
@@ -48,6 +55,13 @@ export class StateStore {
           : false,
         topics: parsed.topics && typeof parsed.topics === 'object' ? parsed.topics : {},
         mirrors: parsed.mirrors && typeof parsed.mirrors === 'object' ? parsed.mirrors : {},
+        // A state file written before the navigation ring existed loads unchanged.
+        ...(Object.keys(normalizeSessionRings(parsed.rings)).length
+          ? { rings: normalizeSessionRings(parsed.rings) }
+          : {}),
+        ...(Object.keys(normalizePendingTitles(parsed.pendingTitles)).length
+          ? { pendingTitles: normalizePendingTitles(parsed.pendingTitles) }
+          : {}),
       };
     } catch (error) {
       if (error?.code !== 'ENOENT') throw error;
@@ -202,12 +216,13 @@ export class StateStore {
 
   async #persist() {
     const snapshot = JSON.stringify(this.#state, null, 2) + '\n';
-    this.#writeQueue = this.#writeQueue.then(async () => {
+    const operation = this.#writeQueue.then(async () => {
       await mkdir(dirname(this.#path), { recursive: true, mode: 0o700 });
       const temporary = `${this.#path}.tmp`;
       await writeFile(temporary, snapshot, { encoding: 'utf8', mode: 0o600 });
       await rename(temporary, this.#path);
     });
-    await this.#writeQueue;
+    this.#writeQueue = operation.then(() => undefined, () => undefined);
+    await operation;
   }
 }

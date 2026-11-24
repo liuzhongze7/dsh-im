@@ -1,3 +1,6 @@
+import { normalizeBusyMessageMode } from '../../../../src/channels/shared/message-mode.mjs';
+import { normalizeConnectionError as normalizeTestError } from '../../connection-error.js';
+import { diagnosticFields } from '../../../../src/channels/shared/diagnostic-details.mjs';
 import { normalizeBotAlias } from '../../../../src/channels/shared/bot-alias.mjs';
 import { normalizeAgentPresetCatalog, normalizeAgentPresetId, SET_AGENT_PRESET_ENDPOINT } from '../../agent-preset.js';
 import { normalizeModelCatalog, normalizeModelSelection, SET_MODEL_ENDPOINT } from '../../model-setting.js';
@@ -18,6 +21,7 @@ export const WECOM_APP_ENDPOINTS = Object.freeze({
   setModel: SET_MODEL_ENDPOINT,
   setAgentPreset: SET_AGENT_PRESET_ENDPOINT,
   setContextEnhancement: 'bot.context-enhancement.set',
+  setBusyMessageMode: 'bot.message-mode.set',
   setAccessPolicy: 'bot.access-policy.set',
   setAlias: 'bot.alias.set',
 });
@@ -55,7 +59,7 @@ function normalizeTestMessage(value) {
   const code = value.code === 'test-target-unavailable'
     ? 'test-target-unavailable'
     : 'test-message-failed';
-  return { sent: false, code };
+  return { sent: false, code, ...(value.error ? { error: normalizeTestError(value.error) } : {}) };
 }
 
 export function unwrapRpcResult(result) {
@@ -63,6 +67,7 @@ export function unwrapRpcResult(result) {
   if (!result.ok) {
     const error = new Error(text(result.error?.message, '企业微信应用操作失败'));
     error.code = text(result.error?.code, 'WECOM_APP_RPC_ERROR', 80);
+    Object.assign(error, diagnosticFields(result.error));
     throw error;
   }
   return result.value;
@@ -79,7 +84,7 @@ function normalizeBot(value) {
     workspace: text(value.workspace, '', 4_096),
     model: normalizeModelSelection(value.model),
     agentPreset: normalizeAgentPresetId(value.agentPreset),
-    contextEnhancement: normalizeContextEnhancementConfig(value.contextEnhancement),
+    busyMessageMode: normalizeBusyMessageMode(value.busyMessageMode),    contextEnhancement: normalizeContextEnhancementConfig(value.contextEnhancement),
     ...(Object.hasOwn(value, 'accessPolicy')
       ? { accessPolicy: normalizeAccessPolicy(value.accessPolicy) }
       : {}),
@@ -99,6 +104,7 @@ function normalizeBot(value) {
     },
     lastMessageError: normalizeLastMessageError(value.lastMessageError),
     error: isRecord(value.error) ? {
+      ...diagnosticFields(value.error),
       code: text(value.error.code, 'WECOM_APP_ACCOUNT_ERROR', 80),
       message: text(value.error.message, '企业微信应用连接尚未就绪'),
     } : null,
@@ -121,6 +127,7 @@ export function normalizeSnapshot(value) {
 
 export function presentError(error) {
   return {
+    ...diagnosticFields(error),
     code: text(error?.code, 'WECOM_APP_ERROR', 80),
     message: text(error?.message, '企业微信应用操作失败，请稍后重试'),
   };

@@ -1,4 +1,4 @@
-import { AssistantTextAccumulator } from './harness-client.mjs';
+import { AssistantTextAccumulator, accumulateFinalAssistantText } from './harness-client.mjs';
 
 export const MAX_DEFERRED_PER_KEY = 4;
 
@@ -35,12 +35,13 @@ function textFromContent(content) {
  *
  * Reuses HarnessReplyTracker text accumulation: chunk deltas accumulate per
  * (step, part index); a canonical assistant/message replaces its step; steps
- * join with a blank line. `turn` omitted → prefer the latest completed answer.
+ * join with a blank line. finalAnswerOnly discards text before tool calls.
+ * `turn` omitted → prefer the latest completed answer.
  * Returns `{ found, turn, text, reason, endSeq }`; `found: false` when the
  * turn ended without a completed final answer (stopped/failed/empty/
  * interrupted) — `reason`/`endSeq` still identify the confirmed terminal.
  */
-export function extractCompletedTurnAnswer(entries, { turn } = {}) {
+export function extractCompletedTurnAnswer(entries, { turn, finalAnswerOnly = false } = {}) {
   const events = orderedEvents(entries);
   const wantTurn = Number.isSafeInteger(turn) ? turn : null;
   function turnAnswer(turnEnd) {
@@ -48,12 +49,14 @@ export function extractCompletedTurnAnswer(entries, { turn } = {}) {
     let interrupted = false;
     for (const event of events) {
       if (event.seq > turnEnd.seq || event.data?.turn !== turnEnd.data.turn) continue;
-      if (event.type === 'assistant/chunk' && event.data?.chunk?.type === 'text-delta') {
+      if (finalAnswerOnly === true) {
+        accumulateFinalAssistantText(accumulator, event);
+      } else if (event.type === 'assistant/chunk' && event.data?.chunk?.type === 'text-delta') {
         accumulator.appendDelta(event.data.step, event.data.chunk.index, event.data.chunk.text);
       } else if (event.type === 'assistant/message') {
         accumulator.setCanonical(event.data.step, textFromContent(event.data.message?.content));
-        interrupted = event.data.interrupted === true;
       }
+      if (event.type === 'assistant/message') interrupted = event.data.interrupted === true;
     }
     return { text: accumulator.text, interrupted };
   }

@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { ApiError } from '@tencent-connect/qqbot-nodejs';
-import { workspacePathSnapshot } from '../shared/workspace-command.mjs';
+import { conversationSessionWorkspace, workspacePathSnapshot } from '../shared/workspace-command.mjs';
 import { t } from '../shared/i18n.mjs';
 
 export const QQ_MENU_TTL_MS = 15 * 60_000;
@@ -55,7 +55,8 @@ export class QqMenuStore {
     const entry = this.#entries.get(this.#key(route, actor));
     if (!entry || entry.used || !entry.view || entry.expiresAt <= this.#now()
       || (token && token !== entry.token)) return { error: t('这个菜单已过期，请回复 /m 重新打开。') };
-    if (entry.workspace !== context.workspace || entry.sessionId !== context.sessionId) {
+    if (entry.workspace !== context.workspace || entry.sessionWorkspace !== context.sessionWorkspace
+      || entry.sessionId !== context.sessionId) {
       entry.used = true;
       return { error: t('会话或工作区已变化，请重新发送 /m。') };
     }
@@ -80,13 +81,14 @@ export function qqMenuPage(list, requestedPage = 0) {
     list.choices.length ? '' : t('暂无可用选项。')].filter(Boolean).join('\n'), entries, columns: 2 };
 }
 
-async function catalogFor(harness, sessionId, options) {
-  const session = sessionId ? harness.workspaceSession?.(sessionId) : null;
+async function catalogFor(harness, sessionId, key, options) {
+  const session = sessionId ? harness.workspaceSession?.(sessionId, key) : null;
   return typeof session?.models === 'function' ? session.models(options) : harness.listModels(options);
 }
 
 export async function qqMenuView(name, harness, state, key, { signal, busy = false } = {}) {
   const workspace = harness.currentWorkspace?.();
+  const sessionWorkspace = await conversationSessionWorkspace(harness, key, { signal });
   const sessionId = state.sessionFor(key);
   const options = { signal };
   const archived = state.includesArchivedSessions?.() === true;
@@ -94,8 +96,8 @@ export async function qqMenuView(name, harness, state, key, { signal, busy = fal
   if (name === 'main' || name === 'status') {
     if (name === 'status') await harness.ensureRunning(options);
     const results = await Promise.allSettled([
-      harness.listWorkspaceSessions?.(workspace, options),
-      catalogFor(harness, sessionId, options),
+      harness.listWorkspaceSessions?.(sessionWorkspace, options),
+      catalogFor(harness, sessionId, key, options),
       harness.agentPresetSettings?.(options),
     ]);
     signal?.throwIfAborted();
@@ -119,14 +121,14 @@ export async function qqMenuView(name, harness, state, key, { signal, busy = fal
       columns: 3, entries: name === 'status' ? [back()] : [
         section(t('💬 会话选择'), 'sessions'), section(t('📁 工作区'), 'workspaces'), section(t('🤖 模式／预设'), 'presets'),
         section(t('🧠 模型'), 'models'), command(t('🆕 新会话'), '/new'), section(t('📋 会话列表'), 'sessions'),
-        command(t('⏹ 停止'), '/stop'), command(t('📐 压缩'), '/compact'), section(t('💬 补充指令'), 'steer'),
+        command(t('⏹ 停止'), '/stop'), command(t('📐 压缩'), '/compact'), command(t('🧹 清空上下文'), '/clear'), section(t('💬 补充指令'), 'steer'),
         { label: t('切换归档显示'), action: { kind: 'archive', include: !archived } },
         section(t('📊 状态'), 'status'), section(t('📖 帮助'), 'help'),
       ] };
   }
   if (name === 'sessions') {
-    const listed = await harness.listWorkspaceSessions(workspace, options);
-    return qqMenuPage({ title: t('📋 会话列表'), detail: clean(workspace), choices: visibleSessions(listed).map((item) =>
+    const listed = await harness.listWorkspaceSessions(sessionWorkspace, options);
+    return qqMenuPage({ title: t('📋 会话列表'), detail: clean(sessionWorkspace), choices: visibleSessions(listed).map((item) =>
       command(`${item.sessionId === sessionId ? '✓ ' : ''}${clean(item.title || item.sessionId, 70)}${item.archived ? t('（已归档）') : ''}`, `/session ${item.sessionId}`)) });
   }
   if (name === 'workspaces') {
@@ -135,7 +137,7 @@ export async function qqMenuView(name, harness, state, key, { signal, busy = fal
       command(`${path === workspace ? '✓ ' : ''}${clean(path)}`, `/workspace ${path}`)) });
   }
   if (name === 'models') {
-    const catalog = await catalogFor(harness, sessionId, options);
+    const catalog = await catalogFor(harness, sessionId, key, options);
     return qqMenuPage({ title: t('🧠 模型'), detail: catalog.failures?.length ? t('部分模型暂不可用，可稍后重试。') : '',
       choices: catalog.groups.flatMap((group) => group.models.map((model) => command(
         `${catalog.current?.provider === group.id && catalog.current?.model === model.id ? '✓ ' : ''}${clean(group.name, 30)} · ${clean(model.name, 60)}`,
@@ -160,7 +162,7 @@ export async function qqMenuView(name, harness, state, key, { signal, busy = fal
     t('发送 /m 打开助手中心，点击按钮或回复当前列表的数字选择。'),
     t('设置：会话、工作区、模式／预设、模型。'),
     t('会话：新会话、会话列表、归档显示切换。'),
-    t('任务：停止、压缩、快捷或自定义补充指令。'),
+    t('任务：停止、压缩、清空上下文、快捷或自定义补充指令。'),
     t('信息：状态、帮助。'),
     t('菜单有效期为 15 分钟；发送普通消息会退出数字选择。'),
     t('回答问题、审批和批量输入时，数字优先用于当前交互。'),

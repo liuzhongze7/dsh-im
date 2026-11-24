@@ -1,7 +1,11 @@
+import { SET_MESSAGE_MODE_ENDPOINT, validMessageModePayload, normalizeBusyMessageMode } from '../../../../src/channels/shared/message-mode.mjs';
+import { diagnosticFields } from '../../../../src/channels/shared/diagnostic-details.mjs';
+import { createConnectionDiagnostics, diagnosticRpcResult } from '../../../../src/channels/shared/connection-error.mjs';
 import { normalizeBotAlias } from '../../../../src/channels/shared/bot-alias.mjs';
 import { SET_ALIAS_ENDPOINT, validAliasPayload } from '../shared/bot-alias-rpc.mjs';
 import { registerManagementRpc } from '../../../management-rpc.mjs';
-import QRCode from 'qrcode';
+import QRCode from '../../../../src/channels/shared/qrcode.mjs';
+import { qrEncodingError } from '../../../../src/channels/shared/qr-encoding-error.mjs';
 import {
   normalizeAgentPresetCatalog,
   normalizeAgentPresetId,
@@ -13,6 +17,7 @@ import {
   normalizeModelSelection,
 } from '../../../../src/channels/shared/model-setting.mjs';
 import { normalizeAccessPolicy } from '../../../../src/channels/shared/access-policy.mjs';
+import { normalizeConversationDirectory, validateConversationDirectory } from '../../../../src/channels/shared/conversation-directory.mjs';
 import { resolveRpcAuthority } from '../../rpc-authority.mjs';
 import { publicWorkspaceError, validWorkspacePayload } from '../shared/workspace-rpc.mjs';
 import { validAgentPresetPayload } from '../shared/agent-preset-rpc.mjs';
@@ -27,7 +32,14 @@ import {
 import {
   isFeishuStepPushMode,
   normalizeFeishuStepPushMode,
+  isFeishuStepCardPanels,
+  normalizeFeishuStepCardPanels,
 } from '../../../../src/channels/feishu/step-push-mode.mjs';
+import { normalizeFeishuVoiceConfig } from '../../../../src/channels/feishu/voice-config.mjs';
+import {
+  isSlashPanelConfig,
+  normalizeSlashPanelConfig,
+} from '../../../../src/channels/feishu/slash-command-panel.mjs';
 import {
   FEISHU_ENDPOINTS as FEISHU_CLIENT_ENDPOINTS,
   FEISHU_RPC_CHANNEL,
@@ -35,8 +47,11 @@ import {
 
 export const FEISHU_ENDPOINTS = Object.freeze({
   ...FEISHU_CLIENT_ENDPOINTS,
+  setBusyMessageMode: SET_MESSAGE_MODE_ENDPOINT,
   setAccessPolicy: SET_ACCESS_POLICY_ENDPOINT,
   setAlias: SET_ALIAS_ENDPOINT,
+  setConversationDirectory: FEISHU_CLIENT_ENDPOINTS.setConversationDirectory,
+  setConversationDirectoryDefault: FEISHU_CLIENT_ENDPOINTS.setConversationDirectoryDefault,
 });
 export { FEISHU_RPC_CHANNEL };
 export const FEISHU_MULTI_ENDPOINTS = Object.freeze({
@@ -94,6 +109,7 @@ const PUBLIC_ERROR_MESSAGES = Object.freeze({
   credential_update_failed: 'Unable to store the repaired Feishu credentials.',
   credential_state_unknown: 'The repaired Feishu credentials could not be confirmed after saving.',
   repair_connection_failed: 'The callback update was accepted, but the selected bot could not reconnect.',
+  repair_permissions_save_failed: 'Feishu granted the permissions, but their local state could not be saved. Please retry.',
   group_message_permission_required: 'Authorize access to all group messages before enabling this mode.',
   group_message_permission_save_failed: 'Feishu granted the permission, but all-message mode could not be saved.',
   group_message_permission_connection_failed: 'Feishu granted the permission, but the selected bot could not reconnect.',
@@ -137,7 +153,7 @@ function publicError(error) {
   const code = typeof error.code === 'string' && Object.hasOwn(PUBLIC_ERROR_MESSAGES, error.code)
     ? error.code
     : 'registration_failed';
-  return { code, message: PUBLIC_ERROR_MESSAGES[code] };
+  return { code, message: PUBLIC_ERROR_MESSAGES[code], ...diagnosticFields(error) };
 }
 
 function publicRegistration(registration) {
@@ -300,11 +316,17 @@ function publicBotEntry(entry) {
     model: normalizeModelSelection(source.model),
     agentPreset: normalizeAgentPresetId(source.agentPreset),
     contextEnhancement: normalizeContextEnhancementConfig(source.contextEnhancement),
+    busyMessageMode: normalizeBusyMessageMode(source.busyMessageMode),
     accessPolicy: normalizeAccessPolicy(source.accessPolicy),
+    conversationDirectory: normalizeConversationDirectory(source.conversationDirectory),
+    conversationDirectoryOverride: normalizeConversationDirectory(source.conversationDirectoryOverride),
     groupResponseMode: normalizeFeishuGroupResponseMode(source.groupResponseMode),
-    groupTopicReply: source.groupTopicReply === true,
+    mentionTopicReply: source.mentionTopicReply !== false,
     stepPush: source.stepPush === true,
     stepPushMode: normalizeFeishuStepPushMode(source.stepPushMode),
+    stepCardPanels: normalizeFeishuStepCardPanels(source.stepCardPanels),
+    voice: normalizeFeishuVoiceConfig(source.voice),
+    slashPanel: normalizeSlashPanelConfig(source.slashPanel),
     groupMessagePermissionGranted: source.groupMessagePermissionGranted === true,
     bot: publicBot(source.bot),
     health: publicHealth(source, connected),
@@ -349,6 +371,7 @@ export async function toPublicFeishuStatus(status, { encodeQr = qrCodeDataUrl } 
     bot: publicBot(source.bot),
     health: publicHealth(source, connected),
     bots,
+    conversationDirectory: normalizeConversationDirectory(source.conversationDirectory),
     agentPresetCatalog: normalizeAgentPresetCatalog(source.agentPresetCatalog),
     modelCatalog: normalizeModelCatalog(source.modelCatalog),
     totals: {
@@ -396,14 +419,15 @@ function validPayload(endpoint, payload) {
       : 'Callback repair requires a single valid botId.';
   }
   if (endpoint === FEISHU_ENDPOINTS.beginGroupMessagePermission) {
-    return hasOnlyKeys(payload, new Set(['botId'])) && safeOpaqueId(payload.botId)
-      ? null
-      : 'Group message permission update requires a single valid botId.';
+    return hasOnlyKeys(payload, new Set(['botId', 'preserveResponseMode'])) && safeOpaqueId(payload.botId)
+      && (payload.preserveResponseMode === undefined || typeof payload.preserveResponseMode === 'boolean')
+      ? null : 'Group message permission update requires a valid botId and optional preserveResponseMode.';
   }
   if (endpoint === FEISHU_ENDPOINTS.bindCredentials) {
-    return hasOnlyKeys(payload, new Set(['appId', 'appSecret']))
+    return hasOnlyKeys(payload, new Set(['appId', 'appSecret', 'domain']))
       && validCredential(payload.appId, 256)
       && validCredential(payload.appSecret, 1024)
+      && (payload.domain === undefined || payload.domain === 'feishu' || payload.domain === 'lark')
       ? null
       : 'Credential binding requires App ID and App Secret.';
   }
@@ -440,12 +464,28 @@ function validPayload(endpoint, payload) {
     return validWorkspacePayload(payload)
       ? null : '请输入工作区绝对路径。';
   }
+  if (endpoint === FEISHU_ENDPOINTS.setConversationDirectory
+    || endpoint === FEISHU_ENDPOINTS.setConversationDirectoryDefault) {
+    const isDefault = endpoint === FEISHU_ENDPOINTS.setConversationDirectoryDefault;
+    const allowed = isDefault ? new Set(['config']) : new Set(['botId', 'config']);
+    if (!hasOnlyKeys(payload, allowed) || (!isDefault && !safeOpaqueId(payload.botId))) {
+      return '请提交有效的会话目录设置。';
+    }
+    if (payload.config !== null) {
+      try { validateConversationDirectory(payload.config); } catch (error) { return error.message; }
+    }
+    return null;
+  }
   if (endpoint === FEISHU_ENDPOINTS.setModel) {
     return validModelPayload(payload) ? null : '请选择有效模型。';
   }
   if (endpoint === FEISHU_ENDPOINTS.setAgentPreset) {
     return validAgentPresetPayload(payload)
       ? null : '请选择 Agent Preset。';
+  }
+  if (endpoint === FEISHU_ENDPOINTS.setBusyMessageMode) {
+    return validMessageModePayload(payload)
+      ? null : '请提交有效的消息处理方式。';
   }
   if (endpoint === FEISHU_ENDPOINTS.setContextEnhancement) {
     return validContextEnhancementPayload(payload)
@@ -466,10 +506,10 @@ function validPayload(endpoint, payload) {
       ? null
       : '请选择群聊响应方式。';
   }
-  if (endpoint === FEISHU_ENDPOINTS.setGroupTopicReply) {
-    return hasOnlyKeys(payload, new Set(['botId', 'groupTopicReply']))
+  if (endpoint === FEISHU_ENDPOINTS.setMentionTopicReply) {
+    return hasOnlyKeys(payload, new Set(['botId', 'mentionTopicReply']))
       && safeOpaqueId(payload.botId)
-      && typeof payload.groupTopicReply === 'boolean'
+      && typeof payload.mentionTopicReply === 'boolean'
       ? null
       : '请选择是否以话题方式回复。';
   }
@@ -486,6 +526,31 @@ function validPayload(endpoint, payload) {
       && isFeishuStepPushMode(payload.stepPushMode)
       ? null
       : '请选择分步直推的呈现方式。';
+  }
+  if (endpoint === FEISHU_ENDPOINTS.setStepCardPanels) {
+    return hasOnlyKeys(payload, new Set(['botId', 'stepCardPanels']))
+      && safeOpaqueId(payload.botId)
+      && isFeishuStepCardPanels(payload.stepCardPanels)
+      ? null
+      : '请选择实时过程卡面板的展开状态。';
+  }
+  if (endpoint === FEISHU_ENDPOINTS.setVoice) {
+    const voice = payload?.voice;
+    const validVoice = voice === null
+      || (typeof voice === 'object' && !Array.isArray(voice)
+        && (voice.enabled === false || normalizeFeishuVoiceConfig(voice) !== null));
+    return hasOnlyKeys(payload, new Set(['botId', 'voice']))
+      && safeOpaqueId(payload.botId)
+      && validVoice
+      ? null
+      : '语音配置无效。';
+  }
+  if (endpoint === FEISHU_ENDPOINTS.setSlashPanel) {
+    return hasOnlyKeys(payload, new Set(['botId', 'slashPanel']))
+      && safeOpaqueId(payload.botId)
+      && isSlashPanelConfig(payload.slashPanel)
+      ? null
+      : '请选择面板要显示的指令与顺序。';
   }
   return 'Unknown Feishu endpoint.';
 }
@@ -559,6 +624,7 @@ function assertController(controller) {
 
 /** DSH rc.6 handler: (endpoint, payload, signal) => Promise<RpcResult>. */
 export function createFeishuRpcHandler(controller, { encodeQr = qrCodeDataUrl } = {}) {
+  const diagnostics = controller.diagnostics ?? createConnectionDiagnostics({ channel: 'feishu' });
   assertController(controller);
   const qrCache = new Map();
   const attemptQr = new Map();
@@ -566,7 +632,10 @@ export function createFeishuRpcHandler(controller, { encodeQr = qrCodeDataUrl } 
     let encoded = qrCache.get(url);
     if (!encoded) {
       if (qrCache.size >= 32) qrCache.delete(qrCache.keys().next().value);
-      encoded = Promise.resolve().then(() => encodeQr(url));
+      encoded = Promise.resolve().then(() => encodeQr(url)).catch(error => {
+        if (qrCache.get(url) === encoded) qrCache.delete(url);
+        throw qrEncodingError(error);
+      });
       qrCache.set(url, encoded);
     }
     return encoded;
@@ -610,7 +679,7 @@ export function createFeishuRpcHandler(controller, { encodeQr = qrCodeDataUrl } 
         if (typeof controller.startGroupMessagePermission !== 'function') {
           throw new Error('Feishu group message permission update is unavailable.');
         }
-        const started = await controller.startGroupMessagePermission(payload.botId);
+        const started = await controller.startGroupMessagePermission(payload.botId, { preserveResponseMode: payload.preserveResponseMode === true });
         const attemptId = String(publicRegistration(started?.registration).attempt);
         const ready = await waitForQr(controller, started, attemptId, signal);
         value = (await toPublicFeishuStatus(ready, { encodeQr: cachedEncodeQr })).provisioning;
@@ -720,11 +789,18 @@ export function createFeishuRpcHandler(controller, { encodeQr = qrCodeDataUrl } 
               testError = error;
             }
           }
-          value = { ...value, testMessage: publicConnectionTestResult(testError) };
+          value = { ...value, testMessage: publicConnectionTestResult(testError, { diagnostics, botId: payload.botId }) };
         }
       } else if (endpoint === FEISHU_MULTI_ENDPOINTS.disconnectBot) {
         if (typeof controller.disconnectBot !== 'function') throw new Error('Multi-bot disconnect is unavailable');
         value = await toPublicFeishuStatus(await controller.disconnectBot(payload.botId), { encodeQr: cachedEncodeQr });
+      } else if (endpoint === FEISHU_ENDPOINTS.setConversationDirectory
+        || endpoint === FEISHU_ENDPOINTS.setConversationDirectoryDefault) {
+        if (typeof controller.updateConversationDirectory !== 'function') throw new Error('Conversation directory update is unavailable');
+        value = await toPublicFeishuStatus(await controller.updateConversationDirectory(
+          endpoint === FEISHU_ENDPOINTS.setConversationDirectoryDefault ? null : payload.botId,
+          payload.config,
+        ), { encodeQr: cachedEncodeQr });
       } else if (endpoint === FEISHU_ENDPOINTS.setWorkspace) {
         if (typeof controller.updateWorkspace !== 'function') throw new Error('Workspace update is unavailable');
         value = await toPublicFeishuStatus(
@@ -736,6 +812,12 @@ export function createFeishuRpcHandler(controller, { encodeQr = qrCodeDataUrl } 
         value = await toPublicFeishuStatus(
           await controller.updateModel(payload.botId, payload.model),
           { encodeQr: cachedEncodeQr },
+        );
+      } else if (endpoint === FEISHU_ENDPOINTS.setBusyMessageMode) {
+        if (typeof controller.updateBusyMessageMode !== 'function') throw new Error('Message mode update is unavailable');
+        value = await controller.updateBusyMessageMode(
+          payload.botId, payload.busyMessageMode,
+          (status) => toPublicFeishuStatus(status, { encodeQr: cachedEncodeQr }),
         );
       } else if (endpoint === FEISHU_ENDPOINTS.setContextEnhancement) {
         if (typeof controller.updateContextEnhancement !== 'function') throw new Error('Context enhancement update is unavailable');
@@ -769,12 +851,12 @@ export function createFeishuRpcHandler(controller, { encodeQr = qrCodeDataUrl } 
           await controller.updateGroupResponseMode(payload.botId, payload.groupResponseMode),
           { encodeQr: cachedEncodeQr },
         );
-      } else if (endpoint === FEISHU_ENDPOINTS.setGroupTopicReply) {
-        if (typeof controller.updateGroupTopicReply !== 'function') {
-          throw new Error('Group topic reply update is unavailable');
+      } else if (endpoint === FEISHU_ENDPOINTS.setMentionTopicReply) {
+        if (typeof controller.updateMentionTopicReply !== 'function') {
+          throw new Error('Mention topic reply update is unavailable');
         }
         value = await toPublicFeishuStatus(
-          await controller.updateGroupTopicReply(payload.botId, payload.groupTopicReply),
+          await controller.updateMentionTopicReply(payload.botId, payload.mentionTopicReply),
           { encodeQr: cachedEncodeQr },
         );
       } else if (endpoint === FEISHU_ENDPOINTS.setStepPush) {
@@ -793,6 +875,30 @@ export function createFeishuRpcHandler(controller, { encodeQr = qrCodeDataUrl } 
           await controller.updateStepPushMode(payload.botId, payload.stepPushMode),
           { encodeQr: cachedEncodeQr },
         );
+      } else if (endpoint === FEISHU_ENDPOINTS.setStepCardPanels) {
+        if (typeof controller.updateStepCardPanels !== 'function') {
+          throw new Error('Step card panel update is unavailable');
+        }
+        value = await toPublicFeishuStatus(
+          await controller.updateStepCardPanels(payload.botId, payload.stepCardPanels),
+          { encodeQr: cachedEncodeQr },
+        );
+      } else if (endpoint === FEISHU_ENDPOINTS.setVoice) {
+        if (typeof controller.updateVoice !== 'function') {
+          throw new Error('Voice update is unavailable');
+        }
+        value = await toPublicFeishuStatus(
+          await controller.updateVoice(payload.botId, payload.voice),
+          { encodeQr: cachedEncodeQr },
+        );
+      } else if (endpoint === FEISHU_ENDPOINTS.setSlashPanel) {
+        if (typeof controller.updateSlashPanel !== 'function') {
+          throw new Error('Slash panel update is unavailable');
+        }
+        value = await toPublicFeishuStatus(
+          await controller.updateSlashPanel(payload.botId, payload.slashPanel),
+          { encodeQr: cachedEncodeQr },
+        );
       } else {
         if (typeof controller.deleteBot !== 'function') throw new Error('Multi-bot delete is unavailable');
         value = await toPublicFeishuStatus(await controller.deleteBot(payload.botId), { encodeQr: cachedEncodeQr });
@@ -801,9 +907,9 @@ export function createFeishuRpcHandler(controller, { encodeQr = qrCodeDataUrl } 
       return { ok: true, value };
     } catch (error) {
       const workspaceError = publicWorkspaceError(error);
-      return signal?.aborted ? cancelled() : workspaceError
+      return diagnosticRpcResult(diagnostics, error, signal?.aborted ? cancelled() : workspaceError
         ? { ok: false, error: { ...workspaceError, details: {} } }
-        : internalFailure();
+        : internalFailure(), { operation: endpoint, botId: payload?.botId });
     }
   };
 }

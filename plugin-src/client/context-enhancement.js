@@ -20,6 +20,7 @@ const FIELD_LABELS = Object.freeze({
   chatId: '会话标识',
   threadId: '话题标识',
   botId: '机器人标识',
+  sentAt: '发送时间',
 });
 
 const FIELD_HELP = Object.freeze({
@@ -39,6 +40,10 @@ const FIELD_HELP = Object.freeze({
     labelKey: 'threadIdHelpLabel',
     text: '该字段不是每个渠道都能提供。飞书话题群的消息会带上话题 ID，用于区分同一群组内的不同话题；当前消息不在话题中时，即使已选择该字段，<dsh_im_source> 中也会省略 threadId。',
   }),
+  sentAt: Object.freeze({
+    labelKey: 'sentAtHelpLabel',
+    text: '当前消息的发送时间，格式为 YYYY-MM-DD HH:mm:ss（本机时区）。优先使用平台给出的发送时间；平台未提供时，从微信消息 ID 中解析出发送时间；两者都不可用时，即使已选择该字段，<dsh_im_source> 中也会省略 sentAt。目前仅微信渠道提供；把本机时区写进增强提示词，模型判断先后顺序时更准确。',
+  }),
 });
 
 const SCOPE_COPY = Object.freeze({
@@ -50,6 +55,7 @@ const SCOPE_COPY = Object.freeze({
     conversationTitleHelpLabel: '查看群聊会话标题字段说明',
     chatIdHelpLabel: '查看群聊会话标识字段说明',
     threadIdHelpLabel: '查看群聊话题标识字段说明',
+    sentAtHelpLabel: '查看群聊发送时间字段说明',
     guidanceLabel: '增强提示词',
     guidanceHelpLabel: '查看群聊增强提示词使用说明',
     guidanceUsage: '用于告诉模型如何使用当前群聊消息的 <dsh_im_source> 来源字段。只填写正文，插件会自动添加 <dsh_im_source_guidance> 成对标签。',
@@ -63,6 +69,7 @@ const SCOPE_COPY = Object.freeze({
     conversationTitleHelpLabel: '查看私聊会话标题字段说明',
     chatIdHelpLabel: '查看私聊会话标识字段说明',
     threadIdHelpLabel: '查看私聊话题标识字段说明',
+    sentAtHelpLabel: '查看私聊发送时间字段说明',
     guidanceLabel: '增强提示词',
     guidanceHelpLabel: '查看私聊增强提示词使用说明',
     guidanceUsage: '用于告诉模型如何使用当前私聊消息的 <dsh_im_source> 来源字段。只填写正文，插件会自动添加 <dsh_im_source_guidance> 成对标签。',

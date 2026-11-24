@@ -1,3 +1,4 @@
+import { createCommandListSnapshots, COMMAND_LIST_TTL_MS, COMMAND_LIST_MAX_ENTRIES } from './command-list-snapshots.mjs';
 import {
   normalizeAgentPresetCatalog,
   normalizeAgentPresetId,
@@ -19,9 +20,9 @@ const PRESET_USAGE = [
   '/preset --default  跟随 Host 默认',
 ].join('\n');
 const UNSAFE_DISPLAY_TEXT_GLOBAL = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+/gu;
-const LIST_SNAPSHOTS = new WeakMap();
-export const PRESET_LIST_SNAPSHOT_TTL_MS = 15 * 60_000;
-export const PRESET_LIST_SNAPSHOT_MAX_ENTRIES = 256;
+const LIST_SNAPSHOTS = createCommandListSnapshots();
+export const PRESET_LIST_SNAPSHOT_TTL_MS = COMMAND_LIST_TTL_MS;
+export const PRESET_LIST_SNAPSHOT_MAX_ENTRIES = COMMAND_LIST_MAX_ENTRIES;
 
 function commandResult(message) {
   return {
@@ -140,59 +141,13 @@ function formatUpdated(settings) {
   ].join('\n');
 }
 
-function stateSnapshots(state, { create = false } = {}) {
-  if ((typeof state !== 'object' || state === null) && typeof state !== 'function') return null;
-  let snapshots = LIST_SNAPSHOTS.get(state);
-  if (!snapshots && create) {
-    snapshots = new Map();
-    LIST_SNAPSHOTS.set(state, snapshots);
-  }
-  return snapshots ?? null;
-}
-
-function pruneExpiredSnapshots(snapshots, now) {
-  for (const [snapshotKey, snapshot] of snapshots) {
-    if (snapshot.expiresAt <= now) snapshots.delete(snapshotKey);
-  }
-}
-
-function saveSnapshot(state, key, items) {
-  const snapshots = stateSnapshots(state, { create: true });
-  if (!snapshots) return;
-  const now = Date.now();
-  pruneExpiredSnapshots(snapshots, now);
-  snapshots.delete(key);
-  snapshots.set(key, {
-    expiresAt: now + PRESET_LIST_SNAPSHOT_TTL_MS,
-    ids: items.map((item) => item.id),
-  });
-  while (snapshots.size > PRESET_LIST_SNAPSHOT_MAX_ENTRIES) {
-    const oldest = snapshots.keys().next();
-    if (oldest.done) break;
-    snapshots.delete(oldest.value);
-  }
-}
-
-function loadSnapshot(state, key) {
-  const snapshots = stateSnapshots(state);
-  const snapshot = snapshots?.get(key);
-  if (!snapshots || !snapshot) return null;
-  if (snapshot.expiresAt <= Date.now()) {
-    snapshots.delete(key);
-    return null;
-  }
-  snapshots.delete(key);
-  snapshots.set(key, snapshot);
-  return snapshot.ids;
-}
-
 function presetFromSnapshot(state, key, requested) {
   if (!/^\d+$/u.test(requested)) return { numeric: false, id: null };
   const index = Number(requested);
   if (!Number.isSafeInteger(index) || index < 1) {
     return { numeric: true, error: t('Agent Preset 序号无效，请先执行 /presetlist。') };
   }
-  const snapshot = loadSnapshot(state, key);
+  const snapshot = LIST_SNAPSHOTS.load(state, key);
   if (!snapshot) {
     return { numeric: true, error: t('请先执行 /presetlist，再按列表序号选择 Agent Preset。') };
   }
@@ -260,7 +215,7 @@ export async function runPresetCommand(text, harness, state, key, options = {}) 
     if (!/^\/(?:presetlist|presets)[ \t]*$/iu.test(command)) return commandResult(t(PRESET_LIST_USAGE));
     try {
       const current = await settings(harness, requestOptions);
-      saveSnapshot(state, key, current.agentPresetCatalog.items);
+      LIST_SNAPSHOTS.save(state, key, current.agentPresetCatalog.items.map((item) => item.id));
       return commandResult(formatList(current));
     } catch (error) {
       return commandResult(presetErrorMessage(error, 'list'));

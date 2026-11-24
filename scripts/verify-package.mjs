@@ -23,6 +23,7 @@ const required = [
   'lib/client.js',
   'bin/dsh-im.mjs',
   'cordis.patch.yml',
+  'scripts/verify-injected-context.mjs',
   'README.md',
   'README.en.md',
   'PROACTIVE_DELIVERY.md',
@@ -46,6 +47,8 @@ const required = [
   'plugin-src/host/channels/telegram/index.mjs',
   'plugin-src/host/channels/discord/index.mjs',
   'plugin-src/host/channels/whatsapp/index.mjs',
+  'plugin-src/host/channels/matrix/index.mjs',
+  'plugin-src/client/channels/matrix/index.js',
   'src/channels/feishu/feishu-runtime.mjs',
   'src/channels/weixin/weixin-runtime.mjs',
   'src/channels/dingtalk/dingtalk-runtime.mjs',
@@ -57,6 +60,8 @@ const required = [
   'src/channels/discord/discord-runtime.mjs',
   'src/channels/whatsapp/whatsapp-runtime.mjs',
   'src/channels/whatsapp/whatsapp-web-session.mjs',
+  'src/channels/matrix/matrix-runtime.mjs',
+  'src/channels/matrix/matrix-api.mjs',
   'src/channels/shared/context-enhancement.mjs',
   'src/channels/shared/group-history.mjs',
   'src/channels/shared/group-context-files.mjs',
@@ -145,25 +150,57 @@ if (client.includes('settings.plugins.tab') || clientSources.includes('settings.
   throw new Error('client source or bundle still contains the legacy Plugins-tab settings entry');
 }
 // Connections still have no channel-enable toggle. Checkable inputs are owned
-// only by the shared context editor, the Youdu group chat context editor, and the
-// saved-target Session sync row. The context editor contains one switch template
-// and one mapped field-input template; the group context editor adds one switch
-// template; the delivery target adds one ordinary checkbox template.
+// only by the shared context editor, the saved-target Session sync row, the
+// email settings, the Telegram thinking-traces block, Feishu panel settings,
+// the conversation-directory settings form, and the general Delivery tab.
+// The context editor contains one switch template and one mapped field-input
+// template; the delivery target adds one ordinary checkbox template; the
+// Telegram thinking-traces block adds two ordinary checkbox templates (traces
+// and frame numbering). General settings adds one mapped switch template for
+// the two Feishu panel preferences. Conversation-directory settings adds one
+// switch template reused for the bot override and channel default. The Delivery
+// tab adds one ordinary checkbox template mapped over its two switches (mirror
+// Web input, deliver model answers).
 const contextEditorSource = await readFile(resolve(root, 'plugin-src/client/context-enhancement.js'), 'utf8');
 const groupHistoryEditorSource = await readFile(resolve(root, 'plugin-src/client/group-history.js'), 'utf8');
 const deliverySettingsSource = await readFile(resolve(root, 'plugin-src/client/delivery-settings.js'), 'utf8');
+const emailSettingsSource = await readFile(resolve(root, 'plugin-src/client/channels/email/index.js'), 'utf8');
+const thinkingTracesSource = await readFile(resolve(root, 'plugin-src/client/channels/telegram/thinking-traces.js'), 'utf8');
+const botGeneralSettingsSource = await readFile(resolve(root, 'plugin-src/client/bot-general-settings.js'), 'utf8');
+const conversationDirectorySettingsSource = await readFile(resolve(root, 'plugin-src/client/channels/feishu/conversation-directory-settings.js'), 'utf8');
+const deliverySyncSettingsSource = await readFile(
+  resolve(root, 'plugin-src/client/delivery-sync-settings.js'),
+  'utf8',
+);
 const otherClientSources = clientSources
   .replace(contextEditorSource, '')
-  .replace(groupHistoryEditorSource, '')
-  .replace(deliverySettingsSource, '');
+  .replace(deliverySettingsSource, '')
+  .replace(emailSettingsSource, '')
+  .replace(thinkingTracesSource, '')
+  .replace(botGeneralSettingsSource, '')
+  .replace(conversationDirectorySettingsSource, '')
+  .replace(deliverySyncSettingsSource, '');
 if (/role:\s*["']switch|type:\s*["']checkbox/.test(otherClientSources)
   || (groupHistoryEditorSource.match(/role:\s*["']switch["']/g) ?? []).length !== 1
   || (groupHistoryEditorSource.match(/type:\s*["']checkbox["']/g) ?? []).length !== 1
   || (deliverySettingsSource.match(/type:\s*["']checkbox["']/g) ?? []).length !== 1
   || /role:\s*["']switch["']/u.test(deliverySettingsSource)
-  || (client.match(/role:\s*["']switch["']/g) ?? []).length !== 2
-  || (client.match(/type:\s*["']checkbox["']/g) ?? []).length !== 4) {
-  throw new Error('checkable inputs must be limited to context enhancement, group chat context, and Session sync');
+  || (thinkingTracesSource.match(/type:\s*["']checkbox["']/g) ?? []).length !== 2
+  || /role:\s*["']switch["']/u.test(thinkingTracesSource)
+  || (botGeneralSettingsSource.match(/type:\s*["']checkbox["']/g) ?? []).length !== 1
+  || (botGeneralSettingsSource.match(/role:\s*["']switch["']/g) ?? []).length !== 1
+  || (conversationDirectorySettingsSource.match(/type:\s*["']checkbox["']/g) ?? []).length !== 1
+  || (conversationDirectorySettingsSource.match(/role:\s*["']switch["']/g) ?? []).length !== 1
+  || (deliverySyncSettingsSource.match(/type:\s*["']checkbox["']/g) ?? []).length !== 1
+  || /role:\s*["']switch["']/u.test(deliverySyncSettingsSource)
+  || (client.match(/role:\s*["']switch["']/g) ?? []).length !== 3
+  || (client.match(/type:\s*["']checkbox["']/g) ?? []).length !== 8) {
+  throw new Error('checkable inputs must be limited to context enhancement, Session sync, email settings, Telegram thinking traces, Feishu panel settings, conversation-directory settings, and the Delivery tab');
+}
+for (const marker of ['bot.conversation-directory.set', 'bot.conversation-directory.default.set']) {
+  if (!host.includes(marker) || !client.includes(marker)) {
+    throw new Error(`conversation-directory RPC endpoint missing from Host or Client bundle: ${marker}`);
+  }
 }
 for (const marker of ['bot.context-enhancement.set', '<dsh_im_source>', '<dsh_im_source_guidance>']) {
   if (!host.includes(marker) || !client.includes(marker)) {
@@ -183,7 +220,7 @@ if (!client.includes('container-type: inline-size')
   || !client.includes('@container (max-width: 680px)')) {
   throw new Error('client bundle does not contain the narrow-panel DingTalk QR layout');
 }
-for (const marker of ['/feishu', '/weixin', '/dingtalk', '/wecom', '/qq', '/slack', '/telegram', '/discord', '/whatsapp']) {
+for (const marker of ['/feishu', '/weixin', '/dingtalk', '/wecom', '/qq', '/slack', '/telegram', '/discord', '/whatsapp', '/matrix']) {
   if (!host.includes(marker)) {
     throw new Error(`host bundle does not contain the internal ${marker} RPC provider`);
   }
@@ -223,7 +260,7 @@ const directDependencies = {
   '@tencent-connect/qqbot-nodejs': '1.0.4',
   '@wecom/aibot-node-sdk': '1.0.7',
   qrcode: '1.5.4',
-  undici: '7.29.0',
+  undici: '7.30.1',
 };
 for (const [name, version] of Object.entries(directDependencies)) {
   if (manifest.dependencies?.[name] !== version) {
@@ -255,10 +292,23 @@ if (/(?:from\s*|import\s*\(|require\s*\()\s*["'](?:@larksuiteoapi\/node-sdk|@whi
 if (!/(?:from\s*|import\s*\()\s*["']undici["']/.test(host)) {
   throw new Error('host bundle must retain undici as an external runtime dependency');
 }
-if ((executable.mode & 0o111) === 0) throw new Error('dsh-im CLI is not executable');
+if (process.platform !== 'win32' && (executable.mode & 0o111) === 0) {
+  throw new Error('dsh-im CLI is not executable');
+}
 if (/private-bot-token|must-be-rolled-back|DEEPSEEK_API_KEY=/.test(client + host)) {
   throw new Error('built artifacts contain a test or environment secret marker');
 }
-await import(pathToFileURL(resolve(root, 'lib/index.js')).href);
+const { createImHostPlugin } = await import(pathToFileURL(resolve(root, 'lib/index.js')).href);
+let deliveryApi;
+await createImHostPlugin().apply({
+  provide(name, service) {
+    if (name === 'dshIm') deliveryApi = service;
+  },
+  // Inspect the published service without starting channels or opening connections.
+  inject() {},
+});
+if (typeof deliveryApi?.createTarget !== 'function') {
+  throw new Error('host bundle must expose dshIm.createTarget; rebuild before publishing');
+}
 
 console.log('Verified dsh-im package artifacts.');

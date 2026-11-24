@@ -15,7 +15,11 @@ const externalRuntimePackages = [
   '@wecom/aibot-node-sdk',
   '@youdu/cli',
   'dingtalk-stream',
+  'imapflow',
+  'mailparser',
+  'nodemailer',
   'qrcode',
+  'sharp',
   'undici',
   'ws',
 ];

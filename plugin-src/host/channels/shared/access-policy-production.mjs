@@ -91,7 +91,7 @@ export function initialAccessPolicyFor(channel, config = {}) {
       group: allowlistScope(),
     });
   }
-  if (['dingtalk', 'wecom', 'wecom-app', 'slack', 'discord', 'imessage'].includes(key)) {
+  if (['dingtalk', 'wecom', 'wecom-app', 'slack', 'discord', 'imessage', 'matrix'].includes(key)) {
     return createAccessPolicy({ direct: openScope(), group: openScope() });
   }
   if (key === 'youdu') {
@@ -109,6 +109,19 @@ export function initialAccessPolicyFor(channel, config = {}) {
   throw new TypeError(`Unsupported access-policy channel: ${channel}`);
 }
 
+/**
+ * Seed newly connected bots after startup has migrated existing bots with
+ * initialAccessPolicyFor(). Open Feishu/QQ messages and commands in both chat
+ * types; workspace ensure() preserves any policy already saved.
+ */
+export function newBotAccessPolicyFor(channel, config = {}) {
+  const key = String(channel ?? '').trim().toLowerCase();
+  if (key === 'feishu' || key === 'qq') {
+    return createAccessPolicy({ direct: openScope(), group: openScope() });
+  }
+  return initialAccessPolicyFor(channel, config);
+}
+
 export function privilegedSenderIdsFor(channel, config = {}) {
   const key = String(channel ?? '').trim().toLowerCase();
   if (key === 'weixin') return cleanIds(config.ownerUserId);
@@ -122,6 +135,7 @@ export function privilegedSenderIdsFor(channel, config = {}) {
   if (key === 'qq') return cleanIds(config.ownerUserOpenid).filter((id) => id !== '*');
   if (key === 'youdu') return cleanIds(config.ownerUserId).filter((id) => id !== '*');
   if (key === 'whatsapp') return cleanIds(config.accountJid);
+  if (key === 'discord') return cleanIds(config.ownerUserId);
   return [];
 }
 

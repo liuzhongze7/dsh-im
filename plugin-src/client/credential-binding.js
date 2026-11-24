@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { h } from './i18n.js';
+import { channelName, h, localizeTemplate } from './i18n.js';
 
 function ActionIcon({ children }) {
   return h('svg', {
@@ -47,6 +47,7 @@ export function CredentialBindingPanel({
   error = null,
   onSubmit,
   onCancel,
+  children,
 }) {
   const [identity, setIdentity] = React.useState('');
   const [secret, setSecret] = React.useState('');
@@ -65,7 +66,9 @@ export function CredentialBindingPanel({
     className: 'ddt-card dim-surfaceCard dim-credentialPanel',
     'aria-labelledby': headingId,
   },
-  h('h3', { id: headingId, className: 'dim-credentialTitle' }, `手动接入${channel}机器人`),
+  h('h3', { id: headingId, className: 'dim-credentialTitle' },
+      localizeTemplate('手动接入{channel}机器人', { channel: channelName(channel) })),
+  children,
   h('form', {
     className: `dim-credentialForm${hasIdentity ? '' : ' dim-credentialFormSingle'}`,
     onSubmit: submit,

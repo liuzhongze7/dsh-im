@@ -16,6 +16,8 @@ import {
   outboundArtifactRegistry,
 } from '../../../src/channels/shared/semantic/artifact.mjs';
 import { WORKSPACE_SESSION_STALE } from '../../../src/channels/shared/workspace-session.mjs';
+import { setImHostLanguage } from '../../../src/channels/shared/i18n.mjs';
+import { classifyMessageFailure } from '../../../src/channels/shared/message-failure.mjs';
 
 const CATALOG = {
   groups: [{
@@ -199,7 +201,7 @@ test('HarnessClient rejects malformed model and run-state responses', async () =
   responses.set('session.selectModel', { selected: { provider: '', model: 'bad' } });
   await assert.rejects(
     client.selectSessionModel('session-one', { provider: 'p', model: 'm' }),
-    /invalid response for session\.selectModel/,
+    { code: 'harness-response-invalid', method: 'session.selectModel' },
   );
 
   await assert.rejects(
@@ -242,7 +244,7 @@ test('selectSessionModel holds the maintenance executor across its RPC', async (
   assert.equal(rpcOptions.signal.aborted, true, 'maintenance cancellation must abort the RPC');
 });
 
-function controlledTurn({ sessionId, initialEnd = false, controlExecutor } = {}) {
+function controlledTurn({ sessionId, initialEnd = false, controlExecutor, toolAfterText = false } = {}) {
   const id = sessionId ?? `session-${Math.random()}`;
   const calls = [];
   const admitted = deferred();
@@ -277,9 +279,12 @@ function controlledTurn({ sessionId, initialEnd = false, controlExecutor } = {})
         },
       } });
     }
+    if (answer && toolAfterText) {
+      events.push({ event: { seq: 4, type: 'tool/call', data: { turn: 7, name: 'bash' } } });
+    }
     if (ended) {
       events.push({ event: {
-        seq: 4,
+        seq: toolAfterText ? 5 : 4,
         type: 'turn/end',
         data: { turn: 7, reason: endReason },
       } });
@@ -287,6 +292,7 @@ function controlledTurn({ sessionId, initialEnd = false, controlExecutor } = {})
     return { events };
   };
   client.rpc = async (method, payload, _timeoutMs, options) => {
+    if (method === 'workspace.list') return { items: [], archivedSessionIds: [] };
     calls.push({ method, payload, options });
     if (method === 'session.history') {
       if (historyFailure) throw historyFailure;
@@ -322,8 +328,9 @@ test('HarnessClient preserves structured turn failures for channel classificatio
     [{ kind: 'error', error: { code: 'RATE_LIMIT', message: 'private provider detail' } },
       'harness-turn-failed', 'RATE_LIMIT'],
     [{ kind: 'max-tokens' }, 'model-max-tokens', undefined],
-    [{ kind: 'completed' }, 'model-empty-response', undefined],
-    ['completed', 'model-empty-response', undefined],
+    [{ kind: 'error', error: { code: 'EMPTY_RESPONSE' } },
+      'harness-turn-failed', 'EMPTY_RESPONSE'],
+    [null, 'harness-turn-failed', undefined],
     ['stopped', 'turn-interrupted', undefined],
   ]) {
     const turn = controlledTurn();
@@ -335,9 +342,38 @@ test('HarnessClient preserves structured turn failures for channel classificatio
       assert.equal(error.code, expectedCode);
       assert.equal(error.providerCode, expectedProviderCode);
       assert.equal(error.promptAccepted, true);
+      assert.deepEqual(error.details, {
+        sessionId: turn.id,
+        promptRpcId: turn.promptRpcId(),
+        baselineSeq: -1,
+        turn: 7,
+        lastSeq: 4,
+      });
+      if (expectedProviderCode === 'EMPTY_RESPONSE') {
+        assert.equal(classifyMessageFailure(error).code, 'MODEL_EMPTY_REPLY');
+      }
       assert.doesNotMatch(error.message, /private provider detail/);
       return true;
     });
+  }
+});
+
+test('HarnessClient returns a localized neutral reply for explicitly completed empty turns', async () => {
+  try {
+    for (const language of ['zh', 'en']) {
+      setImHostLanguage(language);
+      for (const reason of ['completed', { kind: 'completed' }]) {
+        const turn = controlledTurn();
+        const asking = turn.client.ask(turn.id, 'work', { timeoutMs: 2_000 });
+        await turn.admitted;
+        turn.finish({ reason, text: ' \n ' });
+        assert.equal(await asking, language === 'en'
+          ? 'This turn has ended with no text reply.'
+          : '本轮处理已结束，没有文本回复。');
+      }
+    }
+  } finally {
+    setImHostLanguage('zh');
   }
 });
 
@@ -428,9 +464,9 @@ test('control methods require exact owner identity, key, and Session before any 
 });
 
 test('a stopped turn returns partial text instead of a generic failure', async () => {
-  const turn = controlledTurn();
+  const turn = controlledTurn({ toolAfterText: true });
   const control = { owner: {}, key: 'direct:partial' };
-  const asking = turn.client.ask(turn.id, 'work', { control, timeoutMs: 2_000 });
+  const asking = turn.client.ask(turn.id, 'work', { control, timeoutMs: 2_000, finalAnswerOnly: true });
   await turn.admitted;
   assert.equal(await turn.client.stopActiveTurn(turn.id, control), true);
   turn.finish({ text: 'partial result' });
@@ -463,6 +499,7 @@ test('an accepted stop preserves partial text but never hands off a registered a
       ],
     },
   };
+  for (const event of agent.session.events) outboundArtifactRegistry.observeSessionEvent(agent.session, event);
   await writeFile(join(workspace, 'must-not-send.txt'), 'cancelled result');
   const tool = createOutboundArtifactTool({ registry: outboundArtifactRegistry });
   const exec = {
@@ -508,6 +545,7 @@ test('an accepted stop also discards a file-only result instead of handing it of
       ],
     },
   };
+  for (const event of agent.session.events) outboundArtifactRegistry.observeSessionEvent(agent.session, event);
   await writeFile(join(workspace, 'must-not-send.txt'), 'cancelled file-only result');
   const tool = createOutboundArtifactTool({ registry: outboundArtifactRegistry });
   const exec = {
@@ -611,7 +649,49 @@ test('a refused in-process control action never falls through to HTTP', async ()
   assert.equal(await asking, 'normal completion');
 });
 
-test('steer uses mode steer only while the exact owned turn is still active', async () => {
+for (const [name, value] of [
+  ['Shanghai', 'Asia/Shanghai'],
+  ['UTC', 'UTC'],
+  ['undefined', undefined],
+  ['empty', ''],
+  ['whitespace', '  '],
+  ['null', null],
+  ['non-string', 123],
+  ['constructor throws', new RangeError('unavailable time zone')],
+  ['resolvedOptions throws', new Error('unavailable options')],
+]) {
+  test(`queue and steer tolerate ${name} client time zone`, async (t) => {
+    t.mock.method(Intl, 'DateTimeFormat', () => {
+      if (value instanceof RangeError) throw value;
+      return { resolvedOptions() {
+        if (value instanceof Error) throw value;
+        return { timeZone: value };
+      } };
+    });
+    const turn = controlledTurn();
+    const control = { owner: {}, key: `time-zone:${name}` };
+    const asking = turn.client.ask(turn.id, 'work', { control, timeoutMs: 2_000 });
+    try {
+      await Promise.race([turn.admitted, asking]);
+      assert.equal(await turn.client.steerActiveTurn(turn.id, 'continue', control), true);
+      const prompts = turn.calls.filter(({ method }) => method === 'session.prompt');
+      assert.deepEqual(prompts.map(({ payload }) => payload.mode), ['queue', 'steer']);
+      const expected = typeof value === 'string' && value.trim() ? value : undefined;
+      for (const { payload } of prompts) {
+        assert.equal(Object.hasOwn(payload, 'clientTimeZone'), expected !== undefined);
+        if (expected !== undefined) assert.equal(payload.clientTimeZone, expected);
+      }
+    } finally {
+      turn.finish({ text: 'done', reason: 'completed' });
+      assert.equal(await asking, 'done');
+    }
+  });
+}
+
+test('steer uses mode steer only while the exact owned turn is still active', async (t) => {
+  t.mock.method(Intl, 'DateTimeFormat', () => ({
+    resolvedOptions: () => ({ timeZone: 'Asia/Shanghai' }),
+  }));
   const turn = controlledTurn();
   const control = { owner: {}, key: 'direct:steer' };
   const asking = turn.client.ask(turn.id, 'work', { control, timeoutMs: 2_000 });
@@ -629,7 +709,7 @@ test('steer uses mode steer only while the exact owned turn is still active', as
     sessionId: turn.id,
     mode: 'steer',
     content: [{ type: 'text', text: 'first line\nsecond line' }],
-    clientTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    clientTimeZone: 'Asia/Shanghai',
   });
   assert.equal(typeof steer.options.rpcId, 'string');
   assert.equal(

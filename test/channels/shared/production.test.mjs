@@ -37,7 +37,7 @@ test('token-channel production has no per-bot result-file Gate', async (t) => {
 
   const production = await createTokenProductionController({
     credentials: {},
-    apiProxy: {},
+    typertGateway: { invoke() {}, stream() {} },
     logger: () => ({ error() {}, warn() {}, info() {}, debug() {} }),
   }, { dataDir }, {
     ConfigStore,

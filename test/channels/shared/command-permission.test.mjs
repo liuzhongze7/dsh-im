@@ -11,6 +11,7 @@ test('isSharedLocalCommand matches existing local command families', () => {
     '/workspacelist', '/sessionlist', '/sessions /tmp', '/session 2',
     '/compact', '/models', '/model 2', '/reasonings', '/reasoning high',
     '/presetlist', '/preset default',
+    '/clear',
   ]) {
     assert.equal(isSharedLocalCommand(command), true, command);
   }
@@ -33,6 +34,7 @@ test('isSharedLocalCommand follows current media command routing', () => {
   assert.equal(isSharedLocalCommand('/workspace /tmp', { hasFiles: true }), false);
   assert.equal(isSharedLocalCommand('/stop', { hasImages: true }), true);
   assert.equal(isSharedLocalCommand('/stop', { hasFiles: true }), false);
+  assert.equal(isSharedLocalCommand('/clear', { hasFiles: true }), true);
 });
 
 test('evaluateInboundAccess always preserves an original owner privilege', () => {

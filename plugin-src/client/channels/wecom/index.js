@@ -1,10 +1,11 @@
+import { ConnectionError, normalizeConnectionError } from '../../connection-error.js';
 import { BotName } from '../../bot-alias.js';
 import * as React from 'react';
 
 import { WecomLogoGlyph } from '../../channel-logos.js';
 import { CredentialActionIcon, CredentialBindingPanel, QrActionIcon } from '../../credential-binding.js';
-import { CollapsibleAccountSection } from '../shared/collapsible-account.js';
-import { h } from '../../i18n.js';
+import { AccountSettingsToggle, CollapsibleAccountSection } from '../shared/collapsible-account.js';
+import { channelName, h, localizeTemplate } from '../../i18n.js';
 import { WorkspaceEditor } from '../../workspace-editor.js';
 import { ContextEnhancementEditor } from '../../context-enhancement.js';
 import {
@@ -81,14 +82,14 @@ function Heading({ totals, adding, busy, onAdd, onCredential, credentialOpen, ad
         }, h(CredentialActionIcon), credentialOpen ? '收起凭据' : '手动接入')),
       totals.configured > 0
         ? h('div', { className: 'ddt-badge dim-onlineBadge' },
-            h('span', null, `${totals.connected} / ${totals.configured} 在线`))
+            h('span', null, localizeTemplate('{connected} / {configured} 在线', { connected: totals.connected, configured: totals.configured })))
         : null));
 }
 
 function LoadingView() {
   return h('div', { className: 'ddt-card ddt-loading dim-surfaceCard dim-loadingView', 'aria-busy': 'true' },
     h('div', { className: 'ddt-spinner dim-spinner' }),
-    h('span', null, '正在读取企业微信机器人状态…'));
+    h('span', null, localizeTemplate('正在读取 {channel} 机器人状态…', { channel: channelName('企业微信') })));
 }
 
 function EmptyView({ busy, onStart }) {
@@ -150,7 +151,7 @@ function ProvisionView({ provision, busy, onRetry, onClose }) {
   return h('div', { className: 'ddt-card dim-surfaceCard' },
     h('div', { className: 'ddt-inlineError dim-inlineError', role: 'alert' },
       h('h3', null, '企业微信机器人没有绑定完成'),
-      h('p', null, error.message),
+      h(ConnectionError, { error: error }),
       h('span', { className: 'ddt-errorCode' }, error.code),
       h('div', { className: 'ddt-actions dim-viewActions' },
         h(Button, { kind: 'primary', onClick: onRetry, disabled: busy }, '重新生成二维码'),
@@ -159,7 +160,7 @@ function ProvisionView({ provision, busy, onRetry, onClose }) {
 
 function RemoveConfirmation({ account, busy, onConfirm, onCancel }) {
   return h('div', { className: 'ddt-confirm dim-confirm', role: 'alertdialog' },
-    h('strong', null, `从 DeepSeek Harness 移除“${account.bot.name}”？`),
+    h('strong', null, localizeTemplate('从 DeepSeek Harness 移除“{name}”？', { name: account.bot.name })),
     h('p', null, '这会停止消息连接，并删除本机保存的应用凭据、机器人配置及会话映射。企业微信平台中的机器人不会被自动删除。'),
     h('div', { className: 'ddt-actions dim-viewActions' },
       h(Button, { onClick: onCancel, disabled: busy }, '保留机器人'),
@@ -187,6 +188,13 @@ export function AccountCard({
   return h('article', { className: 'ddt-card dim-botCard', 'data-bot-id': account.botId },
     h('div', { className: 'ddt-cardBody dim-botCardBody' },
       h(CollapsibleAccountSection, {
+        settings: h(BotSettingsButton, {
+          channel: 'wecom',
+          botId: account.botId,
+          botName: account.bot.name,
+          connected: account.connected,
+          accessPolicy: account.accessPolicy,
+        }),
         id: `wec-settings-${account.botId.replace(/[^a-zA-Z0-9_-]/g, '-')}`,
         header: h('div', { className: 'ddt-accountTop dim-botCardTop' },
         h('div', { className: 'ddt-accountIdentity dim-botIdentity' },
@@ -207,13 +215,7 @@ export function AccountCard({
             lastCheckedAt: account.health.lastCheckedAt,
             formatCheckedTime: checkedTime,
           }),
-          h(BotSettingsButton, {
-            channel: 'wecom',
-            botId: account.botId,
-            botName: account.bot.name,
-            connected: account.connected,
-            accessPolicy: account.accessPolicy,
-          })))
+          h(AccountSettingsToggle)))
       },
         h(WorkspaceEditor, {
         workspace: account.workspace,
@@ -241,6 +243,7 @@ export function AccountCard({
             h(Button, { className: 'dim-cardAction', onClick: onReconnect, disabled: Boolean(busy) }, busy === 'reconnect' ? '检查中…' : account.connected ? '检查连接' : '重试连接'),
             h(Button, { className: 'dim-cardAction', kind: 'danger', onClick: onRequestRemove, disabled: Boolean(busy) }, '移除接入')),
           summary ? h('div', { className: 'ddt-summary dim-cardSummary' }, summary) : null,
+          account.error ? h(ConnectionError, { error: account.error, showMessage: false }) : null,
           account.lastMessageError ? h(LastMessageErrorSummary, {
             className: 'ddt-summary',
             error: account.lastMessageError,
@@ -258,6 +261,7 @@ export function AccountCard({
 }
 
 export function WecomSettingsTab({ rpcCall }) {
+  const [operationError, setOperationError] = React.useState(null);
   const [model, setModel] = React.useState({
     phase: 'loading', bots: [], totals: { configured: 0, connected: 0 }, error: null,
     agentPresetCatalog: EMPTY_AGENT_PRESET_CATALOG,
@@ -309,7 +313,16 @@ export function WecomSettingsTab({ rpcCall }) {
 
   const invoke = React.useCallback(async (endpoint, payload = {}, signal) => {
     if (typeof rpcCall !== 'function') throw new TypeError('企业微信设置页缺少 RPC 连接');
-    return unwrapRpcResult(await rpcCall(endpoint, payload, signal));
+    const operation = !['connection.status', 'provision.poll', 'provision.begin', 'provision.cancel'].includes(endpoint);
+      if (operation && mounted.current) setOperationError(null);
+      try {
+        const value = unwrapRpcResult(await rpcCall(endpoint, payload, signal));
+        if (operation && mounted.current) setOperationError(value?.testMessage?.error ?? value?.warnings?.[0] ?? null);
+        return value;
+      } catch (error) {
+        if (operation && mounted.current && !signal?.aborted && error?.name !== 'AbortError') setOperationError(normalizeConnectionError(error));
+        throw error;
+      }
   }, [rpcCall]);
 
   const loadStatus = React.useCallback(async ({ signal, silent = false, restore = false } = {}) => {
@@ -589,6 +602,7 @@ export function WecomSettingsTab({ rpcCall }) {
   }, h(AgentPresetCatalogContext.Provider, {
     value: model.agentPresetCatalog ?? EMPTY_AGENT_PRESET_CATALOG,
   }, h('section', { className: 'ddt-page dwecom-page dim-channelPage', 'aria-label': '企业微信设置' },
+    operationError ? h(ConnectionError, { error: operationError }) : null,
     h(Heading, {
       totals: model.totals,
       adding: Boolean(provision),
@@ -601,7 +615,7 @@ export function WecomSettingsTab({ rpcCall }) {
     h('div', { className: 'ddt-visuallyHidden', role: 'status', 'aria-live': 'polite' }, notice),
     model.phase === 'loading' ? h(LoadingView)
       : model.phase === 'error'
-        ? h('div', { className: 'ddt-card dim-surfaceCard' }, h('div', { className: 'ddt-inlineError dim-inlineError' }, h('h3', null, '无法读取企业微信机器人状态'), h('p', null, model.error?.message), h(Button, { onClick: () => void loadStatus() }, '重新读取')))
+        ? h('div', { className: 'ddt-card dim-surfaceCard' }, h('div', { className: 'ddt-inlineError dim-inlineError' }, h('h3', null, localizeTemplate('无法读取 {channel} 机器人状态', { channel: channelName('企业微信') })), h(ConnectionError, { error: model.error }), h(Button, { onClick: () => void loadStatus() }, '重新读取')))
         : h(React.Fragment, null,
             credentialView,
             provisionView,

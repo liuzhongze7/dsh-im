@@ -1,12 +1,14 @@
+import { isSessionNotFound } from './session-error.mjs';
 import { createDeferredDeliveryRegistry, extractCompletedTurnAnswer } from './deferred-delivery.mjs';
 import { t } from './i18n.mjs';
 import { channelDeliveryFailure } from './message-failure.mjs';
+import { PromptFailureTracker } from './prompt-failure-tracker.mjs';
 
 export function deferredOutcomeText(outcome) {
   if (outcome.found && outcome.text) return outcome.text;
   const reason = outcome.reason === 'stopped' ? t('已停止')
     : ['aborted', 'cancelled'].includes(outcome.reason) ? t('已中止')
-      : outcome.reason === 'failed' ? t('任务失败') : t('已结束');
+      : ['failed', 'error'].includes(outcome.reason) ? t('任务失败') : t('已结束');
   return t('后台任务已结束（{reason}），没有可推送的最终结果。', { reason });
 }
 
@@ -24,6 +26,7 @@ function orderedEvents(history) {
 export function createDeferredDeliveryCoordinator({
   harness, state, deliver, signal, logger = console,
   retryDelayMs = 1_000, pollDelayMs = 30_000, watch = true,
+  finalAnswerOnly = false,
 } = {}) {
   const enabled = ['deferredEntries', 'putDeferred', 'patchDeferred', 'removeDeferred']
     .every((name) => typeof state?.[name] === 'function');
@@ -82,7 +85,10 @@ export function createDeferredDeliveryCoordinator({
       const ordered = [...events.values()].sort((a, b) => a.seq - b.seq);
       if (targetTurn === null && entry.promptRpcId) {
         let openTurn = null;
+        const earlyFailure = new PromptFailureTracker(entry.promptRpcId, entry.afterSeq);
         for (const event of ordered) {
+          const failedTurn = earlyFailure.consume(event);
+          if (failedTurn !== null) { targetTurn = failedTurn; break; }
           if (event.type === 'turn/start') openTurn = event.data?.turn ?? null;
           if (event.type === 'user/message' && event.data?.source?.rpcId === entry.promptRpcId) {
             targetTurn = Number.isSafeInteger(event.data?.turn) ? event.data.turn : openTurn;
@@ -100,7 +106,7 @@ export function createDeferredDeliveryCoordinator({
       }
       const outcome = targetTurn === null
         ? { found: false, endSeq: -1, turn: null }
-        : extractCompletedTurnAnswer(ordered, { turn: targetTurn });
+        : extractCompletedTurnAnswer(ordered, { turn: targetTurn, finalAnswerOnly });
       const hasStart = ordered.some((event) => event.type === 'turn/start' && event.data?.turn === targetTurn);
       if (!history.hasMore || hasStart) return { ...outcome, turn: targetTurn };
       const oldest = batch[0]?.seq;
@@ -128,7 +134,7 @@ export function createDeferredDeliveryCoordinator({
           entry = { ...entry, turn: outcome.turn };
         }
         if (stopping) {
-          const session = harness.workspaceSession?.(entry.sessionId);
+          const session = harness.workspaceSession?.(entry.sessionId, entry.key);
           const stopped = typeof session?.stopDeferredTurn === 'function'
             ? await session.stopDeferredTurn({ turn: entry.turn, promptRpcId: entry.promptRpcId }, {
                 signal: activeSignal, isCurrent: () => bound(entry),
@@ -154,7 +160,7 @@ export function createDeferredDeliveryCoordinator({
       return 'delivered';
     } catch (error) {
       if (activeSignal.aborted) return 'none';
-      if (error?.code === 'session-not-found') { await remove(entry); return 'none'; }
+      if (isSessionNotFound(error?.code)) { await remove(entry); return 'none'; }
       const current = await pending(id);
       if (!current) return 'none';
       if (!sending) {

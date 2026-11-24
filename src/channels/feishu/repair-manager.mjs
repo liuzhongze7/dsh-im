@@ -76,7 +76,7 @@ export function assertCallbackRepairUrl(value, expectedAppId, domain = 'feishu')
  * shares RegistrationManager's polling/state implementation while fixing the
  * update manifest in one place so callers can add only the card callback, the
  * message-read scope needed to download user-sent media, the resource scope
- * needed to upload bot-sent images/files, the group bot-mention scope, and the
+ * needed to upload bot-sent images/files, group-message and bot-mention scopes, and the
  * Slash Command scopes for the native command panel, without adding unrelated scopes, events,
  * presets, or createOnly.
  */
@@ -85,7 +85,7 @@ export class CallbackRepairManager {
   #appId;
   #domain;
 
-  constructor({ registerApp, onCredentials, appId, domain = 'feishu' } = {}) {
+  constructor({ registerApp, onCredentials, appId, domain = 'feishu', diagnostics } = {}) {
     if (typeof registerApp !== 'function') throw new TypeError('registerApp is required');
     if (typeof onCredentials !== 'function') throw new TypeError('onCredentials is required');
     if (typeof appId !== 'string' || !appId.trim()) throw new TypeError('appId is required');
@@ -94,6 +94,7 @@ export class CallbackRepairManager {
     this.#appId = appId.trim();
     this.#domain = domain;
     this.#manager = new RegistrationManager({
+      diagnostics,
       registerApp: (options) => registerApp({
         ...options,
         onQRCodeReady: (info) => {
@@ -117,6 +118,7 @@ export class CallbackRepairManager {
             FEISHU_MESSAGE_READ_SCOPE,
             FEISHU_RESOURCE_SCOPE,
             'im:message.group_at_msg.include_bot:readonly',
+            'im:message.group_msg',
             ...SLASH_COMMAND_TENANT_SCOPES,
           ],
         },

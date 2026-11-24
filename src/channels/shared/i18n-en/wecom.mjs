@@ -1,5 +1,9 @@
 // English translations (wecom area). Keys are exact Chinese literals passed to t().
 export default {
+  '▣ 第 {segment} 段 · 任务仍在进行，继续见下一条 ↓':
+    '▣ Part {segment} · Task still running, continuing in the next message ↓',
+  '继续执行中…': 'Continuing…',
+  '仍在执行中…': 'Still working…',
   '/menu 或 /m  打开可点击的功能菜单': '/menu or /m  Open the interactive menu',
   '保持当前': 'Keep current',
   '会话': 'Session',
@@ -23,13 +27,16 @@ export default {
   '暂无可用选项。': 'No options are available.',
   '预设仅用于之后的新会话。': 'Presets apply to future new sessions.',
   '部分模型暂不可用，可稍后重试。': 'Some models are unavailable. Try again later.',
-  '工作区已变化，请从新菜单重新选择。': 'The workspace changed. Please select again from the new menu.',
+  '工作区已变化，请发送 /m 重新打开菜单后选择。': 'The workspace changed. Send /m to reopen the menu and select again.',
   // Help text (wecom-bridge.mjs)
   '企业微信机器人已连接 DeepSeek Harness。': 'The Enterprise WeChat bot is connected to DeepSeek Harness.',
 
   // Bot replies and status text (wecom-bridge.mjs)
 
   '当前待处理图片较多，请稍后重新发送。': 'Too many images are pending. Please send them again later.',
+  '图片 {indexes} 来自当前消息。': 'Images {indexes} are from the current message.',
+  '图片 {indexes} 来自被引用消息。图片序号与本轮附件清单一致。': 'Images {indexes} are from the quoted message. Image numbers match the attachment list for this turn.',
+  '有 {count} 张引用图片未提供可下载资源，未附上这些图片；需要看图时请用户重新发送。': '{count} quoted images have no downloadable resource and are not attached. Ask the user to send them again if needed.',
 
   '结果文件「{name}」已生成，但企业微信智能机器人缺少素材上传或文件消息能力，请检查机器人权限。': 'The result file "{name}" was generated, but the Enterprise WeChat bot lacks media upload or file message capability. Please check the bot permissions.',
   '结果文件「{name}」超过当前企业微信机器人可发送的文件大小，未发送。': 'The result file "{name}" exceeds the file size this Enterprise WeChat bot can send and was not sent.',
