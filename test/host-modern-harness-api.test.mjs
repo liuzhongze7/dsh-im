@@ -14,12 +14,43 @@ function asyncValues(...values) {
   };
 }
 
+/**
+ * Mirror the Host gateway contract: `InvokeRemoteRequest.peer` is required and
+ * the gateway reads `peer.signal`, so a request without one fails exactly like
+ * the production Host does (`Cannot read properties of undefined`).
+ */
+function requirePeer(request) {
+  if (!request?.peer || !request.peer.signal) {
+    throw new TypeError("Cannot read properties of undefined (reading 'signal')");
+  }
+  return request;
+}
+
 function fakeContext(gateway) {
   const listeners = new Map();
   const root = {};
+  const peers = [];
+  const connection = {
+    createPeer(options) {
+      assert.equal(options?.principal?.kind, 'owner');
+      const peer = {
+        id: `peer-${peers.length + 1}`,
+        principal: options.principal,
+        interactions: options.interactions ?? 'answer',
+        signal: new AbortController().signal,
+        dispose: async () => {},
+      };
+      peers.push(peer);
+      return peer;
+    },
+  };
   const ctx = {
     root,
-    typertGateway: gateway,
+    typertGateway: {
+      invoke: (request) => gateway.invoke(requirePeer(request)),
+      stream: (request) => gateway.stream(requirePeer(request)),
+    },
+    connection,
     on(event, listener) {
       const entries = listeners.get(event) ?? [];
       entries.push(listener);
@@ -32,6 +63,8 @@ function fakeContext(gateway) {
   };
   return {
     ctx,
+    connection,
+    peers,
     emit(event, ...args) {
       for (const listener of [...(listeners.get(event) ?? [])]) listener(...args);
     },
@@ -159,7 +192,8 @@ test('modern adapter maps the narrow legacy API without changing HarnessClient',
       throw new Error(`unexpected stream ${endpoint}`);
     },
   };
-  const { ctx } = fakeContext(gateway);
+  const fixture = fakeContext(gateway);
+  const { ctx } = fixture;
   const first = harnessConnection(ctx);
   const second = harnessConnection(ctx);
   assert.equal(first.apiProxy, second.apiProxy);
@@ -167,6 +201,12 @@ test('modern adapter maps the narrow legacy API without changing HarnessClient',
 
   const workspace = await first.apiProxy.workspace.list({ rpcId: 'workspace-list', payload: {} });
   assert.equal(workspace.result.value.items[0].path, '/workspace');
+
+  // Every gateway call must carry the one in-process Peer the Host requires.
+  assert.equal(fixture.peers.length, 1);
+  assert.equal(fixture.peers[0].interactions, 'none');
+  const workspaceCall = calls.find((call) => call.namespace === 'workspace' && call.method === 'follow');
+  assert.equal(workspaceCall.peer, fixture.peers[0]);
 
   const history = await first.apiProxy.sessions.history({
     rpcId: 'history-one', payload: { sessionId: 'session', maxMessages: 50 },
@@ -205,6 +245,22 @@ test('modern adapter maps the narrow legacy API without changing HarnessClient',
   assert.deepEqual(renameCall.args, {
     request: { sessionId: 'session', title: '订单查询' },
   });
+  for (const call of calls) assert.equal(call.peer, fixture.peers[0]);
+});
+
+test('modern adapter explains a Host that cannot create an in-process Peer', async () => {
+  const { ctx } = fakeContext({
+    async invoke() { throw new Error('unused'); },
+    async stream() { throw new Error('unused'); },
+  });
+  delete ctx.connection;
+  const client = new HarnessClient({ apiProxy: modernHarnessApi(ctx), workspace: '/workspace' });
+  await assert.rejects(
+    () => client.rpc('session.list'),
+    (error) => error instanceof HarnessRpcError
+      && error.code === 'internal'
+      && error.message.includes('requires a Host connection that exposes createPeer'),
+  );
 });
 
 test('modern adapter preserves Typert business failures as Harness RPC errors', async () => {

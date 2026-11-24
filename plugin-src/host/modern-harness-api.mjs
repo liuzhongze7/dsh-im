@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { hasActiveHarnessInteractionOwner } from '../../src/channels/shared/harness-client.mjs';
+import { hostPeer } from './in-process-peer.mjs';
 
 const modernApis = new WeakMap();
 
@@ -36,11 +37,12 @@ function rpcResult(request, operation) {
   );
 }
 
-function remoteRequest(namespace, method, args, signal) {
+function remoteRequest(namespace, method, args, signal, peer) {
   return {
     namespace,
     method,
     args,
+    peer,
     ...(signal === undefined ? {} : { signal }),
   };
 }
@@ -194,6 +196,7 @@ class MuxSubscription {
 }
 
 class ModernHarnessApi {
+  #ctx;
   #gateway;
   #scope;
   #mux = new Set();
@@ -205,6 +208,7 @@ class ModernHarnessApi {
   #disposed = false;
 
   constructor(ctx, gateway, scope) {
+    this.#ctx = ctx;
     this.#gateway = gateway;
     this.#scope = scope;
 
@@ -282,8 +286,18 @@ class ModernHarnessApi {
     }
   }
 
+  /**
+   * The in-process Peer every gateway call speaks through. The Host's gateway
+   * requires one on each request (`InvokeRemoteRequest.peer`) and reads its
+   * lifetime signal, so a request without it fails inside the Host with
+   * `Cannot read properties of undefined (reading 'signal')`.
+   */
+  #requestPeer() {
+    return hostPeer(this.#ctx);
+  }
+
   async #invoke(namespace, method, args, signal) {
-    return this.#gateway.invoke(remoteRequest(namespace, method, args, signal));
+    return this.#gateway.invoke(remoteRequest(namespace, method, args, signal, this.#requestPeer()));
   }
 
   async #streamFirst(namespace, method, args, signal) {
@@ -294,7 +308,7 @@ class ModernHarnessApi {
     let iterator;
     try {
       const source = await this.#gateway.stream(remoteRequest(
-        namespace, method, args, streamSignal,
+        namespace, method, args, streamSignal, this.#requestPeer(),
       ));
       iterator = source[Symbol.asyncIterator]();
       const first = await iterator.next();
