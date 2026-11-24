@@ -207,6 +207,7 @@ export async function askInWorkspaceSession({
         return { sessionId, session };
       });
       if (!binding) continue;
+      if (onSessionReady) await onSessionReady(binding);
       diagnostic.sessionId = binding.sessionId;
       if (binding.recovered) {
         await onNotice?.(t('绑定会话的日志已损坏，已切换到新会话并继续处理本条消息。原会话记录已保留，历史上下文不会自动带入。'));

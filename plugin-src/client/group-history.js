@@ -7,7 +7,7 @@ import {
   normalizeGroupHistoryConfig,
   validateGroupHistoryConfig,
 } from '../../src/channels/shared/group-history.mjs';
-import { h } from './i18n.js';
+import { h, localizeTemplate } from './i18n.js';
 
 const TITLE = '群聊上下文';
 const SAVE_ERROR = '群聊上下文保存失败，请重试。';
@@ -26,7 +26,7 @@ const HELP = Object.freeze({
 export function groupHistoryLabel(config) {
   const normalized = normalizeGroupHistoryConfig(config);
   if (!groupHistoryActive(normalized)) return '未开启';
-  return `开启 · 最近 ${normalized.limit} 条`;
+  return localizeTemplate('开启 · 最近 {limit} 条', { limit: normalized.limit });
 }
 
 /** 只接受非负整数字面量；空、小数、负数与非数字交给严格校验报错。 */

@@ -281,7 +281,7 @@ test('email delivery creates and sends explicit recipients without inferring Ses
   });
   assert.deepEqual(await adapter.sendText(botId, listed, 'hello'), { sent: true });
   assert.deepEqual(calls, [[botId, target, 'hello', {}]]);
-  assert.throws(() => adapter.createTarget(botId, {
+  await assert.rejects(adapter.createTarget(botId, {
     targetId: 'invalid', kind: 'user', route: { address: '<m1@mail.example>' },
   }), { code: 'invalid-target' });
 });

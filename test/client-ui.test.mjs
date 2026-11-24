@@ -297,9 +297,9 @@ test('IM settings renders twelve IM channels plus the AI Office connector', asyn
   assert.match(markup, /dim-logoOffice/);
   assert.match(styles, /\.dim-logoFeishu svg \{ width: 28px; height: 28px; \}/);
   // This render's `emailRpcCall` never reports the channel as
-  // enabled, so the mailbox entry point is omitted: twelve IM channels plus the
+  // enabled, so the mailbox entry point is omitted: thirteen IM channels plus the
   // AI Office connector. The email tab is covered separately below.
-  assert.equal((markup.match(/role="tab"/g) ?? []).length, 13);
+  assert.equal((markup.match(/role="tab"/g) ?? []).length, 14);
   assert.equal((markup.match(/aria-selected="true"/g) ?? []).length, 1);
   assert.doesNotMatch(markup, /role="switch"|type="checkbox"/);
   assert.doesNotMatch(markup, /dim-chevron|扫码绑定<\/small>|扫码接入<\/small>/);

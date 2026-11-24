@@ -11,6 +11,7 @@ const CHANNELS = new Set([
   'telegram',
   'discord',
   'whatsapp',
+  'youdu',
   'imessage',
   'matrix',
 ]);
@@ -128,6 +129,11 @@ export function deliverySuggestionFromConversationKey(channel, key) {
       return discordSuggestion(key);
     case 'whatsapp':
       return whatsappSuggestion(key);
+    case 'youdu':
+      return simpleSuggestion(key, [
+        ['direct', 'user', 'chatId'],
+        ['group', 'group', 'chatId'],
+      ]);
     case 'imessage': {
       const chatGuid = key.startsWith('direct:') ? key.slice('direct:'.length) : '';
       // Older iMessage runtimes recorded every conversation as direct. Its
@@ -160,6 +166,7 @@ export function privateDeliverySuggestionFromConversationKey(channel, key) {
     telegram: 'direct',
     discord: 'direct',
     whatsapp: 'direct',
+    youdu: 'direct',
     imessage: 'direct',
     matrix: 'dm',
   }[channel];

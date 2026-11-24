@@ -39,7 +39,7 @@ test('Youdu production injects a file ingress executor for inbound attachments',
   };
   const ctx = {
     credentials: {},
-    apiProxy: {},
+    typertGateway: { invoke() {}, stream() {} },
     logger: () => ({ error() {}, warn() {}, info() {}, debug() {} }),
   };
 
@@ -118,7 +118,7 @@ test('Youdu production exposes a delivery adapter that only owns configured bots
   class Runtime {}
   const ctx = {
     credentials: {},
-    apiProxy: {},
+    typertGateway: { invoke() {}, stream() {} },
     logger: () => ({ error() {}, warn() {}, info() {}, debug() {} }),
   };
 
@@ -236,7 +236,7 @@ test('Youdu production hands each runtime a live group history provider', async 
       async set() {},
       async unset() {},
     },
-    apiProxy: {},
+    typertGateway: { invoke() {}, stream() {} },
     logger: () => ({ error() {}, warn() {}, info() {}, debug() {} }),
   };
 
@@ -306,7 +306,7 @@ test('Youdu production stages group context attachments inside the bot workspace
       async set() {},
       async unset() {},
     },
-    apiProxy: {},
+    typertGateway: { invoke() {}, stream() {} },
     logger: () => ({ error() {}, warn() {}, info() {}, debug() {} }),
   };
 
@@ -383,7 +383,7 @@ test('Youdu production rejects inbound staging without a workspace', async (t) =
   class Runtime {}
   const ctx = {
     credentials: {},
-    apiProxy: {},
+    typertGateway: { invoke() {}, stream() {} },
     logger: () => ({ error() {}, warn() {}, info() {}, debug() {} }),
   };
 
@@ -450,7 +450,7 @@ test('removing a Youdu bot also drops its delivery targets', async (t) => {
       async set(ref, value) { secrets.set(ref, value); },
       async unset(ref) { secrets.delete(ref); },
     },
-    apiProxy: {},
+    typertGateway: { invoke() {}, stream() {} },
     logger: () => ({ error() {}, warn() {}, info() {}, debug() {} }),
   };
 

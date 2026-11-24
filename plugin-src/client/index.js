@@ -486,6 +486,8 @@ export function IMSettingsTab({
                         ? h(DiscordSettingsTab, { rpcCall: rpcCalls.discordRpcCall })
                         : active.id === 'whatsapp'
                           ? h(WhatsappSettingsTab, { rpcCall: rpcCalls.whatsappRpcCall })
+                          : active.id === 'youdu'
+                            ? h(YouduSettingsTab, { rpcCall: rpcCalls.youduRpcCall })
                           : active.id === 'imessage'
                             ? h(IMessageSettingsTab, { rpcCall: rpcCalls.imessageRpcCall })
                           : active.id === 'email'
@@ -585,6 +587,8 @@ export function apply(ctx) {
     managementRpc(ctx.connection, DISCORD_RPC_CHANNEL, endpoint, payload, signal);
   const whatsappRpcCall = (endpoint, payload, signal) =>
     managementRpc(ctx.connection, WHATSAPP_RPC_CHANNEL, endpoint, payload, signal);
+  const youduRpcCall = (endpoint, payload, signal) =>
+    managementRpc(ctx.connection, YOUDU_RPC_CHANNEL, endpoint, payload, signal);
   const imessageRpcCall = (endpoint, payload, signal) =>
     managementRpc(ctx.connection, IMESSAGE_RPC_CHANNEL, endpoint, payload, signal);
   const emailRpcCall = (endpoint, payload, signal) =>
@@ -625,6 +629,7 @@ export function apply(ctx) {
     wecomAppRpcCall,
     weixinRpcCall,
     whatsappRpcCall,
+    youduRpcCall,
     imessageRpcCall,
     officeRpcCall,
     emailRpcCall,

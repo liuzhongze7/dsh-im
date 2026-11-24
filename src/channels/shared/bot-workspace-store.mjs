@@ -2911,16 +2911,8 @@ export function createWorkspaceAwareController(controller, {
           throw unavailableModelCatalog();
         }
       }
-      const entry = modelCatalogEntry(catalog, model);
-      if (model && (!modelCatalog || !entry)) {
-        throw unavailableModel();
-      }
-      if (model?.reasoningEffort !== undefined
-        && !entry.reasoning?.efforts.some((effort) => effort.id === model.reasoningEffort)) {
-        const error = new Error('当前模型不支持所选思考强度，请重新选择。');
-        error.code = 'model-reasoning-unavailable';
-        throw error;
-      }
+      const failure = modelSelectionError(catalog, model);
+      if (failure) throw failure;
       await workspaces.setModel(botId, model, { incarnation });
       return decorateResult(
         workspaces,

@@ -1,6 +1,6 @@
 import * as React from 'react';
 
-import { h, isEnglish } from '../../i18n.js';
+import { h, imLocale, isEnglish, localizeTemplate, localizeText } from '../../i18n.js';
 import youduLogo from './youdu-logo.js';
 import { CredentialActionIcon } from '../../credential-binding.js';
 import {
@@ -93,9 +93,17 @@ function accessSceneSummary(sceneValue, sceneLabel) {
     ? (sceneValue?.allowlist?.users ?? [])
     : (sceneValue?.open?.commandPermissionOverrides ?? []);
   const command = sceneValue?.mode === 'allowlist'
-    ? (users.length === 0 ? '仅白名单用户可发消息' : `${users.length} 个白名单用户`)
-    : (sceneValue?.open?.defaultCanExecuteCommands === false ? '命令默认关闭' : '命令默认开启');
-  return `${sceneLabel}：${mode}（${command}）`;
+    ? (users.length === 0
+      ? localizeText('仅白名单用户可发消息')
+      : localizeTemplate('{count} 个白名单用户', { count: users.length }))
+    : (sceneValue?.open?.defaultCanExecuteCommands === false
+      ? localizeText('命令默认关闭')
+      : localizeText('命令默认开启'));
+  return localizeTemplate('{scene}：{mode}（{command}）', {
+    scene: localizeText(sceneLabel),
+    mode: localizeText(mode),
+    command,
+  });
 }
 
 function accessSummaryText(policy) {
@@ -189,10 +197,12 @@ function groupAccessSummary(account) {
   const counts = { open: 0, allowlist: 0, disabled: 0, inherit: 0 };
   for (const [, rule] of entries) counts[rule.mode] = (counts[rule.mode] ?? 0) + 1;
   const parts = [];
-  if (counts.allowlist) parts.push(`${counts.allowlist} 个群仅名单内用户`);
-  if (counts.open) parts.push(`${counts.open} 个群允许所有人`);
-  if (counts.disabled) parts.push(`${counts.disabled} 个群被忽略`);
-  return parts.length > 0 ? parts.join('，') : '未按群配置（所有群沿用群聊访问设置）';
+  if (counts.allowlist) parts.push(localizeTemplate('{count} 个群仅名单内用户', { count: counts.allowlist }));
+  if (counts.open) parts.push(localizeTemplate('{count} 个群允许所有人', { count: counts.open }));
+  if (counts.disabled) parts.push(localizeTemplate('{count} 个群被忽略', { count: counts.disabled }));
+  return parts.length > 0
+    ? parts.join(imLocale() === 'zh' ? '，' : ', ')
+    : '未按群配置（所有群沿用群聊访问设置）';
 }
 
 function GroupAccessEditor({ account, rpcCall, onSaved, disabled }) {
@@ -286,8 +296,8 @@ function GroupAccessEditor({ account, rpcCall, onSaved, disabled }) {
                     h('code', { title: row.chatId }, row.chatId),
                     h('span', { className: 'ydt-groupAccessMeta' },
                       row.observed
-                        ? `${row.messages} 条消息`
-                          + (row.lastSeenAt ? ' · 最近 ' + checkedTime(row.lastSeenAt) : '')
+                        ? localizeTemplate('{count} 条消息', { count: row.messages })
+                          + (row.lastSeenAt ? localizeText(' · 最近 ') + checkedTime(row.lastSeenAt) : '')
                         : '手动添加')),
                   h('select', {
                     className: 'ydt-groupAccessMode',
@@ -383,7 +393,7 @@ function ConnectionEditor({ account, disabled, onSave, onCancel }) {
     field('服务器地址', {
       value: host,
       onChange: (e) => setHost(e.target.value),
-      placeholder: `留空表示不修改（当前 ${masked}）`,
+      placeholder: localizeTemplate('留空表示不修改（当前 {value}）', { value: masked }),
       maxLength: 256,
     }),
     field('机器人 secret', {
@@ -463,7 +473,7 @@ function PageError({ error, onRetry }) {
 
 function RemoveConfirmation({ account, busy, onConfirm, onCancel }) {
   return h('div', { className: 'ddt-confirm dim-confirm', role: 'alertdialog' },
-    h('strong', null, `从 DeepSeek Harness 移除“${account.bot.name}”？`),
+    h('strong', null, localizeTemplate('从 DeepSeek Harness 移除“{name}”？', { name: account.bot.name })),
     h('p', null, '这会停止消息连接，并删除本机保存的凭据、机器人配置及会话映射。有度平台中的机器人不会被自动删除。'),
     h('div', { className: 'ddt-actions dim-viewActions' },
       h(Button, { onClick: onCancel, disabled: busy }, '保留机器人'),
@@ -740,7 +750,7 @@ export function YouduSettingsTab({ rpcCall }) {
       // 单个机器人的操作失败只在这张卡片内联提示，不把整页打成错误视图。
       setFeedbackByBot((current) => ({
         ...current,
-        [botIdValue]: `操作失败：${presentError(cause).message}`,
+        [botIdValue]: localizeTemplate('操作失败：{error}', { error: presentError(cause).message }),
       }));
     }
   };
@@ -757,7 +767,7 @@ export function YouduSettingsTab({ rpcCall }) {
     } catch (cause) {
       setFeedbackByBot((current) => ({
         ...current,
-        [bot.botId]: `保存失败：${presentError(cause).message}`,
+        [bot.botId]: localizeTemplate('保存失败：{error}', { error: presentError(cause).message }),
       }));
     } finally {
       setBusyFor(bot.botId, false);
@@ -904,7 +914,7 @@ export function YouduSettingsTab({ rpcCall }) {
 
     model.statusError && model.phase === 'ready'
       ? h('div', { className: 'dim-statusNotice', role: 'alert' },
-          h('span', null, `状态刷新失败：${model.statusError.message}`),
+          h('span', null, localizeTemplate('状态刷新失败：{error}', { error: localizeText(model.statusError.message) })),
           h(Button, { size: 'small', onClick: () => refresh({ silent: true }) }, '立即重试'))
       : null,
 

@@ -30,4 +30,6 @@ export default {
     'This bot has no configured owner, so the command is unavailable.'
     + ' Set ownerUserId on the settings page and try again.',
   '有度机器人': 'Youdu bot',
+  '/session Session ID 或当前工作区序号  将当前聊天绑定到指定会话':
+    '/session Session ID or current workspace index  Bind this chat to the given session',
 };

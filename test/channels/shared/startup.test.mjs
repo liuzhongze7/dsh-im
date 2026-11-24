@@ -216,7 +216,10 @@ test('the composed host serves other real channels while Feishu is loading and a
   try {
     // Allow Cordis to enter its activation callback; Feishu stays gated.
     await new Promise(setImmediate);
-    assert.equal(f.routes.size, channels.length + 2);
+    // One route per fixture channel, the Youdu route (it mounts through
+    // installProductionChannel but is not part of this fixture's channel list), the
+    // sidebar route, and the iMessage route (its own apply, kept out of the list).
+    assert.equal(f.routes.size, channels.length + 3);
     assert.equal(f.routes.has('/dsh-im-sidebar'), true);
     await allLoaded.promise;
     assert.equal((await f.call('feishu')).error.code, 'feishu-initializing');

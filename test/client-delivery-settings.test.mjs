@@ -136,7 +136,7 @@ test('delivery settings define the supported IM and email channel routes', () =>
   assert.equal(DELIVERY_RPC_CHANNEL, '/dsh-im-delivery');
   assert.deepEqual(Object.keys(DELIVERY_CHANNEL_DEFINITIONS), [
     'weixin', 'feishu', 'dingtalk', 'wecom', 'wecomApp', 'qq',
-    'slack', 'telegram', 'discord', 'whatsapp', 'imessage', 'email',
+    'slack', 'telegram', 'discord', 'whatsapp', 'youdu', 'imessage', 'email',
   ]);
   assert.deepEqual(
     DELIVERY_CHANNEL_DEFINITIONS.feishu.fields.user.map((field) => field.key),

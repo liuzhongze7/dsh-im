@@ -189,3 +189,15 @@ export function EmailLogoGlyph({ size } = {}) {
   },
   h('path', { fill: 'currentColor', d: 'M3.2 5.6h17.6c.66 0 1.2.54 1.2 1.2v10.4c0 .66-.54 1.2-1.2 1.2H3.2A1.2 1.2 0 0 1 2 17.2V6.8c0-.66.54-1.2 1.2-1.2Zm.9 1.7v.28L12 12.3l7.9-4.72V7.3H4.1Zm15.8 2.02-7.42 4.43a1 1 0 0 1-1.06 0L4.1 9.32v7.78h15.8V9.32Z' }));
 }
+
+export function YouduLogoGlyph({ size = 32 } = {}) {
+  return h('img', {
+    src: youduLogo,
+    // 品牌图标是位图（其余渠道为内联 SVG），父节点已 aria-hidden，空 alt 避免英文界面出现中文。
+    alt: '',
+    width: size,
+    height: size,
+    'data-im-channel-logo': 'youdu',
+    style: { objectFit: 'contain', verticalAlign: 'middle' },
+  });
+}

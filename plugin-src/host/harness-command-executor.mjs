@@ -24,7 +24,7 @@ export function createHarnessCommandExecutor(ctx, provided) {
       ...(peer === undefined ? {} : { peer }),
     };
     try {
-      return await invoke(request);
+      return await gateway.invoke(request);
     } catch (error) {
       // Host versions use no attachments, images, or submittedAttachments.
       // Adapt only exact descriptor rejections before command dispatch, so
@@ -43,7 +43,7 @@ export function createHarnessCommandExecutor(ctx, provided) {
         throw error;
       }
       options.signal?.throwIfAborted();
-      return invoke({
+      return gateway.invoke({
         ...request,
         args,
       });

@@ -23,6 +23,7 @@ import whatsapp from './i18n-en/whatsapp.mjs';
 import matrix from './i18n-en/matrix.mjs';
 import office from './i18n-en/office.mjs';
 import email from './i18n-en/email.mjs';
+import youdu from './i18n-en/youdu.mjs';
 
 export const EN = Object.freeze(Object.assign(
   {},
@@ -46,4 +47,5 @@ export const EN = Object.freeze(Object.assign(
   matrix,
   office,
   email,
+  youdu,
 ));

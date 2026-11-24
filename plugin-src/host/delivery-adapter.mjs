@@ -335,6 +335,7 @@ export function createDeliveryAdapter({
   workspaces,
   coreController,
   stateFor,
+  resolveTarget,
   stateForSync = null,
   dsBot,
 }) {
@@ -348,6 +349,18 @@ export function createDeliveryAdapter({
   if (typeof stateFor !== 'function') {
     throw new TypeError('delivery adapter requires a bot state getter');
   }
+  if (resolveTarget !== undefined && typeof resolveTarget !== 'function') {
+    throw new TypeError('delivery adapter resolveTarget must be a function');
+  }
+  // 渠道自己的目标解析（例如有度允许填昵称/群名）：只接管 route，返回权威 ID。
+  // 未提供钩子的渠道行为完全不变。
+  const settledTarget = async (botId, target) => {
+    if (typeof resolveTarget !== 'function') return target;
+    if (target?.route === undefined) return target;
+    const route = await resolveTarget(botId, target);
+    if (route === undefined || route === null) return target;
+    return { ...target, route };
+  };
   const syncTarget = async (botId, targetId, sessionId, { allowParts = true, privateOnly = false } = {}) => {
     const configured = configuredSessionSyncTargets(workspaces, botId).find((entry) => entry.targetId === targetId);
     const target = sessionSyncTarget(channel, workspaces, configured);
@@ -566,7 +579,12 @@ export function createDeliveryAdapter({
       if (typeof coreController.sendProactiveText !== 'function') {
         throw new TypeError('delivery controller cannot send proactive text');
       }
-      const result = await coreController.sendProactiveText(botId, normalized, text, options);
+      const result = await coreController.sendProactiveText(
+        botId,
+        await settledTarget(botId, normalized),
+        text,
+        options,
+      );
       return options.receipt === true ? result : { sent: true };
     },
     async setSessionSync(botId, targetId, enabled) {

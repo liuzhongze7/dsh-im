@@ -18,42 +18,10 @@ const PRODUCTION_FILES = [
   'plugin-src/host/channels/slack/production.mjs',
   'plugin-src/host/channels/shared/production.mjs',
   'plugin-src/host/channels/whatsapp/production.mjs',
-  'plugin-src/host/channels/youdu/production.mjs',
 ];
 
 function state(sessionId = 'session-one') {
   return { sessionFor: () => sessionId };
-}
-
-/**
- * Build a Host context whose gateway exposes the real contract: every request
- * must name the in-process Peer, exactly as the Host gateway requires.
- */
-function hostContext(gateway) {
-  const peers = [];
-  const ctx = {
-    typertGateway: {
-      invoke(request) {
-        if (!request?.peer || !request.peer.signal) {
-          throw new TypeError("Cannot read properties of undefined (reading 'signal')");
-        }
-        return gateway.invoke(request);
-      },
-    },
-    connection: {
-      createPeer(options) {
-        const peer = {
-          id: `peer-${peers.length + 1}`,
-          ...options,
-          signal: new AbortController().signal,
-          dispose: async () => {},
-        };
-        peers.push(peer);
-        return peer;
-      },
-    },
-  };
-  return { ctx, peers };
 }
 
 function legacyImagesArgumentError(overrides = {}) {
@@ -173,11 +141,12 @@ test('HarnessClient delegates command execution and normalizes Typert lookup fai
 
 test('Host command executor invokes the commands Typert endpoint with the Session identity', async () => {
   const requests = [];
-  const host = hostContext({ invoke: async (request) => {
-    requests.push(request);
-    return { commandId: 'command-one', result: { kind: 'success' } };
-  } });
-  const executor = createHarnessCommandExecutor(host.ctx);
+  const executor = createHarnessCommandExecutor({
+    typertGateway: { invoke: async (request) => {
+      requests.push(request);
+      return { commandId: 'command-one', result: { kind: 'success' } };
+    } },
+  });
   const signal = new AbortController().signal;
 
   assert.deepEqual(await executor('session-one', '/compact', { signal }), {
@@ -190,9 +159,7 @@ test('Host command executor invokes the commands Typert endpoint with the Sessio
     // Newer Harness descriptors require images even for plain commands.
     args: { agentId: 'session-one', line: '/compact', images: [] },
     signal,
-    peer: host.peers[0],
   }]);
-  assert.equal(host.peers.length, 1);
   assert.equal(createHarnessCommandExecutor({}), undefined);
   assert.throws(() => createHarnessCommandExecutor({}, 'invalid'), /must be a function/);
 });
@@ -201,16 +168,17 @@ test('compact executes once on older Harness after its gateway rejects the image
   const requests = [];
   let executions = 0;
   const signal = new AbortController().signal;
-  const host = hostContext({ invoke: async (request) => {
-    requests.push(request);
-    if (Object.hasOwn(request.args, 'images')) throw legacyImagesArgumentError();
-    executions += 1;
-    return {
-      commandId: 'command-one',
-      result: { kind: 'success', text: 'Compacted 5 history items (~200 tokens).' },
-    };
-  } });
-  const executor = createHarnessCommandExecutor(host.ctx);
+  const executor = createHarnessCommandExecutor({
+    typertGateway: { invoke: async (request) => {
+      requests.push(request);
+      if (Object.hasOwn(request.args, 'images')) throw legacyImagesArgumentError();
+      executions += 1;
+      return {
+        commandId: 'command-one',
+        result: { kind: 'success', text: 'Compacted 5 history items (~200 tokens).' },
+      };
+    } },
+  });
   const client = new HarnessClient({
     baseUrl: 'http://127.0.0.1:1', workspace: '/tmp', commandExecutor: executor,
   });
@@ -222,12 +190,10 @@ test('compact executes once on older Harness after its gateway rejects the image
     {
       namespace: 'commands', method: 'execute',
       args: { agentId: 'session-one', line: '/compact', images: [] }, signal,
-      peer: host.peers[0],
     },
     {
       namespace: 'commands', method: 'execute',
       args: { agentId: 'session-one', line: '/compact' }, signal,
-      peer: host.peers[0],
     },
   ]);
 });
@@ -245,8 +211,9 @@ test('Host command executor never retries other gateway or business failures', a
     new Error('compaction failed after starting'),
   ]) {
     let attempts = 0;
-    const host = hostContext({ invoke: async () => { attempts += 1; throw failure; } });
-    const executor = createHarnessCommandExecutor(host.ctx);
+    const executor = createHarnessCommandExecutor({
+      typertGateway: { invoke: async () => { attempts += 1; throw failure; } },
+    });
     await assert.rejects(executor('session-one', '/compact'), (error) => error === failure);
     assert.equal(attempts, 1);
   }
@@ -258,15 +225,14 @@ test('compact adapts to submittedAttachments descriptors and never retries dispa
   for (const failure of [null, new Error('compaction failed after starting')]) {
     const requests = [];
     let executions = 0;
-    const host = hostContext({ invoke: async (request) => {
+    const executor = createHarnessCommandExecutor({ typertGateway: { invoke: async (request) => {
       requests.push(request);
       if (Object.hasOwn(request.args, 'images')) throw mismatch();
       assert.deepEqual(request.args, { agentId: 'session-one', line: '/compact', submittedAttachments: [] });
       executions += 1;
       if (failure) throw failure;
       return { commandId: 'compact-one', result: { kind: 'success', text: 'Compacted 2 history items (~40 tokens).' } };
-    } });
-    const executor = createHarnessCommandExecutor(host.ctx);
+    } } });
     if (failure) await assert.rejects(executor('session-one', '/compact'), (error) => error === failure);
     else assert.equal((await executor('session-one', '/compact')).result.kind, 'success');
     assert.equal(executions, 1);
@@ -274,12 +240,11 @@ test('compact adapts to submittedAttachments descriptors and never retries dispa
   }
   const controller = new AbortController();
   let attempts = 0;
-  const host = hostContext({ invoke: async () => {
+  const executor = createHarnessCommandExecutor({ typertGateway: { invoke: async () => {
     attempts += 1;
     controller.abort();
     throw mismatch();
-  } });
-  const executor = createHarnessCommandExecutor(host.ctx);
+  } } });
   await assert.rejects(executor('session-one', '/compact', { signal: controller.signal }), (error) => error === controller.signal.reason);
   assert.equal(attempts, 1);
 });
@@ -287,24 +252,26 @@ test('compact adapts to submittedAttachments descriptors and never retries dispa
 test('Host command executor does not repeat a failed legacy invocation', async () => {
   let attempts = 0;
   const failure = new Error('compaction failed after starting');
-  const host = hostContext({ invoke: async () => {
-    attempts += 1;
-    if (attempts === 1) throw legacyImagesArgumentError();
-    throw failure;
-  } });
-  const executor = createHarnessCommandExecutor(host.ctx);
+  const executor = createHarnessCommandExecutor({
+    typertGateway: { invoke: async () => {
+      attempts += 1;
+      if (attempts === 1) throw legacyImagesArgumentError();
+      throw failure;
+    } },
+  });
   await assert.rejects(executor('session-one', '/compact'), (error) => error === failure);
   assert.equal(attempts, 2);
 });
 
 test('Host command executor preserves an unresolved command on the legacy endpoint', async () => {
   let attempts = 0;
-  const host = hostContext({ invoke: async () => {
-    attempts += 1;
-    if (attempts === 1) throw legacyImagesArgumentError();
-    return undefined;
-  } });
-  const executor = createHarnessCommandExecutor(host.ctx);
+  const executor = createHarnessCommandExecutor({
+    typertGateway: { invoke: async () => {
+      attempts += 1;
+      if (attempts === 1) throw legacyImagesArgumentError();
+      return undefined;
+    } },
+  });
   assert.equal(await executor('session-one', '/compact'), undefined);
   assert.equal(attempts, 2);
 });
@@ -312,12 +279,13 @@ test('Host command executor preserves an unresolved command on the legacy endpoi
 test('Host command executor honours cancellation before retrying the legacy endpoint', async () => {
   let attempts = 0;
   const controller = new AbortController();
-  const host = hostContext({ invoke: async () => {
-    attempts += 1;
-    controller.abort();
-    throw legacyImagesArgumentError();
-  } });
-  const executor = createHarnessCommandExecutor(host.ctx);
+  const executor = createHarnessCommandExecutor({
+    typertGateway: { invoke: async () => {
+      attempts += 1;
+      controller.abort();
+      throw legacyImagesArgumentError();
+    } },
+  });
   await assert.rejects(
     executor('session-one', '/compact', { signal: controller.signal }),
     (error) => error === controller.signal.reason,

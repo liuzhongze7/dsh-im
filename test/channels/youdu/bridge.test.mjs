@@ -67,6 +67,8 @@ async function committedArtifact(t, fileName, content) {
       ],
     },
   };
+  t.after(registry.openConsumer(agent.session.header.id, 'artifact-rpc'));
+  for (const event of agent.session.events) registry.observeSessionEvent(agent.session, event);
   const tool = createOutboundArtifactTool({ registry });
   const exec = {
     name: OUTBOUND_ARTIFACT_TOOL,
@@ -344,7 +346,10 @@ test('a failed text reply still delivers the generated result file', async (t) =
 
   assert.equal(delivered.length, 1, 'the result file must still be sent when the text reply fails');
   assert.equal(delivered[0].kind, 'file');
-  assert.match(String(bridge.status.lastError), /ack timeout/);
+  // The status mirrors the message the sender was shown, so a report back to the
+  // administrator carries the same reference id the reply quoted.
+  assert.equal(bridge.status.lastError, bridge.status.lastMessageError.message);
+  assert.match(String(bridge.status.lastMessageError.referenceId), /^MF-[A-Z0-9]{8}$/);
 });
 
 // 桌面端不保存宿主 stdout：失败现场必须自己落盘，否则用户报回来的参考号无从反查。
