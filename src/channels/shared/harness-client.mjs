@@ -1433,6 +1433,21 @@ export class HarnessClient {
   }
 
   /**
+   * Read the latest folded title of one Session through the list projection.
+   * Returns null while the Session has no accepted title yet.
+   */
+  async sessionTitleOf(sessionId, options = {}) {
+    if (typeof sessionId !== 'string' || !sessionId) throw new TypeError('sessionId is required');
+    const value = await this.rpc('session.list', {}, 30_000, options);
+    if (!value || typeof value !== 'object' || !Array.isArray(value.items)) {
+      throw new HarnessTransportError('harness-response-invalid', 'session.list');
+    }
+    const item = value.items.find((entry) => entry && entry.sessionId === sessionId);
+    const title = item?.projections?.values?.title;
+    return typeof title === 'string' && title.trim() !== '' ? title.trim() : null;
+  }
+
+  /**
    * Branch a Session at the latest completed turn (or atSeq when given). The
    * Host answers with the child session id; a Session with no completed turn is
    * reported as fork-unavailable. Throws harness-api-not-found when the Host

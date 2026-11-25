@@ -392,6 +392,45 @@ export class YouduBridge {
     }, { logger: this.#logger });
   }
 
+  /** The readable name of the Youdu conversation a message arrived in. */
+  #conversationName(message) {
+    const chatId = typeof message?.chatId === 'string' ? message.chatId : '';
+    const state = typeof this.#state?.snapshot === 'function' ? this.#state.snapshot() : null;
+    if (message?.kind === 'group') {
+      return clean(state?.groups?.[chatId]?.name)
+        ?? clean(state?.titles?.[chatId])
+        ?? clean(message?.chatName)
+        ?? chatId;
+    }
+    const person = state?.people?.[chatId];
+    return clean(person?.name)
+      ?? clean(person?.account)
+      ?? clean(message?.senderName)
+      ?? chatId;
+  }
+
+  /**
+   * 把新会话的标题默认写成「有度会话名 · 当前标题」。
+   *
+   * 宿主把显式标题当作 pinning：写入后自动标题不再更新，所以只在会话刚创建、
+   * 标题已经产生时补一次前缀，之后交给宿主（或用户自己 /title）决定。
+   * 读不到标题、宿主不支持改名都只记日志，不影响回复投递。
+   */
+  async #nameSession(sessionId, message) {
+    const label = this.#conversationName(message);
+    if (!label) return;
+    try {
+      const current = await this.#harness.sessionTitleOf?.(sessionId, { signal: this.#signal });
+      if (!current || current.startsWith(`${label} · `) || current === label) return;
+      await this.#harness.renameSession(sessionId, `${label} · ${current}`, { signal: this.#signal });
+    } catch (error) {
+      this.#logger.warn?.(
+        `[dsh-im:youdu] unable to name the session "${sessionId}":`,
+        error?.message ?? error,
+      );
+    }
+  }
+
   /** 处理一条入站消息帧；返回 Promise（入队串行，防止并发写会话）。 */
   accept(frame) {
     if (this.#signal?.aborted) return Promise.resolve();
@@ -1211,6 +1250,8 @@ export class YouduBridge {
       let answer;
       let artifacts = [];
       let boundKbSessionId = null;
+      const hadSession = Boolean(this.#state.sessionFor(key));
+      let boundSessionId = null;
       // 群聊上下文：取快照并拼在正文之前，回合结束后消费掉这份快照。
       const groupHistory = await this.#pendingGroupHistory(message, key);
       if (groupHistory) {
@@ -1229,6 +1270,7 @@ export class YouduBridge {
           onSessionReady: (binding) => {
             // 新会话已经绑定：登记这个会话的出站路由，DSH 侧的显式发送才有目标。
             this.#bindSessionOutbound(key, message);
+            boundSessionId = binding.sessionId;
             if (!this.#kbAccount) return;
             boundKbSessionId = binding.sessionId;
             bindYouduKbRunContext(binding.sessionId, buildYouduKbRunContext(this.#kbAccount, message));
@@ -1253,6 +1295,8 @@ export class YouduBridge {
         if (boundKbSessionId) releaseYouduKbRunContext(boundKbSessionId);
         this.#consumeGroupHistory(groupHistory);
       }
+      // 新会话的标题默认带上「有度会话名 · DSH 摘要」，方便在会话列表里认出是谁。
+      if (!hadSession && boundSessionId) await this.#nameSession(boundSessionId, message);
       if (batchSubmission) {
         this.#batchInputs.complete(key, batchSubmission.token);
         batchSettled = true;

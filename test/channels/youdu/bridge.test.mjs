@@ -398,3 +398,49 @@ test('a failed inbound message leaves a record keyed by its reference id', async
   assert.equal(record.context.messageId, 'fail-1');
   assert.equal(record.context.senderId, 'owner-1');
 });
+test('a new youdu conversation names its session with the sender and the host title', async () => {
+  const { state } = stateFixture();
+  const sent = [];
+  const renames = [];
+  const harness = baseHarness({
+    createSession: async () => 'session-new',
+    sessionTitleOf: async () => '你好你是谁',
+    renameSession: async (sessionId, title) => { renames.push({ sessionId, title }); },
+  });
+  const bridge = new YouduBridge({ bot: makeBot(sent), harness, state, ownerUserId: '*', botId: 'bot-1' });
+
+  await bridge.accept(frame('name-1', '你好你是谁', { from: { userId: 'u-1', name: '刘钟泽' } }));
+
+  assert.deepEqual(renames, [{ sessionId: 'session-new', title: '刘钟泽 · 你好你是谁' }]);
+  assert.equal(sent.at(-1)?.text, 'mock answer');
+});
+
+test('an existing youdu conversation leaves the session title it already has', async () => {
+  const { state } = stateFixture([['direct:owner-1', 'session-old']]);
+  const sent = [];
+  const harness = baseHarness({
+    sessionTitleOf: async () => { throw new Error('the title of an existing session must not be read'); },
+    renameSession: async () => { throw new Error('an existing session must not be renamed'); },
+  });
+  const bridge = new YouduBridge({ bot: makeBot(sent), harness, state, ownerUserId: '*', botId: 'bot-1' });
+
+  await bridge.accept(frame('name-2', '第二条'));
+
+  assert.equal(sent.at(-1)?.text, 'mock answer');
+});
+
+test('a session title that already carries the conversation name stays untouched', async () => {
+  const { state } = stateFixture();
+  const sent = [];
+  const renames = [];
+  const harness = baseHarness({
+    createSession: async () => 'session-new',
+    sessionTitleOf: async () => '刘钟泽 · 你好',
+    renameSession: async (sessionId, title) => { renames.push({ sessionId, title }); },
+  });
+  const bridge = new YouduBridge({ bot: makeBot(sent), harness, state, ownerUserId: '*', botId: 'bot-1' });
+
+  await bridge.accept(frame('name-3', '你好', { from: { userId: 'u-1', name: '刘钟泽' } }));
+
+  assert.deepEqual(renames, []);
+});
